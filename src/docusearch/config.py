@@ -28,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from . import __version__
+from ._version import __version__
 
 DEFAULT_CONFIG_PATH = Path("docusearch.yaml")
 
