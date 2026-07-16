@@ -38,14 +38,27 @@ class SearchHit:
     images: list[str] = field(default_factory=list)
 
 
+_MAX_TERMS = 64
+
+
 def sanitize_query(text: str, *, prefix: bool = False) -> str:
     """Turn arbitrary user text into a safe FTS5 MATCH string.
 
     Each word becomes a quoted literal term (neutralizing FTS operators and punctuation)
     and terms are implicitly AND-ed. With ``prefix=True`` each term also matches by
     prefix (``"term"*``) — used by the partial/misspelled-needle suite (§15.2).
+
+    Duplicate terms are dropped and the term count is capped (``_MAX_TERMS``) so a
+    pathologically long or repetitive query cannot cost O(n^2) in FTS (red-team Finding 2).
     """
-    terms = _TOKEN.findall(text.lower())
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term in _TOKEN.findall(text.lower()):
+        if term not in seen:
+            seen.add(term)
+            terms.append(term)
+            if len(terms) >= _MAX_TERMS:
+                break
     if not terms:
         return ""
     suffix = "*" if prefix else ""

@@ -114,3 +114,61 @@ def test_whitespace_collapsed_in_body() -> None:
     doc = ingest.extract_html("<body><p>a   lot\n\nof   space</p></body>")
     body = next(s for s in doc.segments if s.kind == "body")
     assert body.text == "a lot of space"
+
+
+# --- regression tests for the red-team Finding 1 (content loss/gluing) ---
+
+
+def _all_body(doc: ingest.ExtractedDoc) -> str:
+    return " ".join(s.text for s in doc.segments if s.kind == "body")
+
+
+def test_inline_synopsis_div_text_is_captured() -> None:
+    # PHP method-synopsis markup: a <div> whose children are only inline <span>/<strong>.
+    html = (
+        "<body><h1>Method</h1>"
+        '<div class="methodsynopsis dc-description">'
+        '<span class="modifier">public</span> <span class="modifier">function</span> '
+        '<span class="methodname"><strong>Gmagick::getimagegamma</strong></span>(): '
+        '<span class="type"><a href="float.html">float</a></span></div></body>'
+    )
+    text = _all_body(ingest.extract_html(html))
+    assert "public" in text
+    assert "function" in text
+    assert "Gmagick::getimagegamma" in text
+    assert "float" in text
+
+
+def test_no_gluing_across_element_boundaries() -> None:
+    # Nested TOC list: an <a> text immediately followed by a nested <ul> must not fuse.
+    html = (
+        "<body><ul><li><a href='ref.html'>GnuPG Functions</a>"
+        "<ul><li><a href='a.html'>gnupg_adddecryptkey</a> — Add a key for decryption</li>"
+        "<li><a href='b.html'>gnupg_addencryptkey</a> — Add a key for encryption</li>"
+        "</ul></li></ul></body>"
+    )
+    text = _all_body(ingest.extract_html(html))
+    assert "Functionsgnupg" not in text  # not glued
+    assert "decryptiongnupg" not in text  # not glued
+    assert "gnupg_adddecryptkey" in text
+    assert "gnupg_addencryptkey" in text
+
+
+def test_mixed_inline_and_block_direct_text_captured() -> None:
+    html = "<body><div>intro words here <p>a paragraph</p> trailing words here</div></body>"
+    text = _all_body(ingest.extract_html(html))
+    assert "intro words here" in text
+    assert "a paragraph" in text
+    assert "trailing words here" in text
+
+
+def test_bare_div_and_inline_code_captured() -> None:
+    html = (
+        "<body><div>just some bare text</div>"
+        '<div class="classsynopsisinfo"><code>readonly</code> <code>public</code> '
+        "int <var>Foo::endcolumn</var></div></body>"
+    )
+    text = _all_body(ingest.extract_html(html))
+    assert "just some bare text" in text
+    assert "readonly" in text
+    assert "Foo::endcolumn" in text

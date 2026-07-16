@@ -53,6 +53,23 @@ def test_empty_query_returns_empty(store: Store) -> None:
     assert search.bm25_search(store, "!!!", top_k=10) == []
 
 
+def test_sanitizer_dedupes_and_caps_terms() -> None:
+    # repeated terms collapse to one (guards O(n^2), red-team Finding 2)
+    assert search.sanitize_query("the the the the") == '"the"'
+    # distinct terms are capped
+    many = " ".join(f"w{i}" for i in range(500))
+    assert search.sanitize_query(many).count('"') == 2 * search._MAX_TERMS
+
+
+def test_pathological_query_is_fast(store: Store) -> None:
+    import time
+
+    huge = "the " * 20000
+    t0 = time.perf_counter()
+    search.bm25_search(store, huge, top_k=10)
+    assert time.perf_counter() - t0 < 1.0  # deduped to a single term, no O(n^2) hang
+
+
 def test_prefix_matches_partial_nonce(store: Store) -> None:
     assert not search.bm25_search(store, "ZQX773", top_k=10)  # exact term miss
     hits = search.bm25_search(store, "ZQX773", top_k=10, prefix=True)

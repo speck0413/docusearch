@@ -37,8 +37,49 @@ from .store import Store
 _HASH_BLOCK = 1 << 20
 
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-_TEXT_BLOCKS = {"p", "li", "dd", "dt", "blockquote", "figcaption", "caption", "address", "summary"}
 _SKIP = {"script", "style", "template", "svg", "math", "noscript"}
+# Block-level tags: an element with NO block-level element child is a "leaf block" whose
+# text is emitted whole (with a separator so inline children never glue); an element WITH
+# a block child is a container we recurse into (buffering its own inline/text runs).
+# Everything not listed here is treated as inline. pre/table/figure/img are special-cased.
+_BLOCK = _HEADINGS | {
+    "html",
+    "body",
+    "pre",
+    "table",
+    "figure",
+    "img",
+    "div",
+    "section",
+    "article",
+    "main",
+    "header",
+    "footer",
+    "aside",
+    "nav",
+    "p",
+    "ul",
+    "ol",
+    "dl",
+    "li",
+    "dd",
+    "dt",
+    "blockquote",
+    "form",
+    "fieldset",
+    "details",
+    "summary",
+    "address",
+    "hr",
+    "figcaption",
+    "tbody",
+    "thead",
+    "tfoot",
+    "tr",
+    "td",
+    "th",
+    "caption",
+}
 
 
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -179,8 +220,13 @@ def _push_heading(stack: list[tuple[int, str]], level: int, text: str) -> None:
 
 def _linearize_table(node: Node) -> str:
     rows: list[str] = []
+    caption = node.css_first("caption")
+    if caption is not None:
+        cap = _clean(caption.text(separator=" "))
+        if cap:
+            rows.append(cap)
     for tr in node.css("tr"):
-        cells = [_clean(cell.text()) for cell in tr.css("td, th")]
+        cells = [_clean(cell.text(separator=" ")) for cell in tr.css("td, th")]
         if any(cells):
             rows.append(" | ".join(cells))
     return "\n".join(rows)
@@ -212,6 +258,19 @@ def _collect_links_images(node: Node, heading_path: str, doc: ExtractedDoc) -> N
         _add_image(img, heading_path, doc)
 
 
+def _has_block_child(node: Node) -> bool:
+    for child in node.iter(include_text=False):
+        ct = child.tag
+        if ct and ct.lower() in _BLOCK:
+            return True
+    return False
+
+
+def _emit_body(doc: ExtractedDoc, text: str, heading_path: str) -> None:
+    if text:
+        doc.segments.append(Segment("body", text, heading_path))
+
+
 def _walk(node: Node, stack: list[tuple[int, str]], doc: ExtractedDoc) -> None:
     tag = node.tag
     if not tag or tag.startswith("_") or tag == "-text":
@@ -221,57 +280,66 @@ def _walk(node: Node, stack: list[tuple[int, str]], doc: ExtractedDoc) -> None:
         return
 
     if tag in _HEADINGS:
-        text = _clean(node.text())
+        text = _clean(node.text(separator=" "))
         _push_heading(stack, int(tag[1]), text)
-        if text:
-            doc.segments.append(Segment("body", text, _heading_path(stack)))
+        _emit_body(doc, text, _heading_path(stack))
         return
 
-    hp = _heading_path(stack)
-
-    if tag == "pre":
+    if tag == "pre":  # code: preserve exact whitespace (no separator injection)
         code = node.text().rstrip("\n")
         if code.strip():
-            doc.segments.append(Segment("code", code, hp))
-        _collect_links_images(node, hp, doc)
+            doc.segments.append(Segment("code", code, _heading_path(stack)))
+        _collect_links_images(node, _heading_path(stack), doc)
         return
 
     if tag == "table":
         text = _linearize_table(node)
         if text:
-            doc.segments.append(Segment("table", text, hp))
-        _collect_links_images(node, hp, doc)
+            doc.segments.append(Segment("table", text, _heading_path(stack)))
+        _collect_links_images(node, _heading_path(stack), doc)
         return
 
     if tag == "figure":
         cap_node = node.css_first("figcaption")
-        caption = _clean(cap_node.text()) if cap_node else ""
+        caption = _clean(cap_node.text(separator=" ")) if cap_node else ""
         for img in node.css("img"):
-            _add_image(img, hp, doc, caption=caption)
-        if caption:
-            doc.segments.append(Segment("body", caption, hp))
+            _add_image(img, _heading_path(stack), doc, caption=caption)
+        _emit_body(doc, caption, _heading_path(stack))
         return
 
     if tag == "img":
-        _add_image(node, hp, doc)
+        _add_image(node, _heading_path(stack), doc)
         return
 
-    if tag in _TEXT_BLOCKS:
-        text = _clean(node.text())
-        if text:
-            doc.segments.append(Segment("body", text, hp))
-        _collect_links_images(node, hp, doc)
+    # Leaf block: no block-level element child -> emit its whole text with a separator so
+    # inline children (span/code/strong/a) never glue together (red-team Finding 1).
+    if not _has_block_child(node):
+        _emit_body(doc, _clean(node.text(separator=" ")), _heading_path(stack))
+        _collect_links_images(node, _heading_path(stack), doc)
         return
 
-    if tag == "a":
-        _add_link(node, doc)
-        text = _clean(node.text())
-        if text:
-            doc.segments.append(Segment("body", text, hp))
-        return
+    # Container with block children: emit its own inline/text runs, recurse block children.
+    parts: list[str] = []
 
-    for child in node.iter(include_text=False):
-        _walk(child, stack, doc)
+    def _flush() -> None:
+        _emit_body(doc, _clean(" ".join(parts)), _heading_path(stack))
+        parts.clear()
+
+    for child in node.iter(include_text=True):
+        ctag = child.tag
+        if ctag == "-text":
+            parts.append(child.text() or "")
+        elif not ctag or ctag.startswith("_") or ctag.lower() in _SKIP:
+            continue
+        elif ctag.lower() in _BLOCK:
+            _flush()
+            _walk(child, stack, doc)
+        else:  # inline element: keep its text with the current run, capture its links/images
+            parts.append(child.text(separator=" "))
+            if ctag.lower() == "a":
+                _add_link(child, doc)
+            _collect_links_images(child, _heading_path(stack), doc)
+    _flush()
 
 
 def extract_html(
@@ -314,9 +382,7 @@ def extract_html(
 
     doc = ExtractedDoc(title=title, content_selector_matched=matched)
     if root is not None:
-        stack: list[tuple[int, str]] = []
-        for child in root.iter(include_text=False):
-            _walk(child, stack, doc)
+        _walk(root, [], doc)
     return doc
 
 
