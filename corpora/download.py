@@ -63,11 +63,11 @@ CORPORA: tuple[CorpusSpec, ...] = (
     CorpusSpec(
         name="python",
         kind="zip",
-        url="https://docs.python.org/3/archives/python-3.13-docs-html.zip",
+        url="https://www.python.org/ftp/python/doc/3.13.1/python-3.13.1-docs-html.zip",
         license="PSF",
         fmt="html",
-        note="Official python.org HTML docs zip. Volume top-up. Update the version "
-        "in the URL to the current stable release.",
+        note="Official python.org HTML docs zip (FTP mirror). Volume top-up. Bump the "
+        "version in the URL to the current stable release.",
     ),
     CorpusSpec(
         name="rust",
@@ -148,22 +148,24 @@ def render_manifest(entries: Iterable[ManifestEntry]) -> str:
     return "\n".join(lines)
 
 
+def _source_label(spec: CorpusSpec) -> str:
+    return spec.url or (" ".join(spec.command) if spec.command else "(manual)")
+
+
+def _skeleton_entry(spec: CorpusSpec) -> ManifestEntry:
+    return ManifestEntry(
+        name=spec.name,
+        license=spec.license,
+        source=_source_label(spec),
+        files=0,
+        sha256="",
+        status="not downloaded",
+    )
+
+
 def _skeleton_entries() -> list[ManifestEntry]:
     """Manifest rows before anything is downloaded (Phase 0 state)."""
-    entries: list[ManifestEntry] = []
-    for spec in CORPORA:
-        source = spec.url or (" ".join(spec.command) if spec.command else "(manual)")
-        entries.append(
-            ManifestEntry(
-                name=spec.name,
-                license=spec.license,
-                source=source,
-                files=0,
-                sha256="",
-                status="not downloaded",
-            )
-        )
-    return entries
+    return [_skeleton_entry(spec) for spec in CORPORA]
 
 
 def write_manifest(entries: Iterable[ManifestEntry], path: Path = MANIFEST_PATH) -> None:
@@ -206,7 +208,21 @@ def fetch(spec: CorpusSpec, dest: Path) -> ManifestEntry:
         return ManifestEntry(
             spec.name, spec.license, source, _count_files(target, spec.file_glob), sha, "ready"
         )
-    if spec.kind in {"rustup", "git"}:
+    if spec.kind == "rustup":
+        subprocess.run(spec.command, check=True)  # idempotent: no-op if already present
+        sysroot = subprocess.run(
+            ["rustc", "--print", "sysroot"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        html = Path(sysroot) / "share" / "doc" / "rust" / "html"
+        if not html.is_dir():
+            raise FileNotFoundError(f"rust docs not found at {html}")
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(html, target)
+        return ManifestEntry(
+            spec.name, spec.license, source, _count_files(target, spec.file_glob), "", "ready"
+        )
+    if spec.kind == "git":
         subprocess.run(spec.command, check=True, cwd=str(dest))
         return ManifestEntry(
             spec.name, spec.license, source, _count_files(target, spec.file_glob), "", "ready"
@@ -241,7 +257,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     wanted = {n.strip() for n in args.only.split(",") if n.strip()}
     entries: list[ManifestEntry] = []
     for spec in CORPORA:
-        if wanted and spec.name not in wanted:
+        if (wanted and spec.name not in wanted) or spec.kind == "manual":
+            entries.append(_skeleton_entry(spec))  # keep the manifest complete
             continue
         print(f"fetching {spec.name} ({spec.kind}) ...", file=sys.stderr)
         entries.append(fetch(spec, dest))
