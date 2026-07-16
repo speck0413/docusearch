@@ -106,6 +106,10 @@ def _cmd_search(args: argparse.Namespace) -> int:
     hits = Catalog(cfg).search(args.query, top_k=args.top_k, prefix=args.prefix)
     if not hits:
         print("No results.")
+    else:
+        mode = hits[0].search_mode
+        model = hits[0].embed_model_used
+        print(f"({mode} search; embed_model={model})")
     for i, hit in enumerate(hits, 1):
         print(f"{i}. [{hit.citation}] {hit.title}  ({hit.locator})")
         print(f"   {hit.snippet}")

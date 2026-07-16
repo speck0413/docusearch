@@ -490,6 +490,7 @@ class Store:
         return self._conn.execute(
             "SELECT c.document_id AS doc_id, c.id AS chunk_id, c.kind AS kind, "
             "c.locator AS locator, d.title AS title, d.path AS path, d.fmt AS fmt, "
+            "d.audience AS audience, "
             "snippet(chunks_fts, 0, '', '', ' … ', 12) AS snippet, "
             "bm25(chunks_fts) AS bm25 "
             "FROM chunks_fts "
@@ -500,3 +501,18 @@ class Store:
             "LIMIT ?",
             (match, limit),
         ).fetchall()
+
+    def hydrate_chunks(self, chunk_ids: Sequence[int]) -> dict[int, sqlite3.Row]:
+        """Fetch chunk + owning-document fields for a set of chunk ids (hybrid fusion)."""
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = self._conn.execute(
+            "SELECT c.id AS chunk_id, c.document_id AS doc_id, c.kind AS kind, "
+            "c.locator AS locator, c.text AS text, d.title AS title, d.path AS path, "
+            "d.fmt AS fmt, d.audience AS audience "
+            "FROM chunks c JOIN documents d ON d.id = c.document_id "
+            f"WHERE c.id IN ({placeholders})",
+            tuple(chunk_ids),
+        ).fetchall()
+        return {int(r["chunk_id"]): r for r in rows}

@@ -699,6 +699,19 @@ def run_ingest(
         embed_start = time.perf_counter()
         result.embedded = _embed_chunks(store, prov, config.embed.batch_size)
         result.timings_ms["embed"] = (time.perf_counter() - embed_start) * 1000.0
+        # Build/refresh the ANN sidecar for file-backed indexes (§7.7). In-memory stores
+        # fall back to numpy brute-force at query time, so no sidecar is needed there.
+        db_path = config.paths.db_path
+        if config.index.ann and db_path != ":memory:" and store.count_embeddings() > 0:
+            from . import search
+
+            search.VectorIndex.build(
+                store,
+                prov.dim,
+                Path(db_path).with_suffix(".hnsw"),
+                m=config.index.ann_m,
+                ef_construction=config.index.ann_ef_construction,
+            )
 
     result.timings_ms["total"] = (time.perf_counter() - start) * 1000.0
     runlog.log(
