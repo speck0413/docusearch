@@ -27,6 +27,10 @@ if TYPE_CHECKING:
     from .config import EmbedConfig
 
 
+class EmbedError(Exception):
+    """Embedding provenance problem (e.g. re-indexing with a different model)."""
+
+
 @runtime_checkable
 class EmbedProvider(Protocol):
     """Anything that turns texts into L2-normalized float32 vectors, tagged by model."""

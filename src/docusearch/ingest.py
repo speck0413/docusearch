@@ -30,8 +30,9 @@ from pathlib import Path
 
 from selectolax.parser import HTMLParser, Node
 
-from . import runlog
+from . import embed, runlog
 from .config import Config, SourceConfig
+from .embed import EmbedProvider
 from .store import Store
 
 _HASH_BLOCK = 1 << 20
@@ -470,6 +471,7 @@ class IngestResult:
     parse_errors: int = 0
     documents: int = 0
     chunks: int = 0
+    embedded: int = 0
     images: int = 0
     relations_total: int = 0
     relations_resolved: int = 0
@@ -625,8 +627,54 @@ def _resolve_links(store: Store) -> None:
                 store.set_relation_dst(rel_id, dst)
 
 
-def run_ingest(config: Config, store: Store, *, force: bool = False) -> IngestResult:
-    """Ingest every configured source into the store and return an audit result (§7)."""
+def _embed_chunks(store: Store, provider: EmbedProvider, batch_size: int) -> int:
+    """Batch-embed every chunk that lacks a vector and store it, tagged by model (§7.7).
+
+    Only un-embedded chunks are processed, so incremental re-ingest embeds just the new
+    chunks. Refuses to mix models in one index (R-EMB-2/3): a store already embedded by a
+    different model must be re-indexed fresh.
+    """
+    pending = store.chunks_without_embeddings()
+    if not pending:
+        return 0
+    existing_model = store.get_meta("embed_model")
+    if existing_model is not None and existing_model != provider.model_id:
+        raise embed.EmbedError(
+            f"index was embedded with {existing_model!r} but the configured model is "
+            f"{provider.model_id!r}. Re-index fresh (delete the db) to switch models."
+        )
+    dim = provider.dim
+    embedded = 0
+    for start in range(0, len(pending), batch_size):
+        batch = pending[start : start + batch_size]
+        vectors = provider.embed([text for _, text in batch])
+        rows = [
+            (chunk_id, provider.model_id, dim, embed.to_blob(vectors[i]))
+            for i, (chunk_id, _) in enumerate(batch)
+        ]
+        store.add_embeddings(rows)
+        embedded += len(rows)
+    store.set_meta("embed_model", provider.model_id)
+    store.set_meta("embed_dim", str(dim))
+    return embedded
+
+
+_FROM_CONFIG: EmbedProvider | None = object()  # type: ignore[assignment]
+
+
+def run_ingest(
+    config: Config,
+    store: Store,
+    *,
+    force: bool = False,
+    provider: EmbedProvider | None = _FROM_CONFIG,
+) -> IngestResult:
+    """Ingest every configured source into the store and return an audit result (§7).
+
+    ``provider`` defaults to whatever ``embed.model`` selects (None => BM25-only,
+    R-CFG-4); pass an explicit provider to override (used by tests/harness).
+    """
+    prov = embed.make_provider(config.embed) if provider is _FROM_CONFIG else provider
     result = IngestResult()
     start = time.perf_counter()
     for source in config.sources:
@@ -646,11 +694,18 @@ def run_ingest(config: Config, store: Store, *, force: bool = False) -> IngestRe
     result.relations_total = store.count_relations()
     result.relations_resolved = store.count_resolved_relations()
     result.relations_unresolved = result.relations_total - result.relations_resolved
+
+    if prov is not None:  # embed at index time unless embed.model: none (R-CFG-4)
+        embed_start = time.perf_counter()
+        result.embedded = _embed_chunks(store, prov, config.embed.batch_size)
+        result.timings_ms["embed"] = (time.perf_counter() - embed_start) * 1000.0
+
     result.timings_ms["total"] = (time.perf_counter() - start) * 1000.0
     runlog.log(
         "ingest.done",
         documents=result.documents,
         chunks=result.chunks,
+        embedded=result.embedded,
         images=result.images,
         skipped_unchanged=result.skipped_unchanged,
         stripped_empty=result.stripped_empty,
@@ -687,6 +742,7 @@ def render_ingest_audit(result: IngestResult, *, run_id: str = "") -> str:
         f"- documents ingested this run: **{result.documents}**",
         f"- skipped (unchanged hash): **{result.skipped_unchanged}**",
         f"- chunks written: **{result.chunks}**",
+        f"- chunks embedded: **{result.embedded}**",
         f"- images retained: **{result.images}**",
         "",
         "## Relations (cross-references)",

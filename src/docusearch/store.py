@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -413,6 +414,35 @@ class Store:
 
     def count_images(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])
+
+    # -- embeddings (Phase 2) ----------------------------------------------------
+
+    def add_embeddings(self, rows: Sequence[tuple[int, str, int, bytes]]) -> None:
+        """Insert (chunk_id, model, dim, vector-blob) rows in one batch (R-EMB-2)."""
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO embeddings(chunk_id, model, dim, vector) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
+
+    def chunks_without_embeddings(self) -> list[tuple[int, str]]:
+        """(id, text) for chunks with no vector yet — the incremental embed worklist."""
+        rows = self._conn.execute(
+            "SELECT c.id, c.text FROM chunks c "
+            "LEFT JOIN embeddings e ON e.chunk_id = c.id "
+            "WHERE e.chunk_id IS NULL ORDER BY c.id"
+        ).fetchall()
+        return [(int(r[0]), str(r[1])) for r in rows]
+
+    def all_embeddings(self) -> list[tuple[int, bytes]]:
+        """(chunk_id, vector-blob) for every embedding, ordered by chunk id (ANN build)."""
+        rows = self._conn.execute(
+            "SELECT chunk_id, vector FROM embeddings ORDER BY chunk_id"
+        ).fetchall()
+        return [(int(r[0]), bytes(r[1])) for r in rows]
+
+    def count_embeddings(self) -> int:
+        return int(self._conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
 
     # -- document/audit read paths (Phase 1) -------------------------------------
 
