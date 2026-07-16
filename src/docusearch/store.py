@@ -317,3 +317,99 @@ class Store:
             "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rowid", (query,)
         ).fetchall()
         return [int(r[0]) for r in rows]
+
+    # -- ingest read/write paths (Phase 1) ---------------------------------------
+
+    def document_content_hash(self, path: str) -> str | None:
+        """The stored content hash for a path, or None if unseen (incremental skip)."""
+        row = self._conn.execute(
+            "SELECT content_hash FROM documents WHERE path=?", (path,)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def document_id_for_path(self, path: str) -> int | None:
+        row = self._conn.execute("SELECT id FROM documents WHERE path=?", (path,)).fetchone()
+        return None if row is None else int(row[0])
+
+    def delete_document(self, doc_id: int) -> None:
+        """Remove a document and everything it owns (for re-ingest of a changed file).
+
+        Incoming relations (other docs -> this one) are kept but reset to unresolved so
+        the link post-pass re-resolves them to the replacement document.
+        """
+        c = self._conn
+        with c:
+            c.execute(
+                "DELETE FROM embeddings WHERE chunk_id IN "
+                "(SELECT id FROM chunks WHERE document_id=?)",
+                (doc_id,),
+            )
+            c.execute(
+                "DELETE FROM flags WHERE doc_id=? OR chunk_id IN "
+                "(SELECT id FROM chunks WHERE document_id=?)",
+                (doc_id, doc_id),
+            )
+            c.execute("DELETE FROM chunks WHERE document_id=?", (doc_id,))
+            c.execute("DELETE FROM relations WHERE src_doc=?", (doc_id,))
+            c.execute("UPDATE relations SET dst_doc=NULL WHERE dst_doc=?", (doc_id,))
+            c.execute("DELETE FROM images WHERE doc_id=?", (doc_id,))
+            c.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+
+    def add_relation(
+        self, *, src_doc: int, dst_raw: str, link_type: str, confidence: float | None = None
+    ) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO relations(src_doc, dst_doc, dst_raw, link_type, confidence, created_at) "
+            "VALUES (?, NULL, ?, ?, ?, ?)",
+            (src_doc, dst_raw, link_type, confidence, _utcnow_iso()),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def set_relation_dst(self, relation_id: int, dst_doc: int) -> None:
+        self._conn.execute("UPDATE relations SET dst_doc=? WHERE id=?", (dst_doc, relation_id))
+        self._conn.commit()
+
+    def unresolved_relations(self) -> list[tuple[int, str, str]]:
+        """(relation_id, source document path, raw target) for every unresolved link."""
+        rows = self._conn.execute(
+            "SELECT r.id, d.path, r.dst_raw FROM relations r "
+            "JOIN documents d ON r.src_doc = d.id WHERE r.dst_doc IS NULL"
+        ).fetchall()
+        return [(int(r[0]), str(r[1]), str(r[2])) for r in rows]
+
+    def document_path_to_id(self) -> dict[str, int]:
+        rows = self._conn.execute("SELECT path, id FROM documents").fetchall()
+        return {str(r[0]): int(r[1]) for r in rows}
+
+    def add_image(
+        self,
+        *,
+        sha256: str,
+        ext: str,
+        doc_id: int,
+        locator: str,
+        alt: str,
+        caption: str,
+        num_bytes: int,
+    ) -> None:
+        """Record an image (dedup by content sha; originals live under staging)."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO images(sha256, ext, doc_id, locator, alt, caption, bytes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sha256, ext, doc_id, locator, alt, caption, num_bytes),
+        )
+        self._conn.commit()
+
+    def count_relations(self) -> int:
+        return int(self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0])
+
+    def count_resolved_relations(self) -> int:
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM relations WHERE dst_doc IS NOT NULL"
+            ).fetchone()[0]
+        )
+
+    def count_images(self) -> int:
+        return int(self._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])

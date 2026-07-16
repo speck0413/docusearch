@@ -19,11 +19,15 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from selectolax.parser import HTMLParser, Node
+
+from .config import Config, SourceConfig
+from .store import Store
 
 _HASH_BLOCK = 1 << 20
 
@@ -59,28 +63,44 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("^" + "".join(out) + "$")
 
 
+def _classify_files(
+    location: Path | str,
+    include: Sequence[str],
+    exclude: Sequence[str],
+) -> tuple[list[Path], int, int]:
+    """Sort files under ``location`` into (included, excluded_by_glob, other) for the audit.
+
+    A file matching any exclude glob is excluded; otherwise it is included if it matches
+    any include glob (an empty include list matches everything, R-ING-1); anything left
+    is "other" (present but not selected). Included files come back deterministically
+    sorted for reproducible ingest order.
+    """
+    root = Path(location)
+    inc = [_glob_to_regex(p) for p in include] or [re.compile(".*")]
+    exc = [_glob_to_regex(p) for p in exclude]
+    included: list[Path] = []
+    excluded_glob = 0
+    other = 0
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        if any(r.match(rel) for r in exc):
+            excluded_glob += 1
+        elif any(r.match(rel) for r in inc):
+            included.append(path)
+        else:
+            other += 1
+    return included, excluded_glob, other
+
+
 def iter_files(
     location: Path | str,
     include: Sequence[str],
     exclude: Sequence[str],
 ) -> Iterator[Path]:
-    """Yield files under ``location`` matching any include glob and no exclude glob.
-
-    Results are sorted for deterministic ingest order (needle/audit reproducibility).
-    An empty ``include`` list matches everything (R-ING-1).
-    """
-    root = Path(location)
-    inc = [_glob_to_regex(p) for p in include] or [re.compile(".*")]
-    exc = [_glob_to_regex(p) for p in exclude]
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root).as_posix()
-        if not any(r.match(rel) for r in inc):
-            continue
-        if any(r.match(rel) for r in exc):
-            continue
-        yield path
+    """Yield files under ``location`` matching any include glob and no exclude glob."""
+    return iter(_classify_files(location, include, exclude)[0])
 
 
 def content_hash(path: Path | str) -> str:
@@ -359,3 +379,201 @@ def chunk_document(doc: ExtractedDoc, *, chunk_tokens: int, overlap: int) -> lis
 
     close_group()
     return chunks
+
+
+# ----------------------------------------------------------------- orchestration
+
+_EXTERNAL_PREFIXES = ("http://", "https://", "ftp://", "mailto:", "javascript:", "tel:", "data:")
+
+
+@dataclass
+class IngestResult:
+    """Counts and audit data for one ingest run (§7.8) — the input to Gate 1."""
+
+    files_found: int = 0
+    included: int = 0
+    excluded_glob: int = 0
+    other_files: int = 0
+    skipped_unchanged: int = 0
+    stripped_empty: int = 0
+    parse_errors: int = 0
+    documents: int = 0
+    chunks: int = 0
+    images: int = 0
+    relations_total: int = 0
+    relations_resolved: int = 0
+    relations_unresolved: int = 0
+    content_selector_misses: int = 0
+    zero_chunk_docs: int = 0
+    untagged_audience_docs: int = 0
+    per_extension: dict[str, int] = field(default_factory=dict)
+    errors: list[tuple[str, str]] = field(default_factory=list)
+    timings_ms: dict[str, float] = field(default_factory=dict)
+
+
+def _resolve_local(raw: str, src_path: Path) -> Path | None:
+    """Resolve a raw href/src to a local path, or None if it is an external/data URL."""
+    target = raw.split("#", 1)[0].split("?", 1)[0].strip()
+    if not target or target.startswith("//") or target.lower().startswith(_EXTERNAL_PREFIXES):
+        return None
+    return (src_path.parent / target).resolve()
+
+
+def _stage_images(
+    doc: ExtractedDoc,
+    src_path: Path,
+    staging_dir: Path,
+    store: Store,
+    doc_id: int,
+    base_ord: int,
+    result: IngestResult,
+) -> int:
+    """Retain image originals (keyed by sha256) and add searchable image_ref chunks."""
+    images_dir = staging_dir / "images"
+    added = 0
+    for img in doc.images:
+        local = _resolve_local(img.src, src_path)
+        if local is not None and local.is_file():
+            data = local.read_bytes()
+            sha = hashlib.sha256(data).hexdigest()
+            ext = local.suffix.lstrip(".").lower() or "bin"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            dest = images_dir / f"{sha}.{ext}"
+            if not dest.exists():
+                dest.write_bytes(data)
+            store.add_image(
+                sha256=sha,
+                ext=ext,
+                doc_id=doc_id,
+                locator=img.heading_path,
+                alt=img.alt,
+                caption=img.caption,
+                num_bytes=len(data),
+            )
+            result.images += 1
+        text = " ".join(t for t in (img.alt, img.caption, img.heading_path) if t).strip()
+        if text:
+            store.add_chunk(
+                document_id=doc_id,
+                ord=base_ord + added,
+                text=text,
+                kind="image_ref",
+                locator=img.heading_path,
+            )
+            added += 1
+    return added
+
+
+def _ingest_file(
+    path: Path,
+    source: SourceConfig,
+    config: Config,
+    store: Store,
+    *,
+    force: bool,
+    result: IngestResult,
+) -> None:
+    ext = path.suffix.lstrip(".").lower() or "html"
+    result.per_extension[ext] = result.per_extension.get(ext, 0) + 1
+    abspath = path.resolve().as_posix()
+
+    file_hash = content_hash(path)
+    existing = store.document_content_hash(abspath)
+    if existing is not None and existing == file_hash and not force:
+        result.skipped_unchanged += 1
+        return
+    if existing is not None:
+        doc_id_old = store.document_id_for_path(abspath)
+        if doc_id_old is not None:
+            store.delete_document(doc_id_old)
+
+    try:
+        html = path.read_bytes().decode("utf-8", errors="replace")
+        doc = extract_html(
+            html,
+            content_selector=source.content_selector,
+            strip_selectors=source.strip_selectors,
+        )
+    except Exception as err:  # a genuinely unparseable file — reported, not fatal
+        result.parse_errors += 1
+        result.errors.append((abspath, f"{type(err).__name__}: {err}"))
+        return
+
+    if not doc.content_selector_matched:
+        result.content_selector_misses += 1
+    if doc.text_length < source.min_content_chars:
+        result.stripped_empty += 1
+        return
+    if not source.audience:
+        result.untagged_audience_docs += 1
+
+    doc_id = store.add_document(
+        path=abspath,
+        source=source.name,
+        title=doc.title,
+        content_hash=file_hash,
+        content_type="documentation",
+        fmt=ext,
+        audience=source.audience,
+        mtime=path.stat().st_mtime,
+        status="active",
+    )
+    result.documents += 1
+
+    chunks = chunk_document(
+        doc, chunk_tokens=config.index.chunk_tokens, overlap=config.index.chunk_overlap
+    )
+    for chunk in chunks:
+        store.add_chunk(
+            document_id=doc_id,
+            ord=chunk.ord,
+            text=chunk.text,
+            kind=chunk.kind,
+            locator=chunk.locator,
+        )
+    image_chunks = _stage_images(
+        doc, path, Path(config.paths.staging_dir), store, doc_id, len(chunks), result
+    )
+    total_chunks = len(chunks) + image_chunks
+    result.chunks += total_chunks
+    if total_chunks == 0:
+        result.zero_chunk_docs += 1
+
+    for link in doc.links:
+        store.add_relation(src_doc=doc_id, dst_raw=link.target, link_type=link.link_type)
+
+
+def _resolve_links(store: Store) -> None:
+    """Post-pass: resolve raw link targets to document ids now that all docs exist (R-ING-5)."""
+    path_to_id = store.document_path_to_id()
+    for rel_id, src_path, dst_raw in store.unresolved_relations():
+        local = _resolve_local(dst_raw, Path(src_path))
+        if local is not None:
+            dst = path_to_id.get(local.as_posix())
+            if dst is not None:
+                store.set_relation_dst(rel_id, dst)
+
+
+def run_ingest(config: Config, store: Store, *, force: bool = False) -> IngestResult:
+    """Ingest every configured source into the store and return an audit result (§7)."""
+    result = IngestResult()
+    start = time.perf_counter()
+    for source in config.sources:
+        root = Path(source.location)
+        if not root.is_dir():
+            result.errors.append((source.location, "source location not found"))
+            continue
+        included, excluded_glob, other = _classify_files(root, source.include, source.exclude)
+        result.files_found += len(included) + excluded_glob + other
+        result.included += len(included)
+        result.excluded_glob += excluded_glob
+        result.other_files += other
+        for path in included:
+            _ingest_file(path, source, config, store, force=force, result=result)
+
+    _resolve_links(store)
+    result.relations_total = store.count_relations()
+    result.relations_resolved = store.count_resolved_relations()
+    result.relations_unresolved = result.relations_total - result.relations_resolved
+    result.timings_ms["total"] = (time.perf_counter() - start) * 1000.0
+    return result
