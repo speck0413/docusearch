@@ -18,8 +18,11 @@ venv/
 coverage.xml
 htmlcov/
 
-# docusearch generated output — ALL generated output lands under tmp/ (CLAUDE.md)
-tmp/
+# docusearch generated output — ALL generated output lands under tmp/ (CLAUDE.md).
+# Exception: tmp/gates/ holds the gate files + evidence packs, which ARE the record
+# checked into the repo (§15.4), so they are tracked.
+tmp/*
+!tmp/gates/
 staging/
 catalog.db
 *.db-wal
