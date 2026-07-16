@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docusearch"
+version = "0.1.0"
+description = "Enterprise documentation catalog: local BM25 (+ optional vector) search over technical docs and code, with citations, relations, and an MCP/REST surface."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Stephen" }]
+
+# Runtime dependencies are added phase-by-phase (R-REUSE-1/4), each justified in
+# WORKLOG DECISIONS. Phase 0 needs exactly one: PyYAML (no stdlib YAML parser).
+dependencies = [
+  "pyyaml>=6.0,<7",
+]
+
+[project.scripts]
+docusearch = "docusearch.cli:main"
+
+[project.optional-dependencies]
+# Developer/validation tooling. Not required to run the package.
+dev = [
+  "ruff==0.14.0",
+  "mypy==1.20.0",
+  "pytest==9.0.2",
+  "pytest-cov==7.0.0",
+  "types-PyYAML==6.0.12.20250915",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/docusearch"]
+
+# ------------------------------------------------------------------ ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests", "harness", "corpora"]
+
+[tool.ruff.lint]
+# Sensible, low-ceremony rule set. E/F = pyflakes+pycodestyle, I = isort,
+# UP = pyupgrade, B = bugbear, SIM = simplify, PTH = prefer pathlib (R-ARCH-5).
+select = ["E", "F", "I", "UP", "B", "SIM", "PTH", "W"]
+ignore = ["E501"]  # line length handled by the formatter, not the linter
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PTH"]        # tests may use os.path / tmp_path freely
+"redteam/**" = ["PTH"]      # red team writes independent checks its own way
+
+# ------------------------------------------------------------------ mypy
+[tool.mypy]
+python_version = "3.11"
+packages = ["docusearch"]
+mypy_path = "src"
+strict = true
+warn_unreachable = true
+disallow_untyped_defs = true
+no_implicit_reexport = false  # __init__.py re-exports the public API (R-ARCH-2)
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
+
+# ------------------------------------------------------------------ pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+filterwarnings = ["error"]
+
+# ------------------------------------------------------------------ coverage
+[tool.coverage.run]
+branch = true
+source = ["docusearch"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+]

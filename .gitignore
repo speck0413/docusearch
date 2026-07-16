@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# docusearch generated output — ALL generated output lands under tmp/ (CLAUDE.md)
+tmp/
+staging/
+catalog.db
+*.db-wal
+*.db-shm
+*.hnsw
+
+# Downloaded corpora + models (large; not checked in — see corpora/MANIFEST.md)
+corpora/data/
+corpora/models/
+
+# OS noise
+.DS_Store
+Thumbs.db
