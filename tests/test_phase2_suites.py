@@ -30,7 +30,8 @@ def test_auto_qa_yaml_is_well_formed() -> None:
     qa = ob.load_qa(_ROOT / "harness" / "auto_qa.yaml")
     assert len(qa) >= 10
     for entry in qa:
-        assert {"id", "question", "expect_doc"} <= set(entry)
+        assert {"id", "question", "expect_docs"} <= set(entry)
+        assert isinstance(entry["expect_docs"], list) and entry["expect_docs"]
 
 
 def _bm25_corpus(tmp: Path) -> cfg.Config:
@@ -63,9 +64,9 @@ def test_evaluate_qa_bm25_and_negatives(tmp_path: Path) -> None:
             {
                 "id": "q1",
                 "question": "measure how long code takes to run",
-                "expect_doc": "timeit.html",
+                "expect_docs": ["timeit.html"],
             },
-            {"id": "q2", "question": "serialize object to text", "expect_doc": "json.html"},
+            {"id": "q2", "question": "serialize object to text", "expect_docs": ["json.html"]},
         ]
         total, hybrid_r, bm25_r, misses = ob.evaluate_qa(store, qa)
         assert total == 2

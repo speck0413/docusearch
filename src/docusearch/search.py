@@ -62,8 +62,10 @@ def sanitize_query(text: str, *, prefix: bool = False) -> str:
     """Turn arbitrary user text into a safe FTS5 MATCH string.
 
     Each word becomes a quoted literal term (neutralizing FTS operators and punctuation)
-    and terms are implicitly AND-ed. With ``prefix=True`` each term also matches by
-    prefix (``"term"*``). Duplicate terms are dropped and the count is capped
+    joined with **OR**, so a natural-language query retrieves documents matching *any*
+    term, ranked by BM25 (docs matching more/rarer terms rank higher) — matching all
+    terms (AND) is too strict for real questions. With ``prefix=True`` each term also
+    matches by prefix (``"term"*``). Duplicate terms are dropped and the count is capped
     (``_MAX_TERMS``) so a long/repetitive query cannot cost O(n^2) in FTS.
     """
     seen: set[str] = set()
@@ -77,7 +79,7 @@ def sanitize_query(text: str, *, prefix: bool = False) -> str:
     if not terms:
         return ""
     suffix = "*" if prefix else ""
-    return " ".join(f'"{term}"{suffix}' for term in terms)
+    return " OR ".join(f'"{term}"{suffix}' for term in terms)
 
 
 def roles_from_env() -> set[str] | None:
