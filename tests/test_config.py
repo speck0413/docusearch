@@ -176,3 +176,10 @@ def test_config_is_frozen() -> None:
     c = cfg.default()
     with pytest.raises((AttributeError, TypeError)):
         c.mode = "server"  # type: ignore[misc]
+
+
+def test_non_mapping_config_errors(tmp_path: Path) -> None:
+    path = tmp_path / "docusearch.yaml"
+    path.write_text("- just\n- a\n- list\n", encoding="utf-8")
+    with pytest.raises(cfg.ConfigError, match="mapping"):
+        cfg.load(path)
