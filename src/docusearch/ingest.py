@@ -11,6 +11,8 @@ Public surface (grows through Phase 1):
     content_hash(path) -> str                                  # SHA-256, incremental skip
     extract_html(html, *, content_selector, strip_selectors) -> ExtractedDoc  # §7.3
     ExtractedDoc / Segment / LinkRef / ImageRef               # extraction result types
+    chunk_document(doc, *, chunk_tokens, overlap) -> list[Chunk]   # §7.6
+    Chunk                                                     # a ready-to-index chunk
 """
 
 from __future__ import annotations
@@ -291,3 +293,69 @@ def extract_html(
         for child in root.iter(include_text=False):
             _walk(child, stack, doc)
     return doc
+
+
+# ----------------------------------------------------------------- chunking
+
+
+@dataclass
+class Chunk:
+    """A ready-to-index unit of a document, with its heading-path locator (R-ING-4)."""
+
+    ord: int
+    kind: str  # body | code
+    locator: str
+    text: str
+
+
+def chunk_document(doc: ExtractedDoc, *, chunk_tokens: int, overlap: int) -> list[Chunk]:
+    """Split a document into chunks (§7.6).
+
+    Body/table text is grouped by heading path and packed toward ``chunk_tokens`` words
+    with a sliding ``overlap``; a **code** segment always becomes one whole chunk, never
+    split. Each chunk records its heading-path locator (R-ING-4).
+    """
+    ov = min(max(overlap, 0), max(chunk_tokens - 1, 0))
+    chunks: list[Chunk] = []
+    buf: list[str] = []
+    hp: str | None = None
+    emitted = False  # has this heading group produced a chunk yet?
+    fresh = False  # has new (non-overlap) content been added since the last emit?
+
+    def emit() -> None:
+        nonlocal emitted
+        if buf:
+            chunks.append(Chunk(len(chunks), "body", hp or "", " ".join(buf)))
+            emitted = True
+
+    def close_group() -> None:
+        nonlocal buf, fresh
+        if buf and (fresh or not emitted):
+            emit()
+        buf = []
+        fresh = False
+
+    for seg in doc.segments:
+        if seg.kind == "code":
+            close_group()
+            emitted = False
+            chunks.append(Chunk(len(chunks), "code", seg.heading_path, seg.text))
+            hp = None
+            continue
+
+        if hp is None:
+            hp, emitted, fresh = seg.heading_path, False, False
+        elif seg.heading_path != hp:
+            close_group()
+            hp, emitted = seg.heading_path, False
+
+        for word in seg.text.split():
+            buf.append(word)
+            fresh = True
+            if len(buf) >= chunk_tokens:
+                emit()
+                buf = buf[-ov:] if ov > 0 else []
+                fresh = False
+
+    close_group()
+    return chunks
