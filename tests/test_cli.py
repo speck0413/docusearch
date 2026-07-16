@@ -137,6 +137,26 @@ def test_show_cli_missing_doc_returns_1(
     assert cli.main(["show", "999"]) == 1
 
 
+def test_search_batch_file_grades_goldens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)  # spi.html contains the needle ZZQ42
+    cli.main(["ingest"])
+    capsys.readouterr()
+    (tmp_path / "goldens.yaml").write_text(
+        "- id: g1\n  query: ZZQ42\n  expect_docs: [spi.html]\n  notes: the needle\n"
+        "- id: g2\n  query: absenttopicxyz\n  expect_docs: [nope.html]\n",
+        encoding="utf-8",
+    )
+    rc = cli.main(["search", "--batch-file", "goldens.yaml", "--out", "report.md"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Graded 2" in out and "1 PASS" in out
+    body = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "[PASS] g1" in body and "[FAIL] g2" in body
+
+
 def test_gate_writes_checklist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.chdir(tmp_path)
     cli.main(["init"])

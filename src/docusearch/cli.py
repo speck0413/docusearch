@@ -18,11 +18,15 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from . import config, ingest, runlog
 from ._version import __version__
 from .catalog import Catalog
 from .config import Config
+from .search import SearchHit
 from .store import Store
 
 
@@ -103,18 +107,80 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 def _cmd_search(args: argparse.Namespace) -> int:
     cfg = config.load(Path(args.config))
     _configure_logging(cfg)
-    hits = Catalog(cfg).search(args.query, top_k=args.top_k, prefix=args.prefix)
+    catalog = Catalog(cfg)
+    if args.batch_file:
+        return _run_batch(catalog, cfg, args)
+    if not args.query:
+        print("Provide a query, or --batch-file <goldens.yaml>.")
+        return 2
+    hits = catalog.search(args.query, top_k=args.top_k, prefix=args.prefix)
     if not hits:
         print("No results.")
     else:
-        mode = hits[0].search_mode
-        model = hits[0].embed_model_used
-        print(f"({mode} search; embed_model={model})")
+        print(f"({hits[0].search_mode} search; embed_model={hits[0].embed_model_used})")
     for i, hit in enumerate(hits, 1):
         print(f"{i}. [{hit.citation}] {hit.title}  ({hit.locator})")
         print(f"   {hit.snippet}")
         print(f"   score={hit.score}  kind={hit.kind}  path={hit.path}")
     runlog.log("cli.search", query=args.query, results=len(hits))
+    runlog.flush()
+    return 0
+
+
+def _graded_pass(entry: dict[str, Any], hits: list[SearchHit]) -> bool | None:
+    """PASS if any expected doc appears in the results; None when the golden is ungraded."""
+    expect = entry.get("expect_docs") or []
+    if not expect:
+        return None
+    paths = [h.path for h in hits]
+    return any(any(str(exp) in p for p in paths) for exp in expect)
+
+
+def _render_golden(entries: list[dict[str, Any]], results: list[list[SearchHit]]) -> str:
+    graded = [(_graded_pass(e, hits), e, hits) for e, hits in zip(entries, results, strict=False)]
+    scored = [g for g in graded if g[0] is not None]
+    passed = sum(1 for g in scored if g[0])
+    mode = results[0][0].search_mode if results and results[0] else "bm25"
+    lines = [
+        "# Golden query run",
+        "",
+        f"queries: **{len(entries)}**  ·  graded: **{len(scored)}**  ·  "
+        f"PASS: **{passed}/{len(scored)}**  ·  mode: {mode}",
+        "",
+    ]
+    for verdict, entry, hits in graded:
+        tag = "—" if verdict is None else ("PASS" if verdict else "FAIL")
+        lines += [
+            f"## [{tag}] {entry.get('id', '?')}: `{entry.get('query', '')}`",
+            f"expect_docs: {entry.get('expect_docs') or '(ungraded)'}",
+            "",
+        ]
+        for i, hit in enumerate(hits[:10], 1):
+            lines.append(f"{i}. [{hit.citation}] {hit.title} — {hit.path}")
+        if entry.get("notes"):
+            lines.append(f"_notes: {entry['notes']}_")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _run_batch(catalog: Catalog, cfg: Config, args: argparse.Namespace) -> int:
+    entries = yaml.safe_load(Path(args.batch_file).read_text(encoding="utf-8")) or []
+    queries = [str(e.get("query", "")) for e in entries]
+    top_k = args.top_k if args.top_k is not None else cfg.search.top_k_default
+    results = catalog.search(queries, top_k=top_k)
+    report = _render_golden(entries, results)
+    out = (
+        Path(args.out)
+        if args.out
+        else Path(cfg.paths.tmp_dir) / "reports" / f"golden-run-{runlog.RUN_ID}.md"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report, encoding="utf-8")
+    graded = [_graded_pass(e, hits) for e, hits in zip(entries, results, strict=False)]
+    passed = sum(1 for g in graded if g)
+    scored = sum(1 for g in graded if g is not None)
+    print(f"Graded {scored}/{len(entries)} golden queries: {passed} PASS -> {out}")
+    runlog.log("cli.search.batch", queries=len(entries), passed=passed)
     runlog.flush()
     return 0
 
@@ -215,10 +281,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit.add_argument("--config", default="docusearch.yaml", help="config path")
     p_audit.set_defaults(func=_cmd_audit)
 
-    p_search = sub.add_parser("search", help="BM25 search the index")
-    p_search.add_argument("query", help="search text")
+    p_search = sub.add_parser("search", help="search the index (hybrid if embeddings exist)")
+    p_search.add_argument("query", nargs="?", help="search text (omit when using --batch-file)")
     p_search.add_argument("--top-k", type=int, default=None, help="number of results")
     p_search.add_argument("--prefix", action="store_true", help="prefix matching (partial terms)")
+    p_search.add_argument("--batch-file", help="YAML goldens (id, query, expect_docs) to grade")
+    p_search.add_argument("--out", help="write the graded golden report here")
     p_search.add_argument("--config", default="docusearch.yaml", help="config path")
     p_search.set_defaults(func=_cmd_search)
 
