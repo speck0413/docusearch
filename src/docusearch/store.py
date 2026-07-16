@@ -413,3 +413,60 @@ class Store:
 
     def count_images(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])
+
+    # -- document/audit read paths (Phase 1) -------------------------------------
+
+    def get_document(self, doc_id: int) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM documents WHERE id=?", (doc_id,)
+        ).fetchone()
+        return row
+
+    def chunks_for_document(self, doc_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT id, ord, kind, locator, text FROM chunks WHERE document_id=? ORDER BY ord",
+            (doc_id,),
+        ).fetchall()
+
+    def fmt_histogram(self) -> dict[str, int]:
+        rows = self._conn.execute(
+            "SELECT fmt, COUNT(*) FROM documents GROUP BY fmt ORDER BY fmt"
+        ).fetchall()
+        return {str(r[0]): int(r[1]) for r in rows}
+
+    def documents_without_chunks(self) -> int:
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM documents d "
+                "WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.document_id = d.id)"
+            ).fetchone()[0]
+        )
+
+    def documents_with_empty_audience(self) -> int:
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM documents WHERE audience IS NULL OR audience IN ('', '[]')"
+            ).fetchone()[0]
+        )
+
+    # -- search read path (Phase 1) ----------------------------------------------
+
+    def bm25(self, match: str, limit: int) -> list[sqlite3.Row]:
+        """Ranked BM25 rows for a *sanitized* FTS query (search.py owns the sanitizer).
+
+        Ordered best-first with a deterministic tie-break on (doc id, chunk id) so an
+        identical index + query always yields identical ranked results (R-SRCH-5).
+        """
+        return self._conn.execute(
+            "SELECT c.document_id AS doc_id, c.id AS chunk_id, c.kind AS kind, "
+            "c.locator AS locator, d.title AS title, d.path AS path, d.fmt AS fmt, "
+            "snippet(chunks_fts, 0, '', '', ' … ', 12) AS snippet, "
+            "bm25(chunks_fts) AS bm25 "
+            "FROM chunks_fts "
+            "JOIN chunks c ON c.id = chunks_fts.rowid "
+            "JOIN documents d ON d.id = c.document_id "
+            "WHERE chunks_fts MATCH ? "
+            "ORDER BY bm25(chunks_fts) ASC, c.document_id ASC, c.id ASC "
+            "LIMIT ?",
+            (match, limit),
+        ).fetchall()

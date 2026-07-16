@@ -1,10 +1,13 @@
 """Command-line interface — a thin front-end over the library (§4).
 
-Phase 0 ships three commands; the rest (``audit``, ``search``, ``serve``) arrive with
-their phases. Every command resolves the config, does one job, and logs one event.
+``serve`` arrives in Phase 3. Every command resolves the config, does one job, and
+logs one event.
 
     docusearch init [--config PATH] [--force]
-    docusearch ingest --dry-run [--config PATH]
+    docusearch ingest [--dry-run] [--force] [--config PATH]
+    docusearch audit [--config PATH]
+    docusearch search <query> [--top-k N] [--prefix] [--config PATH]
+    docusearch show <doc_id> [--config PATH]
     docusearch gate <n> [--name NAME] [--config PATH]
 
 The console entry point is ``main`` (see pyproject ``[project.scripts]``).
@@ -16,9 +19,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config, runlog
+from . import config, ingest, runlog
 from ._version import __version__
+from .catalog import Catalog
 from .config import Config
+from .store import Store
 
 
 def _configure_logging(cfg: Config) -> None:
@@ -44,26 +49,88 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        print(
-            "Ingestion runs in Phase 1. Re-run with --dry-run to preview the plan.",
-        )
-        return 2
     cfg = config.load(Path(args.config))
     _configure_logging(cfg)
-    print(f"Ingest plan (dry run) — mode: {cfg.mode}")
-    if not cfg.sources:
-        print("  (no sources configured)")
-    for src in cfg.sources:
-        print(f"  source {src.name!r} [{src.type}] @ {src.location}")
-        print(f"    include={src.include} exclude={src.exclude}")
-        print(
-            f"    content_selector={src.content_selector!r} "
-            f"strip_selectors={src.strip_selectors} "
-            f"min_content_chars={src.min_content_chars}"
-        )
-        print(f"    audience={src.audience}")
-    runlog.log("cli.ingest.dryrun", sources=[s.name for s in cfg.sources])
+    if args.dry_run:
+        print(f"Ingest plan (dry run) — mode: {cfg.mode}")
+        if not cfg.sources:
+            print("  (no sources configured)")
+        for src in cfg.sources:
+            print(f"  source {src.name!r} [{src.type}] @ {src.location}")
+            print(f"    include={src.include} exclude={src.exclude}")
+            print(
+                f"    content_selector={src.content_selector!r} "
+                f"strip_selectors={src.strip_selectors} "
+                f"min_content_chars={src.min_content_chars}"
+            )
+            print(f"    audience={src.audience}")
+        runlog.log("cli.ingest.dryrun", sources=[s.name for s in cfg.sources])
+        runlog.flush()
+        return 0
+
+    result = Catalog(cfg).ingest(force=args.force)
+    reports = Path(cfg.paths.tmp_dir) / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    report_path = reports / f"ingest-audit-{runlog.RUN_ID}.md"
+    report_path.write_text(
+        ingest.render_ingest_audit(result, run_id=runlog.RUN_ID), encoding="utf-8"
+    )
+    print(
+        f"Ingested {result.documents} docs, {result.chunks} chunks, {result.images} images "
+        f"({result.skipped_unchanged} unchanged, {result.stripped_empty} too short, "
+        f"{result.excluded_glob} excluded)."
+    )
+    print(f"Audit report: {report_path}")
+    runlog.log("cli.ingest", documents=result.documents, chunks=result.chunks)
+    runlog.flush()
+    return 0
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    text = Catalog(cfg).audit()
+    reports = Path(cfg.paths.tmp_dir) / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    out = reports / f"audit-{runlog.RUN_ID}.md"
+    out.write_text(text, encoding="utf-8")
+    print(text)
+    runlog.log("cli.audit", report=str(out))
+    runlog.flush()
+    return 0
+
+
+def _cmd_search(args: argparse.Namespace) -> int:
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    hits = Catalog(cfg).search(args.query, top_k=args.top_k, prefix=args.prefix)
+    if not hits:
+        print("No results.")
+    for i, hit in enumerate(hits, 1):
+        print(f"{i}. [{hit.citation}] {hit.title}  ({hit.locator})")
+        print(f"   {hit.snippet}")
+        print(f"   score={hit.score}  kind={hit.kind}  path={hit.path}")
+    runlog.log("cli.search", query=args.query, results=len(hits))
+    runlog.flush()
+    return 0
+
+
+def _cmd_show(args: argparse.Namespace) -> int:
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    with Store.open(cfg.paths.db_path) as store:
+        doc = store.get_document(args.doc_id)
+        if doc is None:
+            print(f"No document with id {args.doc_id}")
+            return 1
+        print(f"# doc {doc['id']}: {doc['title']}")
+        print(f"path: {doc['path']}")
+        print(f"fmt: {doc['fmt']}  audience: {doc['audience']}  status: {doc['status']}")
+        for chunk in store.chunks_for_document(args.doc_id):
+            print(f"\n-- chunk {chunk['id']} [{chunk['kind']}] {chunk['locator']}")
+            text = str(chunk["text"])
+            print(text if len(text) <= 800 else text[:800] + " …")
+    runlog.log("cli.show", doc_id=args.doc_id)
     runlog.flush()
     return 0
 
@@ -134,10 +201,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--force", action="store_true", help="overwrite an existing config")
     p_init.set_defaults(func=_cmd_init)
 
-    p_ingest = sub.add_parser("ingest", help="ingest sources (Phase 0: --dry-run preview only)")
+    p_ingest = sub.add_parser("ingest", help="ingest sources into the index")
     p_ingest.add_argument("--config", default="docusearch.yaml", help="config path")
     p_ingest.add_argument("--dry-run", action="store_true", help="preview the plan, touch nothing")
+    p_ingest.add_argument("--force", action="store_true", help="re-ingest all (ignore hash cache)")
     p_ingest.set_defaults(func=_cmd_ingest)
+
+    p_audit = sub.add_parser("audit", help="print the current index audit (counts + anomalies)")
+    p_audit.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_audit.set_defaults(func=_cmd_audit)
+
+    p_search = sub.add_parser("search", help="BM25 search the index")
+    p_search.add_argument("query", help="search text")
+    p_search.add_argument("--top-k", type=int, default=None, help="number of results")
+    p_search.add_argument("--prefix", action="store_true", help="prefix matching (partial terms)")
+    p_search.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_search.set_defaults(func=_cmd_search)
+
+    p_show = sub.add_parser("show", help="print a document's chunks by id")
+    p_show.add_argument("doc_id", type=int, help="document id")
+    p_show.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_show.set_defaults(func=_cmd_show)
 
     p_gate = sub.add_parser("gate", help="write a Part A/B sign-off checklist")
     p_gate.add_argument("n", help="gate id, e.g. 1 or 4a")

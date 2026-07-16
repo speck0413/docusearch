@@ -62,15 +62,79 @@ def test_ingest_dry_run_lists_sources(
     assert "audience" in out
 
 
-def test_ingest_without_dry_run_is_not_yet_implemented(
+def _write_corpus_config(tmp_path: Path) -> None:
+    """A small real corpus + a config that points at it (written as docusearch.yaml)."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "spi.html").write_text(
+        "<body><h1>SPI</h1><p>The SPI timing nonce ZZQ42 configures the peripheral bus.</p></body>",
+        encoding="utf-8",
+    )
+    (tmp_path / "docusearch.yaml").write_text(
+        "paths:\n"
+        '  staging_dir: "./staging"\n'
+        '  db_path: "./catalog.db"\n'
+        '  tmp_dir: "./tmp"\n'
+        "sources:\n"
+        '  - name: docs\n    location: "./docs"\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+
+
+def test_ingest_real_writes_audit_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.chdir(tmp_path)
-    cli.main(["init"])
-    capsys.readouterr()
+    _write_corpus_config(tmp_path)
     rc = cli.main(["ingest"])
-    assert rc == 2
-    assert "Phase 1" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Ingested 1 docs" in out
+    assert list((tmp_path / "tmp" / "reports").glob("ingest-audit-*.md"))
+
+
+def test_search_cli_finds_needle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)
+    cli.main(["ingest"])
+    capsys.readouterr()
+    rc = cli.main(["search", "ZZQ42"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "D:" in out and "SPI" in out
+
+
+def test_audit_cli_prints_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)
+    cli.main(["ingest"])
+    capsys.readouterr()
+    rc = cli.main(["audit"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "documents" in out and "Anomalies" in out
+
+
+def test_show_cli_prints_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)
+    cli.main(["ingest"])
+    capsys.readouterr()
+    rc = cli.main(["show", "1"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ZZQ42" in out
+
+
+def test_show_cli_missing_doc_returns_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)
+    cli.main(["ingest"])
+    capsys.readouterr()
+    assert cli.main(["show", "999"]) == 1
 
 
 def test_gate_writes_checklist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # type: ignore[no-untyped-def]

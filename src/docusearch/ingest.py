@@ -13,6 +13,10 @@ Public surface (grows through Phase 1):
     ExtractedDoc / Segment / LinkRef / ImageRef               # extraction result types
     chunk_document(doc, *, chunk_tokens, overlap) -> list[Chunk]   # §7.6
     Chunk                                                     # a ready-to-index chunk
+    run_ingest(config, store, *, force) -> IngestResult       # the whole pipeline (§7)
+    IngestResult                                              # per-run audit counts
+    render_ingest_audit(result, *, run_id) -> str             # §7.8 report
+    render_store_audit(store) -> str                          # `docusearch audit`
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from pathlib import Path
 
 from selectolax.parser import HTMLParser, Node
 
+from . import runlog
 from .config import Config, SourceConfig
 from .store import Store
 
@@ -576,4 +581,94 @@ def run_ingest(config: Config, store: Store, *, force: bool = False) -> IngestRe
     result.relations_resolved = store.count_resolved_relations()
     result.relations_unresolved = result.relations_total - result.relations_resolved
     result.timings_ms["total"] = (time.perf_counter() - start) * 1000.0
+    runlog.log(
+        "ingest.done",
+        documents=result.documents,
+        chunks=result.chunks,
+        images=result.images,
+        skipped_unchanged=result.skipped_unchanged,
+        stripped_empty=result.stripped_empty,
+        parse_errors=result.parse_errors,
+        relations_unresolved=result.relations_unresolved,
+        took_ms=round(result.timings_ms["total"], 1),
+    )
     return result
+
+
+# ----------------------------------------------------------------- audit rendering
+
+
+def render_ingest_audit(result: IngestResult, *, run_id: str = "") -> str:
+    """Render the ingest audit report (§7.8) — the input to Gate 1.
+
+    Loudly surfaces everything that was skipped or is suspect (nothing dropped
+    silently): glob exclusions, too-short strips, parse errors, content-selector
+    misses, zero-chunk docs, untagged audiences, and unresolved links.
+    """
+    took = result.timings_ms.get("total", 0.0)
+    lines = [
+        "# Ingest audit",
+        "",
+        f"run_id: `{run_id}`  ·  elapsed: {took / 1000:.2f}s",
+        "",
+        "## Discovery",
+        f"- files found: **{result.files_found}**",
+        f"- included (passed globs): **{result.included}**",
+        f"- excluded by glob: **{result.excluded_glob}**",
+        f"- other (present, not selected): **{result.other_files}**",
+        "",
+        "## Documents & chunks",
+        f"- documents ingested this run: **{result.documents}**",
+        f"- skipped (unchanged hash): **{result.skipped_unchanged}**",
+        f"- chunks written: **{result.chunks}**",
+        f"- images retained: **{result.images}**",
+        "",
+        "## Relations (cross-references)",
+        f"- total: **{result.relations_total}**",
+        f"- resolved: **{result.relations_resolved}**",
+        f"- unresolved (external / broken — kept for audit): **{result.relations_unresolved}**",
+        "",
+        "## ⚠️ Skips & anomalies (review every non-zero line)",
+        f"- stripped as too short (< min_content_chars): **{result.stripped_empty}**",
+        f"- content_selector matched nothing (fell back to body): **{result.content_selector_misses}**",
+        f"- zero-chunk documents: **{result.zero_chunk_docs}**",
+        f"- documents with no audience tag: **{result.untagged_audience_docs}**",
+        f"- parse errors: **{result.parse_errors}**",
+        "",
+        "## Per-extension",
+    ]
+    if result.per_extension:
+        lines += [f"- `{ext}`: {n}" for ext, n in sorted(result.per_extension.items())]
+    else:
+        lines.append("- (none)")
+    if result.errors:
+        lines += ["", "## Errors", *[f"- `{path}` — {msg}" for path, msg in result.errors[:200]]]
+        if len(result.errors) > 200:
+            lines.append(f"- … and {len(result.errors) - 200} more")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_store_audit(store: Store) -> str:
+    """Render the current index state for ``docusearch audit`` (spot-check counts)."""
+    resolved = store.count_resolved_relations()
+    total_rel = store.count_relations()
+    histogram = store.fmt_histogram()
+    fmt_lines = [f"- `{fmt}`: {n}" for fmt, n in histogram.items()] or ["- (none)"]
+    lines = [
+        "# Index audit",
+        "",
+        f"- documents: **{store.count_documents()}**",
+        f"- chunks: **{store.count_chunks()}**",
+        f"- images: **{store.count_images()}**",
+        f"- relations: **{total_rel}** ({resolved} resolved, {total_rel - resolved} unresolved)",
+        "",
+        "## By format",
+        *fmt_lines,
+        "",
+        "## ⚠️ Anomalies",
+        f"- documents with zero chunks: **{store.documents_without_chunks()}**",
+        f"- documents with empty audience: **{store.documents_with_empty_audience()}**",
+        "",
+    ]
+    return "\n".join(lines)

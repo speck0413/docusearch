@@ -4,16 +4,17 @@ Public API (R-ARCH-2): this package deliberately exposes a *thin* surface. Only 
 names in ``__all__`` are supported; everything else under ``docusearch.*`` is internal
 and may change without notice.
 
-The surface grows as phases land — ``Catalog`` (ingest/search) and ``serve`` (the
-HTTP/MCP server) are added to ``__all__`` when Phases 1 and 3 implement them. Adding
-empty stubs now would be dead code (R-PROC-7), so the Phase-0 surface is:
+The surface grows as phases land — ``serve`` (the HTTP/MCP server) joins ``__all__``
+when Phase 3 implements it. Adding empty stubs earlier would be dead code (R-PROC-7).
+Current surface:
 
-    from docusearch import Config, __version__
+    from docusearch import Catalog, Config, __version__
 """
 
 from __future__ import annotations
 
 from ._version import __version__
+from .catalog import Catalog
 from .config import Config
 
-__all__ = ["Config", "__version__"]
+__all__ = ["Catalog", "Config", "__version__"]
