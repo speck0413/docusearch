@@ -73,9 +73,11 @@ filterwarnings = ["error"]
 [tool.coverage.run]
 branch = true
 source = ["docusearch"]
+omit = ["*/__main__.py"]  # trivial entry; exercised by the subprocess smoke test
 
 [tool.coverage.report]
 show_missing = true
+fail_under = 85  # core modules keep >=85% line coverage (R-PROC-1)
 exclude_lines = [
   "pragma: no cover",
   "if TYPE_CHECKING:",
