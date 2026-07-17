@@ -11,6 +11,8 @@ client/server ``RemoteServerProvider`` + ``auto`` negotiation arrive with Phase 
 Public surface:
     EmbedProvider (Protocol)      -- model_id, dim, embed(texts) -> (n, dim) float32
     LocalProvider                 -- sentence-transformers, lazy-loaded
+    RemoteServerProvider          -- POST text to a server's /v1/embed (client, R-EMB-4)
+    choose_auto_strategy(...)     -- `auto` negotiation: embed local vs send text (R-EMB-5)
     ApiProvider                   -- STUB ONLY (R-EMB-7)
     make_provider(embed_config)   -> EmbedProvider | None   (None == BM25-only)
     to_blob(vec) / from_blob(bytes)  -- float32 vector <-> DB BLOB (provenance store)
@@ -101,6 +103,63 @@ class LocalProvider:
             show_progress_bar=False,
         )
         return np.asarray(vecs, dtype=np.float32)
+
+
+class RemoteServerProvider:
+    """Embeds by POSTing text to a docusearch server's ``/v1/embed`` (R-EMB-4).
+
+    The client 'auto' fallback: when a client can't (or shouldn't) load the model
+    locally, it asks the server to embed. model_id/dim are learned from ``/v1/embed-info``.
+    """
+
+    def __init__(self, server_url: str, *, http_client: Any = None, timeout: float = 30.0) -> None:
+        self._url = server_url.rstrip("/")
+        self._client = http_client
+        self._timeout = timeout
+        self._model_id: str | None = None
+        self._dim: int | None = None
+
+    def _http(self) -> Any:
+        if self._client is None:
+            import httpx
+
+            self._client = httpx.Client(base_url=self._url, timeout=self._timeout)
+        return self._client
+
+    def _ensure_info(self) -> None:
+        if self._model_id is None:
+            info = self._http().get("/v1/embed-info").json()
+            self._model_id = str(info["model"])
+            self._dim = int(info["dim"])
+
+    @property
+    def model_id(self) -> str:
+        self._ensure_info()
+        assert self._model_id is not None
+        return self._model_id
+
+    @property
+    def dim(self) -> int:
+        self._ensure_info()
+        assert self._dim is not None
+        return self._dim
+
+    def embed(self, texts: Sequence[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        resp = self._http().post("/v1/embed", json={"texts": list(texts)})
+        if resp.status_code == 409:
+            raise EmbedError("server has no embedding model (embed.model: none) to embed with")
+        resp.raise_for_status()
+        return np.asarray(resp.json()["vectors"], dtype=np.float32)
+
+
+def choose_auto_strategy(server_info: dict[str, Any], auto_max_mb: int) -> str:
+    """`auto` negotiation (R-EMB-5): 'local' if the server's model is small enough to run
+    locally (<= auto_max_mb), else 'text' (send text and let the server embed)."""
+    if str(server_info.get("model", "none")) == "none":
+        return "text"
+    return "local" if int(server_info.get("approx_mb", 1 << 30)) <= auto_max_mb else "text"
 
 
 class ApiProvider:  # STUB ONLY — R-EMB-7 (verify provider availability before wiring)

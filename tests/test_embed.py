@@ -11,6 +11,7 @@ import pytest
 
 from docusearch import embed
 from docusearch.config import EmbedConfig
+from docusearch.config import load as cfg_load
 
 MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -43,6 +44,74 @@ def test_to_from_blob_roundtrip() -> None:
 def test_model_id_available_without_loading() -> None:
     # provenance tag needs no download (R-EMB-2)
     assert embed.LocalProvider(MODEL).model_id == MODEL
+
+
+def test_choose_auto_strategy() -> None:
+    assert embed.choose_auto_strategy({"model": "none"}, 200) == "text"
+    assert embed.choose_auto_strategy({"model": "m", "approx_mb": 90}, 200) == "local"
+    assert embed.choose_auto_strategy({"model": "m", "approx_mb": 1300}, 200) == "text"
+
+
+def _asgi_client(config: object):  # type: ignore[no-untyped-def]
+    import warnings
+
+    from docusearch.server import create_app
+
+    with warnings.catch_warnings():  # sync httpx client that runs the ASGI app in-process
+        warnings.simplefilter("ignore")
+        from fastapi.testclient import TestClient
+
+        return TestClient(create_app(config), base_url="http://server")  # type: ignore[arg-type]
+
+
+def test_remote_provider_raises_when_server_has_no_model(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from docusearch import ingest
+    from docusearch.store import Store
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "a.html").write_text("<body><p>timing content for indexing here</p></body>", "utf-8")
+    config_path = tmp_path / "docusearch.yaml"
+    config_path.write_text(
+        f'paths:\n  db_path: "{(tmp_path / "c.db").as_posix()}"\n'
+        f'  staging_dir: "{(tmp_path / "s").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg_load(config_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store)
+    hc = _asgi_client(config)
+    provider = embed.RemoteServerProvider("http://server", http_client=hc)
+    with pytest.raises(embed.EmbedError):  # server has no model -> 409 -> EmbedError
+        provider.embed(["hello world"])
+
+
+@pytest.mark.model
+@pytest.mark.filterwarnings("ignore")
+def test_remote_provider_embeds_via_server(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from docusearch import ingest
+    from docusearch.store import Store
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "a.html").write_text("<body><p>timing content for indexing here</p></body>", "utf-8")
+    config_path = tmp_path / "docusearch.yaml"
+    config_path.write_text(
+        f'paths:\n  db_path: "{(tmp_path / "c.db").as_posix()}"\n'
+        f'  staging_dir: "{(tmp_path / "s").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        f'embed:\n  model: "{MODEL}"\n  device: cpu\n',
+        encoding="utf-8",
+    )
+    config = cfg_load(config_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store)
+    provider = embed.RemoteServerProvider("http://server", http_client=_asgi_client(config))
+    assert provider.model_id == MODEL and provider.dim == 384
+    vecs = provider.embed(["how does the clock work", "peripheral bus"])
+    assert vecs.shape == (2, 384)
 
 
 # --- real model (torch); skips gracefully if unavailable ---------------------
