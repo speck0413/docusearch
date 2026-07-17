@@ -46,6 +46,15 @@ def test_refuses_citation_outside_evidence() -> None:
         report.render_report(fmt="md", **_kwargs(body="X [D:9#999].", evidence={(1, 2)}))  # type: ignore[arg-type]
 
 
+def test_refuses_citation_hidden_in_banner_metadata() -> None:
+    # red-team R1: a citation-shaped token in sources/audience must not slip through
+    with pytest.raises(citations.CitationError):
+        report.render_report(
+            fmt="md",
+            **_kwargs(body="ok [GK].", sources=["manual [D:9#999]"], evidence={(1, 2)}),  # type: ignore[arg-type]
+        )
+
+
 def test_refuses_citation_hidden_in_the_title() -> None:
     # red-team H1: a fabricated citation in the TITLE must be refused, not rendered verbatim
     with pytest.raises(citations.CitationError):

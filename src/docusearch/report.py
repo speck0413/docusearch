@@ -60,9 +60,10 @@ def render_report(
     ``evidence`` is the set of ``(doc_id, chunk_id)`` pairs from the search hits the report
     is built on.
     """
-    # verify the WHOLE document — title included — so a citation can't hide in the title
-    combined = f"{title}\n{body}"
-    violations = citations.verify(combined, evidence)
+    # verify the WHOLE rendered surface — title, body, and banner metadata — so a
+    # citation-shaped token can't hide anywhere (red-team H1 + R1)
+    surface = "\n".join([title, body, *audience, *sources])
+    violations = citations.verify(surface, evidence)
     if violations:
         bad = ", ".join(v.raw for v in violations)
         raise citations.CitationError(
@@ -79,7 +80,7 @@ def render_report(
         sources=sources,
     )
     # number title + body citations together, then split back so numbering is consistent
-    rendered_combined, references = citations.render_references(combined, base_url)
+    rendered_combined, references = citations.render_references(f"{title}\n{body}", base_url)
     title, _, rendered_body = rendered_combined.partition("\n")
     image_urls = [f"{base_url.rstrip('/')}/v1/images/{sha}" for sha in images]
 
