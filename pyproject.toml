@@ -100,7 +100,11 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
-filterwarnings = ["error"]
+filterwarnings = [
+  "error",
+  # starlette's TestClient warns to install httpx2; third-party, fires at import.
+  "ignore:Using .httpx. with .starlette.testclient. is deprecated",
+]
 markers = [
   "model: needs a downloaded embedding model (torch); slow. Skip with -m 'not model'.",
 ]

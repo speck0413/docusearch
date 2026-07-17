@@ -458,6 +458,24 @@ class Store:
             (doc_id,),
         ).fetchall()
 
+    def get_image(self, sha256: str) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM images WHERE sha256=?", (sha256,)
+        ).fetchone()
+        return row
+
+    def relations_out(self, doc_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT dst_doc, dst_raw, link_type FROM relations WHERE src_doc=? ORDER BY id",
+            (doc_id,),
+        ).fetchall()
+
+    def relations_in(self, doc_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT src_doc, dst_raw, link_type FROM relations WHERE dst_doc=? ORDER BY id",
+            (doc_id,),
+        ).fetchall()
+
     def fmt_histogram(self) -> dict[str, int]:
         rows = self._conn.execute(
             "SELECT fmt, COUNT(*) FROM documents GROUP BY fmt ORDER BY fmt"
