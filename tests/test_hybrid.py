@@ -147,6 +147,42 @@ def test_rrf_fusion_math() -> None:
 
 
 @pytest.mark.model
+def test_query_time_model_mismatch_falls_back_to_bm25(tmp_path: Path) -> None:
+    import warnings
+
+    from docusearch import Catalog
+    from docusearch.store import Store
+
+    model = "sentence-transformers/all-MiniLM-L6-v2"
+    root = tmp_path / "docs"
+    root.mkdir()
+    for i in range(3):
+        (root / f"d{i}.html").write_text(
+            f"<body><p>timing configuration for the peripheral bus number {i}</p></body>", "utf-8"
+        )
+    path = tmp_path / "docusearch.yaml"
+    path.write_text(
+        f'paths:\n  db_path: "{(tmp_path / "c.db").as_posix()}"\n'
+        f'  staging_dir: "{(tmp_path / "s").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        f'embed:\n  model: "{model}"\n  device: cpu\n',
+        encoding="utf-8",
+    )
+    cat = Catalog(cfg.load(path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cat.ingest()
+    # simulate config/model drift: the index says a different model than the query provider
+    with Store.open(cat.db_path) as store:
+        store.set_meta("embed_model", "some-other-model-v9")
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        hits = cat.search("timing configuration", top_k=3)
+    assert any("BM25 only" in str(w.message) for w in rec)  # loud, not silent
+    assert hits and all(h.search_mode == "bm25" for h in hits)  # no space-mixing
+
+
+@pytest.mark.model
 @pytest.mark.filterwarnings("ignore")
 def test_catalog_hybrid_end_to_end_real_model(tmp_path: Path) -> None:
     from docusearch import Catalog

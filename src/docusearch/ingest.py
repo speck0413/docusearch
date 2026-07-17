@@ -634,15 +634,18 @@ def _embed_chunks(store: Store, provider: EmbedProvider, batch_size: int) -> int
     chunks. Refuses to mix models in one index (R-EMB-2/3): a store already embedded by a
     different model must be re-indexed fresh.
     """
-    pending = store.chunks_without_embeddings()
-    if not pending:
-        return 0
+    # Provenance guard runs FIRST — before the no-pending early-out — so a swap to a
+    # different (even same-dimension) model is refused even when no new chunks need
+    # embedding (R-EMB-3: never silently mix models in one index).
     existing_model = store.get_meta("embed_model")
     if existing_model is not None and existing_model != provider.model_id:
         raise embed.EmbedError(
             f"index was embedded with {existing_model!r} but the configured model is "
             f"{provider.model_id!r}. Re-index fresh (delete the db) to switch models."
         )
+    pending = store.chunks_without_embeddings()
+    if not pending:
+        return 0
     dim = provider.dim
     embedded = 0
     for start in range(0, len(pending), batch_size):

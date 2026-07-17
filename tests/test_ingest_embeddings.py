@@ -95,6 +95,18 @@ def test_switching_models_is_refused(tmp_path: Path) -> None:
             ingest.run_ingest(config, store, provider=FakeProvider("model-b"), force=True)
 
 
+def test_switching_models_refused_even_with_no_pending_chunks(tmp_path: Path) -> None:
+    # red-team H1: a same-dim model swap on unchanged content (no new chunks to embed)
+    # must still be refused — the guard runs before the no-pending early-out (R-EMB-3).
+    root = tmp_path / "docs"
+    _corpus(root)
+    config = _config(tmp_path, root)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store, provider=FakeProvider("model-a", dim=8))
+        with pytest.raises(embed.EmbedError, match="[Rr]e-index"):
+            ingest.run_ingest(config, store, provider=FakeProvider("model-b", dim=8))
+
+
 def test_embedding_vectors_roundtrip(tmp_path: Path) -> None:
     root = tmp_path / "docs"
     _corpus(root, n=1)

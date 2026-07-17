@@ -12,6 +12,7 @@ objects. Heavy logic lives in ``ingest.py`` and ``search.py``.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import overload
 
@@ -80,12 +81,23 @@ class Catalog:
         with Store.open(self.db_path) as store:
             vector_index = None
             if provider is not None and store.count_embeddings() > 0:
-                ann_path = (
-                    Path(self.db_path).with_suffix(".hnsw")
-                    if self.db_path != ":memory:"
-                    else "__no_ann__"
-                )
-                vector_index = search.VectorIndex.load(store, provider.dim, ann_path)
+                index_model = store.get_meta("embed_model")
+                if index_model is not None and index_model != provider.model_id:
+                    # Never compare vectors from two different models (R-EMB-3). Fall back
+                    # to BM25 (loudly) rather than silently mixing embedding spaces.
+                    warnings.warn(
+                        f"index was embedded with {index_model!r} but embed.model is "
+                        f"{provider.model_id!r}; using BM25 only. Re-ingest to enable hybrid.",
+                        stacklevel=2,
+                    )
+                    provider = None
+                else:
+                    ann_path = (
+                        Path(self.db_path).with_suffix(".hnsw")
+                        if self.db_path != ":memory:"
+                        else "__no_ann__"
+                    )
+                    vector_index = search.VectorIndex.load(store, provider.dim, ann_path)
             return search.search(
                 store,
                 query,
