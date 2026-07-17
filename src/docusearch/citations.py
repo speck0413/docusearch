@@ -64,16 +64,23 @@ def resolve(citation: Citation, base_url: str) -> str | None:
     return f"{base}/v1/documents/{citation.doc_id}?chunk={citation.chunk_id}"
 
 
-def verify(text: str, allowed_chunk_ids: set[int]) -> list[Citation]:
-    """Return the catalog citations that reference a chunk outside ``allowed_chunk_ids``.
+def verify(text: str, allowed: set[tuple[int, int]]) -> list[Citation]:
+    """Return the catalog citations that reference a ``(doc_id, chunk_id)`` pair outside
+    the evidence set.
 
-    Empty means every catalog citation is backed by evidence. ``[GK]`` is never a
-    violation. The report builder refuses to render when this is non-empty (R-CIT-1).
+    Checking the *pair* (not just the chunk) matters: a chunk id is globally unique, so a
+    citation like ``[D:1#2]`` where chunk 2 actually belongs to a different document is a
+    mis-attribution — it would resolve to the wrong source URL. Empty means every catalog
+    citation is backed by an evidence hit. ``[GK]`` is never a violation. The report
+    builder refuses to render when this is non-empty (R-CIT-1).
     """
     return [
         c
         for c in parse(text)
-        if c.kind == "doc" and c.chunk_id is not None and c.chunk_id not in allowed_chunk_ids
+        if c.kind == "doc"
+        and c.doc_id is not None
+        and c.chunk_id is not None
+        and (c.doc_id, c.chunk_id) not in allowed
     ]
 
 

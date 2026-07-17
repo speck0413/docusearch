@@ -57,14 +57,20 @@ def test_resolve_gk_is_none() -> None:
 
 def test_verify_all_allowed_is_empty() -> None:
     text = "A [D:1#2]. B [D:1#3]. C [GK]."
-    assert citations.verify(text, {2, 3}) == []
+    assert citations.verify(text, {(1, 2), (1, 3)}) == []
 
 
 def test_verify_flags_out_of_evidence() -> None:
-    text = "A [D:1#2]. B [D:9#999]."  # chunk 999 not in evidence
-    violations = citations.verify(text, {2, 3})
+    text = "A [D:1#2]. B [D:9#999]."  # (9, 999) not in evidence
+    violations = citations.verify(text, {(1, 2), (1, 3)})
     assert len(violations) == 1
     assert violations[0].chunk_id == 999
+
+
+def test_verify_flags_wrong_document_for_a_real_chunk() -> None:
+    # chunk 5 is in evidence but under doc 1; citing it as doc 2 is a mis-attribution (M1)
+    violations = citations.verify("X [D:2#5].", {(1, 5)})
+    assert len(violations) == 1 and violations[0].doc_id == 2
 
 
 def test_verify_ignores_gk() -> None:

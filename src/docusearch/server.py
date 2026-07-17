@@ -49,6 +49,11 @@ def _approx_mb(dim: int) -> int:
     return 90
 
 
+def _fits_i64(value: int) -> bool:
+    """SQLite integer bound — an absurd id should 404, not raise OverflowError (500)."""
+    return -(2**63) <= value < 2**63
+
+
 class ModelMismatchError(Exception):
     """A query's embedding model doesn't match the index's — never mix (R-EMB-3, 409)."""
 
@@ -177,6 +182,11 @@ class Service:
                     server_model=server_model,
                     server_dim=server_dim,
                 )
+            for vec in query_vectors:  # right model, wrong dim -> clean 400, not a crash
+                if len(vec) != server_dim:
+                    raise ValueError(
+                        f"query vector has dim {len(vec)} but the index model uses {server_dim}"
+                    )
             vector_index = self._vector_index_or_none(store, server_dim)
             assert vector_index is not None
             results = [
@@ -200,6 +210,8 @@ class Service:
         return {"model": provider.model_id, "dim": provider.dim, "vectors": vectors.tolist()}
 
     def get_document(self, doc_id: int, *, chunk: int | None = None) -> dict[str, Any] | None:
+        if not _fits_i64(doc_id):  # absurd id -> 404, not a sqlite OverflowError (500)
+            return None
         with Store.open(self.config.paths.db_path) as store:
             doc = store.get_document(doc_id)
             if doc is None:
@@ -227,6 +239,8 @@ class Service:
         }
 
     def document_path(self, doc_id: int) -> Path | None:
+        if not _fits_i64(doc_id):
+            return None
         with Store.open(self.config.paths.db_path) as store:
             doc = store.get_document(doc_id)
         if doc is None:
@@ -266,8 +280,10 @@ class Service:
         if row is None:
             return None
         ext = str(row["ext"] or "bin").lower()
-        path = Path(self.config.paths.staging_dir) / "images" / f"{sha256}.{ext}"
-        if not path.is_file():
+        images_dir = (Path(self.config.paths.staging_dir) / "images").resolve()
+        path = (images_dir / f"{sha256}.{ext}").resolve()
+        # defence in depth: never serve a file resolved outside the images dir
+        if not path.is_relative_to(images_dir) or not path.is_file():
             return None
         return path, _MEDIA_TYPES.get(ext, "application/octet-stream")
 
@@ -308,7 +324,7 @@ class EmbedRequest(BaseModel):
 class ReportRequest(BaseModel):
     title: str
     body: str  # the claim text, each factual sentence ending in a [GK] or [D:...] tag
-    evidence_chunk_ids: list[int] = []
+    evidence: list[list[int]] = []  # the [doc_id, chunk_id] pairs the report is built on
     fmt: str = "md"
     audience: list[str] = []
     sources: list[str] = []
@@ -407,6 +423,8 @@ def create_app(config: Config) -> FastAPI:
                 )
             except ModelMismatchError as err:  # 409, recoverable (R-EMB-3)
                 raise _mismatch_409(err) from err
+            except ValueError as err:  # wrong-dimension vector -> clean 400
+                raise HTTPException(status_code=400, detail=str(err)) from err
         else:
             results, model_used, mode = service.search(
                 req.query_texts,
@@ -459,11 +477,12 @@ def create_app(config: Config) -> FastAPI:
     def reports_route(req: ReportRequest, request: Request) -> dict[str, Any]:
         base = str(request.base_url).rstrip("/")
         info = service.embed_info()
+        evidence = {(p[0], p[1]) for p in req.evidence if len(p) == 2}
         try:
             rendered = report.render_report(
                 title=req.title,
                 body=req.body,
-                evidence_chunk_ids=set(req.evidence_chunk_ids),
+                evidence=evidence,
                 base_url=base,
                 fmt=req.fmt,
                 run_id=runlog.RUN_ID,
@@ -476,7 +495,7 @@ def create_app(config: Config) -> FastAPI:
                 status_code=400,
                 detail={"error": "HALLUCINATED_CITATION", "message": str(err)},
             ) from err
-        runlog.log("api.report", fmt=req.fmt, evidence=len(req.evidence_chunk_ids))
+        runlog.log("api.report", fmt=req.fmt, evidence=len(evidence))
         return {"fmt": req.fmt, "report": rendered}
 
     # MCP over streamable HTTP, same service layer, at serve.mcp_path (R-API-1)

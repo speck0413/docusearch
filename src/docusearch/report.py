@@ -44,7 +44,7 @@ def render_report(
     *,
     title: str,
     body: str,
-    evidence_chunk_ids: set[int],
+    evidence: set[tuple[int, int]],
     base_url: str,
     fmt: str = "md",
     run_id: str = "",
@@ -54,13 +54,19 @@ def render_report(
     sources: Sequence[str] = (),
     images: Sequence[str] = (),
 ) -> str:
-    """Render a report to ``md`` or ``html``. Raises ``CitationError`` if ``body`` cites a
-    chunk outside ``evidence_chunk_ids`` (R-CIT-1)."""
-    violations = citations.verify(body, evidence_chunk_ids)
+    """Render a report to ``md`` or ``html``. Raises ``CitationError`` if the title OR the
+    body cites a ``(doc_id, chunk_id)`` outside the evidence set (R-CIT-1).
+
+    ``evidence`` is the set of ``(doc_id, chunk_id)`` pairs from the search hits the report
+    is built on.
+    """
+    # verify the WHOLE document — title included — so a citation can't hide in the title
+    combined = f"{title}\n{body}"
+    violations = citations.verify(combined, evidence)
     if violations:
         bad = ", ".join(v.raw for v in violations)
         raise citations.CitationError(
-            f"report cites chunks outside the evidence set: {bad}. Refusing to render."
+            f"report cites sources outside the evidence set: {bad}. Refusing to render."
         )
 
     stamp = generated_at or datetime.now(UTC).isoformat(timespec="seconds")
@@ -72,7 +78,9 @@ def render_report(
         embed_model=embed_model,
         sources=sources,
     )
-    rendered_body, references = citations.render_references(body, base_url)
+    # number title + body citations together, then split back so numbering is consistent
+    rendered_combined, references = citations.render_references(combined, base_url)
+    title, _, rendered_body = rendered_combined.partition("\n")
     image_urls = [f"{base_url.rstrip('/')}/v1/images/{sha}" for sha in images]
 
     if fmt == "html":

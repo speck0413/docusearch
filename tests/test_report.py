@@ -11,7 +11,7 @@ def _kwargs(**over: object) -> dict[str, object]:
     base: dict[str, object] = {
         "title": "SPI timing summary",
         "body": "SPI runs at 1 MHz [D:1#2]. The sky is blue [GK]. It uses a clock [D:1#3].",
-        "evidence_chunk_ids": {2, 3},
+        "evidence": {(1, 2), (1, 3)},
         "base_url": "http://host:8321",
         "run_id": "RUN-XYZ",
         "audience": ["engineering"],
@@ -34,16 +34,25 @@ def test_markdown_has_banner_body_and_references() -> None:
 
 def test_references_are_numbered_and_deduped() -> None:
     body = "A [D:1#2]. B [D:1#2]. C [D:5#7]."
-    out = report.render_report(fmt="md", **_kwargs(body=body, evidence_chunk_ids={2, 7}))  # type: ignore[arg-type]
+    out = report.render_report(fmt="md", **_kwargs(body=body, evidence={(1, 2), (5, 7)}))  # type: ignore[arg-type]
     assert "1. http://host:8321/v1/documents/1?chunk=2" in out
     assert "2. http://host:8321/v1/documents/5?chunk=7" in out
     assert "3. " not in out.split("## References")[1]  # deduped -> only 2 refs
 
 
 def test_refuses_citation_outside_evidence() -> None:
-    # chunk 999 is not in the evidence set -> hallucinated ref, refuse to render (R-CIT-1)
+    # (9, 999) is not in the evidence set -> hallucinated ref, refuse to render (R-CIT-1)
     with pytest.raises(citations.CitationError):
-        report.render_report(fmt="md", **_kwargs(body="X [D:9#999].", evidence_chunk_ids={2}))  # type: ignore[arg-type]
+        report.render_report(fmt="md", **_kwargs(body="X [D:9#999].", evidence={(1, 2)}))  # type: ignore[arg-type]
+
+
+def test_refuses_citation_hidden_in_the_title() -> None:
+    # red-team H1: a fabricated citation in the TITLE must be refused, not rendered verbatim
+    with pytest.raises(citations.CitationError):
+        report.render_report(
+            fmt="md",
+            **_kwargs(title="Sneaky [D:9#999]", body="ok [GK].", evidence={(1, 2)}),  # type: ignore[arg-type]
+        )
 
 
 def test_html_output_is_valid_ish() -> None:

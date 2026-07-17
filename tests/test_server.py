@@ -172,7 +172,7 @@ def test_report_endpoint_renders_with_references(client: TestClient) -> None:
         json={
             "title": "SPI note",
             "body": f"SPI is configured here [D:1#{cid}].",
-            "evidence_chunk_ids": [cid],
+            "evidence": [[1, cid]],
         },
     )
     assert resp.status_code == 200
@@ -184,10 +184,33 @@ def test_report_endpoint_renders_with_references(client: TestClient) -> None:
 def test_report_rejects_hallucinated_citation(client: TestClient) -> None:
     resp = client.post(
         "/v1/reports",
-        json={"title": "T", "body": "Fabricated [D:9#99999].", "evidence_chunk_ids": [1]},
+        json={"title": "T", "body": "Fabricated [D:9#99999].", "evidence": [[1, 1]]},
     )
     assert resp.status_code == 400
     assert resp.json()["detail"]["error"] == "HALLUCINATED_CITATION"
+
+
+def test_report_rejects_citation_in_title(client: TestClient) -> None:
+    # red-team H1: a fabricated citation in the title must be refused too
+    resp = client.post(
+        "/v1/reports",
+        json={"title": "Sneaky [D:9#99999]", "body": "ok [GK].", "evidence": [[1, 1]]},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "HALLUCINATED_CITATION"
+
+
+def test_absurd_document_id_is_404_not_500(client: TestClient) -> None:
+    # red-team L1: a huge id must 404, not raise a sqlite OverflowError (500)
+    assert client.get("/v1/documents/999999999999999999999999999").status_code == 404
+
+
+def test_wrong_dimension_vector_is_400(vector_client: TestClient) -> None:
+    # red-team L1: right model tag but wrong vector dim -> clean 400, not a crash
+    resp = vector_client.post(
+        "/v1/search", json={"query_vectors": [[0.1, 0.2, 0.3]], "embed_model": "fake-v1"}
+    )
+    assert resp.status_code == 400
 
 
 def test_relations_endpoint(client: TestClient) -> None:
