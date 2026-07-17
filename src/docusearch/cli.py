@@ -1,13 +1,13 @@
 """Command-line interface — a thin front-end over the library (§4).
 
-``serve`` arrives in Phase 3. Every command resolves the config, does one job, and
-logs one event.
+Every command resolves the config, does one job, and logs one event.
 
     docusearch init [--config PATH] [--force]
     docusearch ingest [--dry-run] [--force] [--config PATH]
     docusearch audit [--config PATH]
-    docusearch search <query> [--top-k N] [--prefix] [--config PATH]
+    docusearch search <query> [--top-k N] [--prefix] [--batch-file F --out O] [--config PATH]
     docusearch show <doc_id> [--config PATH]
+    docusearch serve [--host H] [--port P] [--config PATH]
     docusearch gate <n> [--name NAME] [--config PATH]
 
 The console entry point is ``main`` (see pyproject ``[project.scripts]``).
@@ -205,6 +205,14 @@ def _cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:  # pragma: no cover - blocks on uvicorn
+    cfg = config.load(Path(args.config))
+    from .server import serve
+
+    serve(cfg, host=args.host, port=args.port)  # blocks until interrupted
+    return 0
+
+
 def _cmd_gate(args: argparse.Namespace) -> int:
     cfg = config.load(Path(args.config))
     _configure_logging(cfg)
@@ -294,6 +302,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_show.add_argument("doc_id", type=int, help="document id")
     p_show.add_argument("--config", default="docusearch.yaml", help="config path")
     p_show.set_defaults(func=_cmd_show)
+
+    p_serve = sub.add_parser("serve", help="run the REST + MCP server (Phase 3)")
+    p_serve.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_serve.add_argument("--host", default=None, help="bind host (default from config)")
+    p_serve.add_argument("--port", type=int, default=None, help="port (default from config)")
+    p_serve.set_defaults(func=_cmd_serve)
 
     p_gate = sub.add_parser("gate", help="write a Part A/B sign-off checklist")
     p_gate.add_argument("n", help="gate id, e.g. 1 or 4a")

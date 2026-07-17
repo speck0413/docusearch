@@ -96,6 +96,11 @@ no_implicit_reexport = false  # __init__.py re-exports the public API (R-ARCH-2)
 module = ["yaml", "sentence_transformers", "hnswlib"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["docusearch.server"]
+# FastMCP's @mcp.tool() is a framework decorator we can't type; allow it here only.
+disallow_untyped_decorators = false
+
 # ------------------------------------------------------------------ pytest
 [tool.pytest.ini_options]
 testpaths = ["tests"]

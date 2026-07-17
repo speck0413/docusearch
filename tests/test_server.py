@@ -6,6 +6,7 @@ import hashlib
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -47,6 +48,70 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     with Store.open(config.paths.db_path) as store:
         ingest.run_ingest(config, store)
     yield TestClient(create_app(config))
+
+
+@pytest.fixture
+def vector_client(tmp_path: Path) -> Iterator[Any]:
+    """A server over an index embedded with a fake provider (model 'fake-v1', dim 8)."""
+    from ._fakes import FakeProvider
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    for i in range(4):
+        (root / f"d{i}.html").write_text(
+            f"<body><h1>Doc {i}</h1><p>content about topic {i} timing bus</p></body>", "utf-8"
+        )
+    config_path = tmp_path / "docusearch.yaml"
+    config_path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "catalog.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(config_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store, provider=FakeProvider("fake-v1", dim=8))
+    yield TestClient(create_app(config))
+
+
+def _fake_vec() -> list[float]:
+    from ._fakes import FakeProvider
+
+    return FakeProvider("fake-v1", dim=8).embed(["topic 1 timing"])[0].tolist()
+
+
+def test_search_vectors_matching_model(vector_client: TestClient) -> None:
+    resp = vector_client.post(
+        "/v1/search", json={"query_vectors": [_fake_vec()], "embed_model": "fake-v1"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["search_mode"] == "vector"
+    assert body["results"][0]  # vector search returned hits
+
+
+def test_search_vectors_model_mismatch_409(vector_client: TestClient) -> None:
+    resp = vector_client.post(
+        "/v1/search", json={"query_vectors": [_fake_vec()], "embed_model": "some-other-model"}
+    )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error"] == "EMBED_MODEL_MISMATCH"
+    assert detail["server_model"] == "fake-v1" and detail["server_dim"] == 8
+    assert "text" in detail["hint"]  # recoverable: re-send as text
+
+
+def test_search_vectors_without_model_is_400(vector_client: TestClient) -> None:
+    resp = vector_client.post("/v1/search", json={"query_vectors": [_fake_vec()]})
+    assert resp.status_code == 400
+
+
+def test_embed_endpoint_without_model_is_409(client: TestClient) -> None:
+    # the plain `client` fixture is a BM25-only (model: none) server
+    resp = client.post("/v1/embed", json={"texts": ["anything"]})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "NO_EMBED_MODEL"
 
 
 def test_health(client: TestClient) -> None:
@@ -107,6 +172,28 @@ def test_404s(client: TestClient) -> None:
 def test_path_traversal_image_id_is_safe(client: TestClient) -> None:
     # an absurd/hostile sha must 404, never escape the images dir
     assert client.get("/v1/images/..%2f..%2f..%2fetc%2fpasswd").status_code in (404, 400)
+
+
+def test_mcp_is_mounted_at_configured_path(tmp_path: Path) -> None:
+    from docusearch.server import build_mcp, create_app
+
+    config_path = tmp_path / "docusearch.yaml"
+    config_path.write_text(
+        f'paths:\n  db_path: "{(tmp_path / "c.db").as_posix()}"\n'
+        f'  staging_dir: "{(tmp_path / "s").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(config_path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        app = create_app(config)
+        # the stable tool names are registered on the MCP server (agents depend on them)
+        from docusearch.server import Service
+
+        tool_names = {t.name for t in build_mcp(Service(config), config)._tool_manager.list_tools()}
+    assert config.serve.mcp_path in {getattr(r, "path", None) for r in app.routes}
+    assert {"search_docs", "get_document", "related_documents", "catalog_stats"} <= tool_names
 
 
 @pytest.mark.model

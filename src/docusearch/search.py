@@ -303,6 +303,46 @@ def hybrid_search(
     return _filter_roles(hits, roles)[:top_k]
 
 
+def vector_search(
+    store: Store,
+    query_vector: np.ndarray,
+    vector_index: VectorIndex,
+    *,
+    top_k: int = 10,
+    roles: set[str] | None = None,
+) -> list[SearchHit]:
+    """Rank chunks by cosine similarity to a PRE-COMPUTED query vector (client sent it).
+
+    Used by the query-vectors path (§8): the server does no embedding here — it trusts
+    the vector after verifying the model tag matched (the caller enforces that, R-EMB-3).
+    """
+    ranked = vector_index.query(query_vector, _pool_size(top_k, roles))
+    hydrated = store.hydrate_chunks([cid for cid, _ in ranked])
+    hits: list[SearchHit] = []
+    for chunk_id, sim in ranked:
+        row = hydrated.get(chunk_id)
+        if row is None:
+            continue
+        doc_id = int(row["doc_id"])
+        hits.append(
+            SearchHit(
+                doc_id=doc_id,
+                chunk_id=chunk_id,
+                title=str(row["title"] or ""),
+                path=str(row["path"] or ""),
+                fmt=str(row["fmt"] or ""),
+                locator=str(row["locator"] or ""),
+                kind=str(row["kind"] or ""),
+                snippet=_snippet(str(row["text"] or "")),
+                score=round(float(sim), 6),
+                citation=f"D:{doc_id}#{chunk_id}",
+                audience=_audience(row["audience"]),
+                search_mode="vector",
+            )
+        )
+    return _filter_roles(hits, roles)[:top_k]
+
+
 def search(
     store: Store,
     queries: str | Sequence[str],

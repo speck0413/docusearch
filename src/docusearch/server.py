@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -48,6 +49,15 @@ def _approx_mb(dim: int) -> int:
     return 90
 
 
+class ModelMismatchError(Exception):
+    """A query's embedding model doesn't match the index's — never mix (R-EMB-3, 409)."""
+
+    def __init__(self, message: str, *, server_model: str, server_dim: int) -> None:
+        super().__init__(message)
+        self.server_model = server_model
+        self.server_dim = server_dim
+
+
 class Service:
     """The one place search/document/image/embedding logic lives (§10). Reused by REST
     and MCP so there is exactly one implementation per concept (R-REUSE-2)."""
@@ -61,10 +71,11 @@ class Service:
 
     # -- lazily-warmed model + index --------------------------------------------
 
-    def _provider_or_none(self) -> embed.EmbedProvider | None:
+    def _embed_provider(self) -> embed.EmbedProvider | None:
+        """The server's own embedding provider (loaded once), or None if `model: none`."""
         if not self._provider_loaded:
             cfg = self.config
-            if cfg.embed.model != "none" and not cfg.search.bm25_only:
+            if cfg.embed.model not in ("none", "auto"):
                 try:
                     self._provider = embed.make_provider(cfg.embed)
                 except NotImplementedError:
@@ -116,7 +127,7 @@ class Service:
         cfg = self.config
         k = top_k if top_k is not None else cfg.search.top_k_default
         force_bm25 = cfg.search.bm25_only if bm25_only is None else bm25_only
-        provider = None if force_bm25 else self._provider_or_none()
+        provider = None if force_bm25 else self._embed_provider()
         with Store.open(cfg.paths.db_path) as store:
             vector_index = None
             if provider is not None and store.count_embeddings() > 0:
@@ -141,6 +152,52 @@ class Service:
         model_used = provider.model_id if provider is not None else "none"
         mode = "hybrid" if (provider is not None and vector_index is not None) else "bm25"
         return result_lists, model_used, mode
+
+    def search_vectors(
+        self,
+        query_vectors: list[list[float]],
+        embed_model: str,
+        *,
+        top_k: int | None = None,
+        roles: set[str] | None = None,
+    ) -> tuple[list[list[SearchHit]], str, str]:
+        """Rank against client-supplied vectors after verifying the model tag (R-EMB-3).
+
+        Raises ModelMismatchError (-> HTTP 409) if the tag doesn't match the index model.
+        """
+        cfg = self.config
+        k = top_k if top_k is not None else cfg.search.top_k_default
+        with Store.open(cfg.paths.db_path) as store:
+            server_model = store.get_meta("embed_model") or "none"
+            server_dim = int(store.get_meta("embed_dim") or 0)
+            if server_model == "none" or embed_model != server_model:
+                raise ModelMismatchError(
+                    f"query vectors were made with {embed_model!r} but the index uses "
+                    f"{server_model!r}",
+                    server_model=server_model,
+                    server_dim=server_dim,
+                )
+            vector_index = self._vector_index_or_none(store, server_dim)
+            assert vector_index is not None
+            results = [
+                search.vector_search(
+                    store, np.asarray(vec, dtype=np.float32), vector_index, top_k=k, roles=roles
+                )
+                for vec in query_vectors
+            ]
+        return results, server_model, "vector"
+
+    def embed_texts(self, texts: list[str]) -> dict[str, Any]:
+        """Server-side embedding for the RemoteServerProvider client path (R-EMB-4)."""
+        provider = self._embed_provider()
+        if provider is None:
+            raise ModelMismatchError(
+                "this server has no embedding model (embed.model: none)",
+                server_model="none",
+                server_dim=0,
+            )
+        vectors = provider.embed(texts)
+        return {"model": provider.model_id, "dim": provider.dim, "vectors": vectors.tolist()}
 
     def get_document(self, doc_id: int, *, chunk: int | None = None) -> dict[str, Any] | None:
         with Store.open(self.config.paths.db_path) as store:
@@ -177,6 +234,32 @@ class Service:
         path = Path(str(doc["path"]))
         return path if path.is_file() else None
 
+    def relations(self, doc_id: int, direction: str = "out") -> list[dict[str, Any]]:
+        """Linked / linking documents (R-ING-5 graph). direction: out | in | both."""
+        out: list[dict[str, Any]] = []
+        with Store.open(self.config.paths.db_path) as store:
+            if direction in ("out", "both"):
+                for r in store.relations_out(doc_id):
+                    out.append(
+                        {
+                            "neighbor": r["dst_doc"],
+                            "raw": r["dst_raw"],
+                            "link_type": r["link_type"],
+                            "direction": "out",
+                        }
+                    )
+            if direction in ("in", "both"):
+                for r in store.relations_in(doc_id):
+                    out.append(
+                        {
+                            "neighbor": r["src_doc"],
+                            "raw": r["dst_raw"],
+                            "link_type": r["link_type"],
+                            "direction": "in",
+                        }
+                    )
+        return out
+
     def image(self, sha256: str) -> tuple[Path, str] | None:
         with Store.open(self.config.paths.db_path) as store:
             row = store.get_image(sha256)
@@ -210,16 +293,90 @@ def _hit_dict(hit: SearchHit, base_url: str) -> dict[str, Any]:
 
 class SearchRequest(BaseModel):
     query_texts: list[str] = []
+    query_vectors: list[list[float]] | None = None
+    embed_model: str | None = None
     top_k: int | None = None
     prefix: bool = False
     bm25_only: bool | None = None
     roles: list[str] | None = None
 
 
+class EmbedRequest(BaseModel):
+    texts: list[str] = []
+
+
+def _mismatch_409(err: ModelMismatchError) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": "EMBED_MODEL_MISMATCH",
+            "server_model": err.server_model,
+            "server_dim": err.server_dim,
+            "hint": "re-send as text (query_texts) or re-embed with the server's model",
+        },
+    )
+
+
+def _public_base(config: Config) -> str:
+    return f"http://localhost:{config.serve.port}"
+
+
+def build_mcp(service: Service, config: Config) -> Any:
+    """The MCP server exposing the stable tool names over the same service layer (§10).
+
+    Tool names are a stable contract agents depend on. `serve` mounts this over streamable
+    HTTP at ``serve.mcp_path``. (annotate / list_versions / check_discrepancies /
+    create_report arrive with their features in Phases 3b/5.)
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    # serve at the sub-app root so mounting at serve.mcp_path yields a clean path
+    mcp: Any = FastMCP("docusearch", streamable_http_path="/")
+    base = _public_base(config)
+
+    @mcp.tool()
+    def search_docs(queries: list[str], top_k: int = 10) -> dict[str, Any]:
+        """Search the catalog (batch). Always pass a list of queries."""
+        results, model_used, mode = service.search(queries, top_k=top_k)
+        return {
+            "results": [[_hit_dict(h, base) for h in lst] for lst in results],
+            "embed_model_used": model_used,
+            "search_mode": mode,
+        }
+
+    @mcp.tool()
+    def get_document(doc_id: int, chunk: int | None = None) -> dict[str, Any] | None:
+        """Fetch a document's metadata + chunks by id."""
+        return service.get_document(doc_id, chunk=chunk)
+
+    @mcp.tool()
+    def related_documents(doc_id: int, direction: str = "both") -> list[dict[str, Any]]:
+        """Documents linked from / to this one (direction: out | in | both)."""
+        return service.relations(doc_id, direction)
+
+    @mcp.tool()
+    def catalog_stats() -> dict[str, Any]:
+        """Counts + embedding model for the catalog."""
+        return service.health()
+
+    return mcp
+
+
 def create_app(config: Config) -> FastAPI:
-    """Build the FastAPI app. All routes are thin wrappers over ``Service`` (§10)."""
+    """Build the FastAPI app + MCP. All routes are thin wrappers over ``Service`` (§10)."""
+    from contextlib import asynccontextmanager
+
     service = Service(config)
-    app = FastAPI(title="docusearch", version=__version__)
+    mcp = build_mcp(service, config)
+    mcp_app = mcp.streamable_http_app()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> Any:
+        # run the MCP session manager's lifespan alongside the app (streamable HTTP)
+        async with mcp_app.router.lifespan_context(mcp_app):
+            yield
+
+    app = FastAPI(title="docusearch", version=__version__, lifespan=lifespan)
 
     @app.get("/v1/health")
     def health() -> dict[str, Any]:
@@ -231,21 +388,39 @@ def create_app(config: Config) -> FastAPI:
 
     @app.post("/v1/search")
     def search_route(req: SearchRequest, request: Request) -> dict[str, Any]:
-        results, model_used, mode = service.search(
-            req.query_texts,
-            top_k=req.top_k,
-            prefix=req.prefix,
-            roles=set(req.roles) if req.roles else None,
-            bm25_only=req.bm25_only,
-        )
+        roles = set(req.roles) if req.roles else None
+        if req.query_vectors is not None:
+            if not req.embed_model:
+                raise HTTPException(status_code=400, detail="query_vectors require embed_model")
+            try:
+                results, model_used, mode = service.search_vectors(
+                    req.query_vectors, req.embed_model, top_k=req.top_k, roles=roles
+                )
+            except ModelMismatchError as err:  # 409, recoverable (R-EMB-3)
+                raise _mismatch_409(err) from err
+        else:
+            results, model_used, mode = service.search(
+                req.query_texts,
+                top_k=req.top_k,
+                prefix=req.prefix,
+                roles=roles,
+                bm25_only=req.bm25_only,
+            )
         base = str(request.base_url).rstrip("/")
-        runlog.log("api.search", queries=len(req.query_texts), mode=mode)
+        runlog.log("api.search", queries=len(results), mode=mode)
         return {
             "results": [[_hit_dict(h, base) for h in lst] for lst in results],
             "embed_model_used": model_used,
             "search_mode": mode,
             "run_id": runlog.RUN_ID,
         }
+
+    @app.post("/v1/embed")
+    def embed_route(req: EmbedRequest) -> dict[str, Any]:
+        try:
+            return service.embed_texts(req.texts)
+        except ModelMismatchError as err:
+            raise HTTPException(status_code=409, detail={"error": "NO_EMBED_MODEL"}) from err
 
     @app.get("/v1/documents/{doc_id}")
     def get_document(doc_id: int, chunk: int | None = None, download: int = 0) -> Any:
@@ -267,6 +442,12 @@ def create_app(config: Config) -> FastAPI:
         path, media = img
         return FileResponse(path, media_type=media)
 
+    @app.get("/v1/relations/{doc_id}")
+    def relations(doc_id: int, direction: str = "both") -> list[dict[str, Any]]:
+        return service.relations(doc_id, direction)
+
+    # MCP over streamable HTTP, same service layer, at serve.mcp_path (R-API-1)
+    app.mount(config.serve.mcp_path, mcp_app)
     return app
 
 

@@ -24,7 +24,11 @@ def test_catalog_is_the_public_catalog() -> None:
 
 
 def test_all_is_thin_and_hides_internals() -> None:
-    # Phase-1 surface. Phase 3 adds "serve" here.
-    assert set(docusearch.__all__) == {"Catalog", "Config", "__version__"}
-    for internal in ("store", "runlog", "cli", "config", "ingest", "search"):
+    assert set(docusearch.__all__) == {"Catalog", "Config", "serve", "__version__"}
+    for internal in ("store", "runlog", "cli", "config", "ingest", "search", "server"):
         assert internal not in docusearch.__all__
+
+
+def test_serve_is_lazily_exported() -> None:
+    # `import docusearch` must not require FastAPI; serve resolves on access.
+    assert callable(docusearch.serve)
