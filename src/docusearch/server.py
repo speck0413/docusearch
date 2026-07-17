@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import embed, runlog, search
+from . import citations, embed, report, runlog, search
 from ._version import __version__
 from .config import Config
 from .search import SearchHit
@@ -305,6 +305,15 @@ class EmbedRequest(BaseModel):
     texts: list[str] = []
 
 
+class ReportRequest(BaseModel):
+    title: str
+    body: str  # the claim text, each factual sentence ending in a [GK] or [D:...] tag
+    evidence_chunk_ids: list[int] = []
+    fmt: str = "md"
+    audience: list[str] = []
+    sources: list[str] = []
+
+
 def _mismatch_409(err: ModelMismatchError) -> HTTPException:
     return HTTPException(
         status_code=409,
@@ -445,6 +454,30 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/v1/relations/{doc_id}")
     def relations(doc_id: int, direction: str = "both") -> list[dict[str, Any]]:
         return service.relations(doc_id, direction)
+
+    @app.post("/v1/reports")
+    def reports_route(req: ReportRequest, request: Request) -> dict[str, Any]:
+        base = str(request.base_url).rstrip("/")
+        info = service.embed_info()
+        try:
+            rendered = report.render_report(
+                title=req.title,
+                body=req.body,
+                evidence_chunk_ids=set(req.evidence_chunk_ids),
+                base_url=base,
+                fmt=req.fmt,
+                run_id=runlog.RUN_ID,
+                audience=req.audience,
+                embed_model=info["model"],
+                sources=req.sources,
+            )
+        except citations.CitationError as err:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "HALLUCINATED_CITATION", "message": str(err)},
+            ) from err
+        runlog.log("api.report", fmt=req.fmt, evidence=len(req.evidence_chunk_ids))
+        return {"fmt": req.fmt, "report": rendered}
 
     # MCP over streamable HTTP, same service layer, at serve.mcp_path (R-API-1)
     app.mount(config.serve.mcp_path, mcp_app)

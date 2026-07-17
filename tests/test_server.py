@@ -164,6 +164,38 @@ def test_image_serving(client: TestClient) -> None:
     assert resp.content == _PNG
 
 
+def test_report_endpoint_renders_with_references(client: TestClient) -> None:
+    doc = client.get("/v1/documents/1").json()
+    cid = doc["chunks"][0]["id"]
+    resp = client.post(
+        "/v1/reports",
+        json={
+            "title": "SPI note",
+            "body": f"SPI is configured here [D:1#{cid}].",
+            "evidence_chunk_ids": [cid],
+        },
+    )
+    assert resp.status_code == 200
+    rendered = resp.json()["report"]
+    assert "# SPI note" in rendered and "## References" in rendered
+    assert f"/v1/documents/1?chunk={cid}" in rendered
+
+
+def test_report_rejects_hallucinated_citation(client: TestClient) -> None:
+    resp = client.post(
+        "/v1/reports",
+        json={"title": "T", "body": "Fabricated [D:9#99999].", "evidence_chunk_ids": [1]},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "HALLUCINATED_CITATION"
+
+
+def test_relations_endpoint(client: TestClient) -> None:
+    resp = client.get("/v1/relations/1")
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
 def test_404s(client: TestClient) -> None:
     assert client.get("/v1/documents/9999").status_code == 404
     assert client.get("/v1/images/deadbeef").status_code == 404
