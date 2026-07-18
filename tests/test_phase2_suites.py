@@ -81,6 +81,24 @@ def test_absent_topics_deterministic_and_unique() -> None:
     assert len(set(ob.absent_topics(1, 20))) == 20
 
 
+def test_recall_at_is_extension_agnostic() -> None:
+    # Red-team M2: the auto_qa answer key is authored with .html paths, but the same logical page
+    # is a .pdf/.md/.docx in a format-converted corpus. _recall_at must score the SAME answer
+    # regardless of the corpus's file format, WITHOUT collapsing distinct names by prefix.
+    from types import SimpleNamespace
+
+    def hits(*paths: str) -> list:  # type: ignore[type-arg]
+        return [SimpleNamespace(path=p) for p in paths]
+
+    # .html answer key matches the same page under every converted extension
+    for ext in ("html", "pdf", "md", "docx"):
+        assert ob._recall_at(hits(f"/corpus/library/re.{ext}"), ["/re.html"]) is True
+    # ...and still counts a genuine miss (answer not retrieved at all)
+    assert ob._recall_at(hits("/corpus/library/json.pdf"), ["/re.html"]) is False
+    # ...and never false-matches a longer name that merely shares a prefix (the anchor holds)
+    assert ob._recall_at(hits("/corpus/library/reprlib.pdf"), ["/re.html"]) is False
+
+
 def test_obtuse_report_renders() -> None:
     report = ob.QAReport(
         total=12,
