@@ -567,6 +567,151 @@ def extract_docx(data: bytes) -> ExtractedDoc:
     return ExtractedDoc(title=title, segments=segments, links=links, images=images)
 
 
+def _strip_front_matter(text: str) -> str:
+    """Drop a leading YAML front-matter block (``---`` … ``---``, common in real Markdown like
+    MDN) so its keys aren't indexed as body prose."""
+    if text.startswith("---\n") or text.startswith("---\r\n"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            nl = text.find("\n", end + 1)
+            return text[nl + 1 :] if nl != -1 else ""
+    return text
+
+
+def _md_inline_text(inline: object) -> str:
+    """Rendered plain text of an ``inline`` token: text/code/image-alt children, breaks -> space
+    (so ``[anchor](url)`` yields ``anchor``, not the raw markup)."""
+    children = getattr(inline, "children", None)
+    if not children:
+        return _clean(getattr(inline, "content", "") or "")
+    parts: list[str] = []
+    for c in children:
+        if c.type in ("text", "code_inline", "image"):  # image.content == alt text
+            parts.append(c.content)
+        elif c.type in ("softbreak", "hardbreak"):
+            parts.append(" ")
+    return _clean("".join(parts))
+
+
+def _decode_data_uri(src: str) -> tuple[bytes | None, str]:
+    """Decode a ``data:image/<ext>;base64,<data>`` URI to (bytes, ext), or (None, "") if it isn't
+    one — so an image embedded inline in Markdown is retained (R-ING-6)."""
+    import base64
+
+    if not src.startswith("data:image/"):
+        return None, ""
+    header, _, payload = src.partition(",")
+    if ";base64" not in header or not payload:
+        return None, ""
+    ext = header[len("data:image/") :].split(";", 1)[0].lower()
+    try:
+        return base64.b64decode(payload), ("jpg" if ext == "jpeg" else ext)
+    except Exception:  # noqa: BLE001 - a malformed data URI just isn't retained
+        return None, ""
+
+
+def _collect_md_inline(
+    inline: object, links: list[LinkRef], images: list[ImageRef], heading_path: str
+) -> None:
+    for c in getattr(inline, "children", None) or []:
+        if c.type == "link_open":
+            href = c.attrGet("href")
+            if href:
+                links.append(LinkRef(target=str(href), anchor="", link_type="md_link"))
+        elif c.type == "image":
+            src = str(c.attrGet("src") or "")
+            if not src:
+                continue
+            data, ext = _decode_data_uri(src)
+            images.append(
+                ImageRef(
+                    src="md-inline-image" if data is not None else src,
+                    alt=_clean(c.content),
+                    caption="",
+                    heading_path=heading_path,
+                    data=data,
+                    ext=ext,
+                )
+            )
+
+
+def _linearize_md_table(tokens: list, start: int, end: int) -> str:  # type: ignore[type-arg]
+    """Flatten a markdown-it table token span to the ``a | b`` / newline-per-row form (§7.3)."""
+    rows: list[str] = []
+    cur: list[str] = []
+    i = start
+    while i <= end:
+        t = tokens[i]
+        if t.type == "tr_open":
+            cur = []
+        elif t.type in ("th_open", "td_open"):
+            nxt = tokens[i + 1] if i + 1 <= end and tokens[i + 1].type == "inline" else None
+            cur.append(_md_inline_text(nxt))
+        elif t.type == "tr_close" and any(c.strip() for c in cur):
+            rows.append(" | ".join(cur))
+        i += 1
+    return "\n".join(rows)
+
+
+def extract_md(data: bytes) -> ExtractedDoc:
+    """Extract headings, prose, fenced code, tables, links, and images from Markdown (§7.3,
+    Phase 4c).
+
+    markdown-it-py (the ``[md]`` extra) parses to a CommonMark token stream, imported lazily so
+    non-MD users never load it. ``Heading N`` levels drive the heading path (R-ING-4), paragraphs
+    are ``body``, fenced code is ``code`` (kept whole), GFM tables are ``table`` (linearized), and
+    links/images become ``LinkRef``/``ImageRef`` (R-ING-5/6). Front matter is stripped. Every
+    extractor returns the common :class:`ExtractedDoc`.
+    """
+    from markdown_it import MarkdownIt  # lazy: the [md] extra is only loaded to parse Markdown
+
+    text = _strip_front_matter(data.decode("utf-8", errors="replace"))
+    tokens = MarkdownIt("commonmark", {"html": False}).enable("table").parse(text)
+    segments: list[Segment] = []
+    links: list[LinkRef] = []
+    images: list[ImageRef] = []
+    stack: list[tuple[int, str]] = []
+    n = len(tokens)
+    i = 0
+    while i < n:
+        t = tokens[i]
+        if t.type == "heading_open":
+            inline = tokens[i + 1] if i + 1 < n else None
+            htext = _md_inline_text(inline)
+            _push_heading(stack, int(t.tag[1]), htext)
+            if htext:
+                segments.append(Segment("body", htext, _heading_path(stack)))
+            _collect_md_inline(inline, links, images, _heading_path(stack))
+            i += 3  # heading_open, inline, heading_close
+            continue
+        if t.type == "paragraph_open":
+            inline = tokens[i + 1] if i + 1 < n else None
+            ptext = _md_inline_text(inline)
+            if ptext:
+                segments.append(Segment("body", ptext, _heading_path(stack)))
+            _collect_md_inline(inline, links, images, _heading_path(stack))
+            i += 3
+            continue
+        if t.type == "fence":
+            code = t.content.rstrip("\n")
+            if code.strip():
+                segments.append(Segment("code", code, _heading_path(stack)))
+            i += 1
+            continue
+        if t.type == "table_open":
+            j = i
+            while j < n and tokens[j].type != "table_close":
+                j += 1
+            table_text = _linearize_md_table(tokens, i, j)
+            if table_text:
+                segments.append(Segment("table", table_text, _heading_path(stack)))
+            i = j + 1
+            continue
+        i += 1
+    title = _clean(segments[0].text.splitlines()[0])[:200] if segments else ""
+    return ExtractedDoc(title=title, segments=segments, links=links, images=images)
+
+
 def extract_document(
     path: Path,
     ext: str,
@@ -577,15 +722,17 @@ def extract_document(
     """Dispatch to the right extractor by file extension — the pluggable-parser seam (R-PROC-6).
 
     HTML via selectolax (content_selector/strip_selectors apply), PDF via PyMuPDF, DOCX via
-    python-docx. A new format adds one branch here plus its extractor; the rest of the pipeline
-    (chunker, links, store) is format-agnostic because every extractor returns an
-    :class:`ExtractedDoc`.
+    python-docx, Markdown via markdown-it-py. A new format adds one branch here plus its
+    extractor; the rest of the pipeline (chunker, links, store) is format-agnostic because every
+    extractor returns an :class:`ExtractedDoc`.
     """
     fmt = ext.lower().lstrip(".")
     if fmt == "pdf":
         return extract_pdf(path.read_bytes())
     if fmt == "docx":
         return extract_docx(path.read_bytes())
+    if fmt in ("md", "markdown"):
+        return extract_md(path.read_bytes())
     html = path.read_bytes().decode("utf-8", errors="replace")
     return extract_html(
         html, content_selector=content_selector, strip_selectors=list(strip_selectors)

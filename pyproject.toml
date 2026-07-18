@@ -56,6 +56,12 @@ pdf = [
 docx = [
   "python-docx>=1.1",
 ]
+# Markdown format support (Phase 4c). markdown-it-py parses to a CommonMark token stream
+# (headings, fenced code, GFM tables, links, images); lazy-imported so non-MD
+# users never load it. The same library builds the derived MD test corpora in convert.py.
+md = [
+  "markdown-it-py>=3.0",
+]
 # Cloud image enrichment (enrich.vision_images). Off by default; lazy-imported so core
 # ingest/search never pull the SDK. The SDK owns the Messages-API request shape, typed
 # errors, retries, and credential resolution (env key or `ant auth login` profile).
@@ -88,6 +94,7 @@ dev = [
   "pymupdf>=1.24",
   "reportlab>=4.0",
   "python-docx>=1.1",
+  "markdown-it-py>=3.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -124,7 +131,8 @@ disallow_untyped_defs = true
 no_implicit_reexport = false  # __init__.py re-exports the public API (R-ARCH-2)
 
 [[tool.mypy.overrides]]
-module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "reportlab.*", "docx", "docx.*"]
+module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "reportlab.*",
+          "docx", "docx.*", "markdown_it", "markdown_it.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

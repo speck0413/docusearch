@@ -30,7 +30,7 @@ from .ingest import extract_html
 if TYPE_CHECKING:
     from .config import SourceConfig
 
-_SUPPORTED = ("pdf", "docx")
+_SUPPORTED = ("pdf", "docx", "md")
 # Max embedded-image box on a US-letter page (612x792 pt) inside 1" margins, with headroom so a
 # tall diagram (e.g. 450x990) is scaled down to fit instead of raising reportlab's LayoutError.
 _PDF_IMG_MAX_W = 450.0
@@ -172,6 +172,68 @@ def html_to_docx_bytes(
     return buf.getvalue()
 
 
+def _md_table(linearized: str) -> list[str]:
+    """A ``a | b`` / newline-per-row segment -> GFM table lines (header + separator + rows) so
+    ``extract_md`` re-parses it as a real table."""
+    grid = [row.split(" | ") for row in linearized.split("\n") if row.strip()]
+    if not grid:
+        return []
+    ncols = max(len(r) for r in grid)
+    out = ["| " + " | ".join((grid[0] + [""] * ncols)[:ncols]) + " |",
+           "| " + " | ".join(["---"] * ncols) + " |"]
+    out += ["| " + " | ".join((r + [""] * ncols)[:ncols]) + " |" for r in grid[1:]]
+    return out
+
+
+def html_to_md_bytes(
+    html: str,
+    *,
+    content_selector: str = "",
+    strip_selectors: Sequence[str] = (),
+    base_path: Path | str | None = None,
+) -> bytes:
+    """Render one HTML document's extracted content to Markdown (CommonMark + GFM).
+
+    Heading paths become ``##`` headings, body becomes paragraphs, code becomes fenced blocks,
+    tables become GFM tables, and real ``<img>`` files are embedded as ``![alt](data:...)`` data
+    URIs (self-contained, so the image survives + can be vision-enriched, R-ING-6); a missing image
+    keeps its alt text as ``![alt]()`` so image-placement needles survive. ``markdown-it-py`` at
+    ingest recovers all of it.
+    """
+    import base64
+
+    doc = extract_html(html, content_selector=content_selector, strip_selectors=list(strip_selectors))
+    lines: list[str] = []
+    if doc.title:
+        lines += [f"# {doc.title}", ""]
+    last_heading: str | None = None
+    for seg in doc.segments:
+        if seg.heading_path and seg.heading_path != last_heading:
+            lines += [f"## {seg.heading_path}", ""]
+            last_heading = seg.heading_path
+        if seg.kind == "code":
+            lines += ["```", seg.text, "```", ""]
+        elif seg.kind == "table":
+            lines += [*_md_table(seg.text), ""]
+        else:
+            lines += [seg.text.replace("\n", " "), ""]
+    for img in doc.images:
+        alt = " ".join(t for t in (img.alt, img.caption) if t).strip()
+        local = _resolve_image(img.src, base_path)
+        src = ""
+        if local is not None:  # embed the real image inline as a data URI (self-contained)
+            with contextlib.suppress(Exception):
+                ext = local.suffix.lstrip(".").lower() or "png"
+                media = "jpeg" if ext in ("jpg", "jpeg") else ext
+                b64 = base64.b64encode(local.read_bytes()).decode("ascii")
+                src = f"data:image/{media};base64,{b64}"
+        lines.append(f"![{alt}]({src})")
+        lines.append("")
+    if not doc.segments and not doc.images:
+        lines.append(doc.title or "(no extractable text)")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 def _render_bytes(
     html: str,
     fmt: str,
@@ -182,14 +244,13 @@ def _render_bytes(
 ) -> bytes:
     """Dispatch to the format's HTML->bytes renderer (the derived-corpus analog of the ingest
     extractor dispatch). A new format adds one branch here plus its ``html_to_<fmt>_bytes``."""
+    kw = {"content_selector": content_selector, "strip_selectors": strip_selectors, "base_path": base_path}
     if fmt == "pdf":
-        return html_to_pdf_bytes(
-            html, content_selector=content_selector, strip_selectors=strip_selectors, base_path=base_path
-        )
+        return html_to_pdf_bytes(html, **kw)  # type: ignore[arg-type]
     if fmt == "docx":
-        return html_to_docx_bytes(
-            html, content_selector=content_selector, strip_selectors=strip_selectors, base_path=base_path
-        )
+        return html_to_docx_bytes(html, **kw)  # type: ignore[arg-type]
+    if fmt == "md":
+        return html_to_md_bytes(html, **kw)  # type: ignore[arg-type]
     raise ValueError(f"unsupported target format {fmt!r}; supported: {_SUPPORTED}")
 
 

@@ -149,6 +149,29 @@ def test_needles_survive_docx_conversion(tmp_path: Path) -> None:
         assert hit == tot, f"{placement}: only {hit}/{tot} needles survived DOCX conversion"
 
 
+def test_needles_survive_md_conversion(tmp_path: Path) -> None:
+    # §15.4 needles-through-conversion for Markdown: same 60 needles, HTML -> MD -> ingest.
+    needles = nd.generate_needles(seed=5, count=60)
+    filler = tmp_path / "filler"
+    filler.mkdir()
+    for i in range(4):
+        (filler / f"f{i}.html").write_text(
+            "<html><body><h1>Doc</h1><p>ordinary filler text about timing and interfaces of "
+            "the peripheral bus, long enough to clear the content filter.</p></body></html>",
+            encoding="utf-8",
+        )
+    md_dir = nd.build_conversion_haystack(filler, tmp_path / "work", needles, fmt="md")
+    assert (md_dir / "needle_000.md").is_file()
+    config = nd.conversion_config(tmp_path, md_dir, model="none", min_chars=5, fmt="md")
+    Catalog(config).ingest()
+    with Store.open(config.paths.db_path) as store:
+        report = nd.evaluate(store, needles)
+    assert report.exact_top1_rate == 1.0
+    for placement in ("prose", "code", "table", "image", "deep"):
+        hit, tot = report.per_placement[placement]
+        assert hit == tot, f"{placement}: only {hit}/{tot} needles survived MD conversion"
+
+
 def test_render_report_mentions_gates() -> None:
     report = nd.NeedleReport(
         seed=1,
