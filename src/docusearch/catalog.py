@@ -83,6 +83,7 @@ class Catalog:
         self,
         *,
         limit: int | None = None,
+        by_size: bool = False,
         progress: vision.ProgressFn | None = None,
     ) -> vision.VisionResult:
         """Enrich retained images with cloud OCR + description (enrich.vision_images).
@@ -103,6 +104,7 @@ class Catalog:
                 provider,
                 staging_dir=self.config.paths.staging_dir,
                 limit=limit,
+                by_size=by_size,
                 progress=progress,
             )
             embed_provider = self._provider()

@@ -394,6 +394,7 @@ def enrich_images(
     *,
     staging_dir: Path | str,
     limit: int | None = None,
+    by_size: bool = False,
     progress: ProgressFn | None = None,
 ) -> VisionResult:
     """Enrich every not-yet-enriched image: describe it, persist the result, and add a
@@ -403,7 +404,7 @@ def enrich_images(
     matching the operability contract (visible progress, one-line errors, never abort a batch).
     """
     images_dir = (Path(staging_dir) / "images").resolve()
-    todo = store.images_needing_vision(limit=limit)
+    todo = store.images_needing_vision(limit=limit, by_size=by_size)
     total = len(todo)
     result = VisionResult()
     for done, row in enumerate(todo, start=1):

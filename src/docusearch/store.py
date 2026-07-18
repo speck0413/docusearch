@@ -506,14 +506,19 @@ class Store:
 
     # -- vision enrichment (enrich.vision_images) --------------------------------
 
-    def images_needing_vision(self, *, limit: int | None = None) -> list[sqlite3.Row]:
-        """Retained images with no vision result yet, ordered by sha for determinism.
+    def images_needing_vision(
+        self, *, limit: int | None = None, by_size: bool = False
+    ) -> list[sqlite3.Row]:
+        """Retained images with no vision result yet. Ordered by sha for determinism, or by
+        **descending size** when ``by_size`` (largest first) so a capped run enriches the real
+        diagrams before tiny icons — with ``sha256`` as the deterministic tie-break.
 
         ``vision_model IS NULL`` is the worklist marker, so a re-run only processes images
         that were never enriched (idempotent, and no double API spend)."""
+        order = "bytes DESC, sha256" if by_size else "sha256"
         sql = (
             "SELECT sha256, ext, doc_id, locator, alt, caption FROM images "
-            "WHERE vision_model IS NULL ORDER BY sha256"
+            f"WHERE vision_model IS NULL ORDER BY {order}"
         )
         if limit is not None:
             return self._conn.execute(sql + " LIMIT ?", (limit,)).fetchall()

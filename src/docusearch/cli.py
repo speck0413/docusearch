@@ -163,7 +163,9 @@ def _cmd_vision(args: argparse.Namespace) -> int:
     log_path = runlog.active_log_path()
     if log_path is not None:
         print(f"Logging to {log_path} (tail -f to watch)", file=sys.stderr)
-    result = Catalog(cfg).enrich_vision(limit=args.limit, progress=_ProgressBar())
+    result = Catalog(cfg).enrich_vision(
+        limit=args.limit, by_size=args.largest, progress=_ProgressBar()
+    )
     print(
         f"Enriched {result.enriched} images "
         f"({result.skipped} unsupported type, {result.failed} failed)."
@@ -727,6 +729,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_vision.add_argument(
         "--limit", type=int, default=None, help="only enrich the first N pending images (cost cap)"
+    )
+    p_vision.add_argument(
+        "--largest",
+        action="store_true",
+        help="enrich the largest images first (real diagrams before tiny icons)",
     )
     p_vision.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     p_vision.add_argument("--config", default="docusearch.yaml", help="config path")

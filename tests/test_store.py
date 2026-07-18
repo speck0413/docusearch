@@ -204,3 +204,16 @@ def test_in_memory_store(tmp_path: Path) -> None:
     with st.Store.open(":memory:") as store:
         assert store.table_names() >= EXPECTED_TABLES
         assert store.schema_version == st.SCHEMA_VERSION
+
+
+def test_images_needing_vision_by_size(tmp_path):  # type: ignore[no-untyped-def]
+    # size-priority worklist: the largest diagrams enrich before tiny icons (largest first).
+    with st.Store.open(tmp_path / "c.db") as store:
+        doc_id = store.add_document(path="/a.pdf")
+        for sha, nb in (("aaa", 10), ("bbb", 1000), ("ccc", 100)):
+            store.add_image(sha256=sha, ext="png", doc_id=doc_id, locator="", alt="",
+                            caption="", num_bytes=nb)
+        by_size = [r["sha256"] for r in store.images_needing_vision(by_size=True)]
+        assert by_size == ["bbb", "ccc", "aaa"]  # 1000 > 100 > 10
+        by_sha = [r["sha256"] for r in store.images_needing_vision()]
+        assert by_sha == ["aaa", "bbb", "ccc"]  # default: sha order (deterministic)
