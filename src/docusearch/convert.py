@@ -17,6 +17,7 @@ Public surface:
 
 from __future__ import annotations
 
+import contextlib
 import io
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -32,8 +33,22 @@ if TYPE_CHECKING:
 _SUPPORTED = ("pdf", "docx")
 
 
+def _resolve_image(src: str, base_path: Path | str | None) -> Path | None:
+    """Resolve an ``<img src>`` to a readable local image file, or None (external/missing/needle)."""
+    if base_path is None:
+        return None
+    from .ingest import _resolve_local
+
+    local = _resolve_local(src, Path(base_path))
+    return local if local is not None and local.is_file() else None
+
+
 def html_to_pdf_bytes(
-    html: str, *, content_selector: str = "", strip_selectors: Sequence[str] = ()
+    html: str,
+    *,
+    content_selector: str = "",
+    strip_selectors: Sequence[str] = (),
+    base_path: Path | str | None = None,
 ) -> bytes:
     """Render one HTML document's extracted text to a single-column PDF (reportlab).
 
@@ -43,9 +58,14 @@ def html_to_pdf_bytes(
 
     ``content_selector``/``strip_selectors`` mirror the source's ingest config so the derived
     PDF carries the same **cleaned** article text the HTML store indexes — not framework chrome.
+    ``base_path`` (the source HTML file) lets real ``<img>`` files be **embedded** so they survive
+    the round trip and can be vision-enriched (R-ING-6); a missing/external image falls back to its
+    alt text.
     """
     from reportlab.lib.pagesizes import letter  # lazy: [dev] harness dependency
     from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import Image as RLImage
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
     doc = extract_html(html, content_selector=content_selector, strip_selectors=list(strip_selectors))
@@ -61,10 +81,17 @@ def html_to_pdf_bytes(
         # newlines -> spaces so code lines don't merge into an unbroken token run
         story.append(Paragraph(escape(seg.text.replace("\n", " ")), styles["BodyText"]))
         story.append(Spacer(1, 6))
-    # Image alt/caption text carries needles too (§15.2 hides 10 nonces there); HTML ingest
-    # indexes it as an image_ref chunk, and a faithful render of a broken <img> shows its alt.
-    # Emit the same alt+caption string so those tokens survive the HTML -> PDF -> extract trip.
     for img in doc.images:
+        local = _resolve_image(img.src, base_path)
+        if local is not None:  # embed the real image so it survives + can be vision-enriched
+            try:
+                iw, ih = ImageReader(str(local)).getSize()
+                w = min(float(iw), 400.0)
+                story.append(RLImage(str(local), width=w, height=float(ih) * (w / float(iw))))
+                story.append(Spacer(1, 6))
+            except Exception:  # noqa: BLE001 - a bad image falls back to its alt text below
+                pass
+        # Keep alt/caption text too (searchable; also the needle channel — §15.2 hides nonces here).
         caption = " ".join(t for t in (img.alt, img.caption) if t).strip()
         if caption:
             story.append(Paragraph(escape(caption), styles["Italic"]))
@@ -91,17 +118,22 @@ def _add_docx_table(out: object, linearized: str) -> None:
 
 
 def html_to_docx_bytes(
-    html: str, *, content_selector: str = "", strip_selectors: Sequence[str] = ()
+    html: str,
+    *,
+    content_selector: str = "",
+    strip_selectors: Sequence[str] = (),
+    base_path: Path | str | None = None,
 ) -> bytes:
     """Render one HTML document's extracted text to a DOCX (python-docx).
 
-    Mirrors :func:`html_to_pdf_bytes`: heading paths become ``Heading`` paragraphs, every segment
-    (body/code/table) becomes a paragraph, and image alt/caption text is emitted as a paragraph so
-    the image-placement needles survive (§15.2/§15.4). ``extract_docx`` recovers all of it at
-    ingest. ``content_selector``/``strip_selectors`` mirror the source's ingest config so the
-    derived DOCX carries the same cleaned content the HTML store indexes.
+    Mirrors :func:`html_to_pdf_bytes`: heading paths become ``Heading`` paragraphs, segments become
+    paragraphs (tables as real DOCX tables), and real ``<img>`` files are **embedded** (via
+    ``base_path``) so they survive + can be vision-enriched (R-ING-6); alt/caption text is also
+    emitted (searchable + the needle channel). ``content_selector``/``strip_selectors`` mirror the
+    source's ingest config so the derived DOCX carries the same cleaned content.
     """
     from docx import Document  # lazy: python-docx ([docx] extra / [dev])
+    from docx.shared import Inches
 
     doc = extract_html(html, content_selector=content_selector, strip_selectors=list(strip_selectors))
     out = Document()
@@ -119,6 +151,10 @@ def html_to_docx_bytes(
             # newlines -> spaces so code lines don't merge into an unbroken token run
             out.add_paragraph(seg.text.replace("\n", " "))
     for img in doc.images:
+        local = _resolve_image(img.src, base_path)
+        if local is not None:  # embed the real image so it survives + can be vision-enriched
+            with contextlib.suppress(Exception):  # a bad image falls back to its alt text below
+                out.add_picture(str(local), width=Inches(4))
         caption = " ".join(t for t in (img.alt, img.caption) if t).strip()
         if caption:
             out.add_paragraph(caption)
@@ -130,14 +166,23 @@ def html_to_docx_bytes(
 
 
 def _render_bytes(
-    html: str, fmt: str, *, content_selector: str = "", strip_selectors: Sequence[str] = ()
+    html: str,
+    fmt: str,
+    *,
+    content_selector: str = "",
+    strip_selectors: Sequence[str] = (),
+    base_path: Path | str | None = None,
 ) -> bytes:
     """Dispatch to the format's HTML->bytes renderer (the derived-corpus analog of the ingest
     extractor dispatch). A new format adds one branch here plus its ``html_to_<fmt>_bytes``."""
     if fmt == "pdf":
-        return html_to_pdf_bytes(html, content_selector=content_selector, strip_selectors=strip_selectors)
+        return html_to_pdf_bytes(
+            html, content_selector=content_selector, strip_selectors=strip_selectors, base_path=base_path
+        )
     if fmt == "docx":
-        return html_to_docx_bytes(html, content_selector=content_selector, strip_selectors=strip_selectors)
+        return html_to_docx_bytes(
+            html, content_selector=content_selector, strip_selectors=strip_selectors, base_path=base_path
+        )
     raise ValueError(f"unsupported target format {fmt!r}; supported: {_SUPPORTED}")
 
 
@@ -160,7 +205,7 @@ def convert_corpus(src_dir: Path | str, dst_dir: Path | str, *, fmt: str = "pdf"
         out = dst / rel
         try:
             html = html_path.read_bytes().decode("utf-8", errors="replace")
-            data = _render_bytes(html, fmt)
+            data = _render_bytes(html, fmt, base_path=html_path)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(data)
             result.converted += 1
@@ -200,6 +245,7 @@ def convert_source(
                 fmt,
                 content_selector=source.content_selector,
                 strip_selectors=source.strip_selectors,
+                base_path=path,
             )
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(data)

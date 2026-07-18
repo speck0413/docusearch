@@ -142,6 +142,39 @@ def test_html_to_docx_emits_real_table_rows_distinct() -> None:
     assert not any("BBB R2C1" in r for r in rows)  # rows must not have flattened together
 
 
+def test_extract_docx_retains_inline_image() -> None:
+    # R-ING-6 for DOCX: an inline image is retained with its bytes + alt text (for vision).
+    from docx import Document
+    from docx.shared import Inches
+    from PIL import Image
+
+    png = io.BytesIO()
+    Image.new("RGB", (8, 8), (10, 20, 200)).save(png, format="PNG")
+    d = Document()
+    d.add_paragraph("before the diagram")
+    d.add_picture(io.BytesIO(png.getvalue()), width=Inches(1))
+    buf = io.BytesIO()
+    d.save(buf)
+    doc = extract_docx(buf.getvalue())
+    assert doc.images, "inline DOCX image should be retained (R-ING-6)"
+    assert doc.images[0].data
+
+
+def test_convert_embeds_real_image_docx(tmp_path: Path) -> None:
+    from PIL import Image
+
+    png = tmp_path / "diagram.png"
+    Image.new("RGB", (8, 8), (10, 20, 200)).save(png, format="PNG")
+    (tmp_path / "page.html").write_text(
+        '<body><h1>D</h1><p>see the diagram</p><img src="diagram.png" alt="block diagram"></body>',
+        encoding="utf-8",
+    )
+    dst = tmp_path / "docx"
+    assert convert_corpus(tmp_path, dst, fmt="docx").converted == 1
+    doc = extract_docx((dst / "page.docx").read_bytes())
+    assert doc.images, "the real image should be embedded + retained through DOCX conversion"
+
+
 def test_convert_corpus_docx(tmp_path: Path) -> None:
     src = tmp_path / "html"
     (src / "sub").mkdir(parents=True)

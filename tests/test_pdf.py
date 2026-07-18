@@ -160,6 +160,70 @@ def test_needle_survives_pdf_conversion_and_ingest(tmp_path: Path) -> None:
         assert any(r["locator"] == "page 1" for r in rows)
 
 
+def _tiny_png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (123, 200, 50)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_extract_pdf_retains_embedded_image(tmp_path: Path) -> None:
+    # R-ING-6 for PDF: an image embedded in the PDF is retained with its bytes (for vision).
+    import io
+
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+
+    p = tmp_path / "img.pdf"
+    c = canvas.Canvas(str(p), pagesize=letter)
+    c.drawString(72, 720, "a page with an embedded diagram")
+    c.drawImage(ImageReader(io.BytesIO(_tiny_png())), 72, 600, width=64, height=64)
+    c.showPage()
+    c.save()
+    doc = extract_pdf(p.read_bytes())
+    assert doc.images, "embedded PDF image should be retained (R-ING-6)"
+    assert doc.images[0].data and doc.images[0].heading_path == "page 1"
+
+
+def test_pdf_embedded_image_retained_on_ingest(tmp_path: Path) -> None:
+    import io
+
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    c = canvas.Canvas(str(pdf_dir / "d.pdf"), pagesize=letter)
+    c.drawString(72, 720, "SPI block diagram overview with enough text to index")
+    c.drawImage(ImageReader(io.BytesIO(_tiny_png())), 72, 600, width=64, height=64)
+    c.showPage()
+    c.save()
+    cfg = _pdf_corpus_config(tmp_path, pdf_dir)
+    Catalog(cfg).ingest()
+    with Store.open(cfg.paths.db_path) as store:
+        assert store.count_images() >= 1  # the embedded image reached the images table
+
+
+def test_convert_embeds_real_image_pdf(tmp_path: Path) -> None:
+    # a real <img> file must be EMBEDDED into the converted PDF (not just its alt text), so the
+    # image survives HTML->PDF and can be vision-enriched (R-ING-6, §15.4).
+    (tmp_path / "diagram.png").write_bytes(_tiny_png())
+    (tmp_path / "page.html").write_text(
+        '<body><h1>D</h1><p>see the block diagram below</p>'
+        '<img src="diagram.png" alt="SPI block diagram"></body>',
+        encoding="utf-8",
+    )
+    dst = tmp_path / "pdf"
+    assert convert_corpus(tmp_path, dst, fmt="pdf").converted == 1
+    doc = extract_pdf((dst / "page.pdf").read_bytes())
+    assert doc.images, "the real image should be embedded + retained through conversion"
+
+
 def test_compare_formats_pdf_matches_html_baseline(tmp_path: Path) -> None:
     # §15.4 format-equivalence: the PDF suite store must agree with the HTML baseline store —
     # same logical doc retrieved for each query (overlap@10, top-1 logical match, MRR).

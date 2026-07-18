@@ -188,12 +188,18 @@ class LinkRef:
 
 @dataclass
 class ImageRef:
-    """An image reference kept for retention + text findability (R-ING-6)."""
+    """An image reference kept for retention + text findability (R-ING-6).
+
+    HTML images are referenced by ``src`` (resolved to a file on disk at retention time). PDF/DOCX
+    images are **embedded inside the document**, so their bytes are carried inline via ``data``
+    (+ ``ext``) and staged directly — no external file to resolve."""
 
     src: str
     alt: str
     caption: str
     heading_path: str
+    data: bytes | None = None  # inline image bytes (PDF/DOCX); None => resolve ``src`` from disk
+    ext: str = ""  # inline image extension (e.g. "png", "jpeg") when ``data`` is set
 
 
 @dataclass
@@ -398,8 +404,9 @@ def extract_pdf(data: bytes) -> ExtractedDoc:
 
     PyMuPDF is a ``[pdf]`` extra, imported lazily so non-PDF users never load it. Each page
     becomes one ``body`` segment with a ``page N`` locator (R-ING-4); link annotations become
-    ``LinkRef``s. A PDF's text layer carries no code/table structure, so all text is ``body`` —
-    needles survive as prose, which the needles-through-conversion suite checks (§15.4).
+    ``LinkRef``s; embedded images are retained (R-ING-6) with their bytes carried inline so the
+    vision stage can enrich them. A PDF's text layer carries no code/table structure, so all text
+    is ``body`` — needles survive as prose, which the needles-through-conversion suite checks.
     """
     import fitz  # lazy: the [pdf] extra is only loaded when a PDF is actually parsed
 
@@ -407,6 +414,8 @@ def extract_pdf(data: bytes) -> ExtractedDoc:
     try:
         segments: list[Segment] = []
         links: list[LinkRef] = []
+        images: list[ImageRef] = []
+        seen_xrefs: set[int] = set()  # a PDF image (xref) reused across pages is retained once
         for i in range(doc_obj.page_count):
             page = doc_obj.load_page(i)
             locator = f"page {i + 1}"
@@ -417,12 +426,33 @@ def extract_pdf(data: bytes) -> ExtractedDoc:
                 uri = link.get("uri")
                 if uri:
                     links.append(LinkRef(target=str(uri), anchor="", link_type="pdf_link"))
+            for img_info in page.get_images(full=True):
+                xref = int(img_info[0])
+                if xref in seen_xrefs:
+                    continue
+                seen_xrefs.add(xref)
+                try:
+                    extracted = doc_obj.extract_image(xref)
+                except Exception:  # noqa: BLE001 - a bad image must not abort the page
+                    continue
+                blob = extracted.get("image")
+                if blob:
+                    images.append(
+                        ImageRef(
+                            src=f"pdf:xref{xref}",
+                            alt="",
+                            caption="",
+                            heading_path=locator,
+                            data=bytes(blob),
+                            ext=str(extracted.get("ext") or "png"),
+                        )
+                    )
         title = _clean(str((doc_obj.metadata or {}).get("title") or ""))
         if not title and segments:
             title = _clean(segments[0].text.splitlines()[0])[:200]
     finally:
         doc_obj.close()
-    return ExtractedDoc(title=title, segments=segments, links=links)
+    return ExtractedDoc(title=title, segments=segments, links=links, images=images)
 
 
 def _docx_heading_level(style_name: str) -> int:
@@ -463,14 +493,42 @@ def _linearize_docx_table(table: object, links: list[LinkRef]) -> str:
     return "\n".join(rows)
 
 
+def _docx_para_images(para: object, heading_path: str, doc_obj: object, images: list[ImageRef]) -> None:
+    """Retain inline images embedded in a paragraph's drawings (R-ING-6): pull each image part's
+    bytes (carried inline for the vision stage) with its alt text (``wp:docPr`` descr/title)."""
+    from docx.oxml.ns import qn
+
+    for drawing in para._p.findall(".//" + qn("w:drawing")):  # type: ignore[attr-defined]
+        docpr = drawing.find(".//" + qn("wp:docPr"))
+        alt = _clean(docpr.get("descr") or docpr.get("title") or "") if docpr is not None else ""
+        blip = drawing.find(".//" + qn("a:blip"))
+        rid = blip.get(qn("r:embed")) if blip is not None else None
+        if not rid:
+            continue
+        try:
+            part = doc_obj.part.related_parts[rid]  # type: ignore[attr-defined]
+        except (KeyError, AttributeError):
+            continue
+        blob = getattr(part, "blob", None)
+        if not blob:
+            continue
+        ext = (Path(str(part.partname)).suffix or ".png").lstrip(".").lower()
+        images.append(
+            ImageRef(src=str(rid), alt=alt, caption="", heading_path=heading_path,
+                     data=bytes(blob), ext=ext)
+        )
+
+
 def extract_docx(data: bytes) -> ExtractedDoc:
-    """Extract headings, paragraphs, tables, and hyperlinks from one DOCX (§7.3, Phase 4b).
+    """Extract headings, paragraphs, tables, hyperlinks, and inline images from one DOCX
+    (§7.3, Phase 4b).
 
     python-docx is a ``[docx]`` extra, imported lazily so non-DOCX users never load it. Body
     elements are walked **in document order** (paragraphs and tables interleave) so heading paths
     and chunk order match the source: ``Heading N`` styles drive the heading path (R-ING-4),
-    other paragraphs are ``body``, tables are ``table`` (linearized), and w:hyperlink relationships
-    become ``LinkRef``s (R-ING-5). Every extractor returns the common :class:`ExtractedDoc`.
+    other paragraphs are ``body``, tables are ``table`` (linearized), w:hyperlink relationships
+    become ``LinkRef``s (R-ING-5), and inline images are retained with their bytes for the vision
+    stage (R-ING-6). Every extractor returns the common :class:`ExtractedDoc`.
     """
     from docx import Document  # lazy: the [docx] extra is only loaded when a DOCX is parsed
     from docx.oxml.ns import qn
@@ -480,6 +538,7 @@ def extract_docx(data: bytes) -> ExtractedDoc:
     doc_obj = Document(io.BytesIO(data))
     segments: list[Segment] = []
     links: list[LinkRef] = []
+    images: list[ImageRef] = []
     stack: list[tuple[int, str]] = []
     for child in doc_obj.element.body.iterchildren():
         if child.tag == qn("w:p"):
@@ -492,6 +551,7 @@ def extract_docx(data: bytes) -> ExtractedDoc:
                     segments.append(Segment("body", text, _heading_path(stack)))
             elif text:
                 segments.append(Segment("body", text, _heading_path(stack)))
+            _docx_para_images(para, _heading_path(stack), doc_obj, images)
             for hl in para.hyperlinks:
                 if hl.address:
                     links.append(
@@ -504,7 +564,7 @@ def extract_docx(data: bytes) -> ExtractedDoc:
     title = _clean(str(doc_obj.core_properties.title or ""))
     if not title and segments:
         title = _clean(segments[0].text.splitlines()[0])[:200]
-    return ExtractedDoc(title=title, segments=segments, links=links)
+    return ExtractedDoc(title=title, segments=segments, links=links, images=images)
 
 
 def extract_document(
@@ -650,11 +710,18 @@ def _stage_images(
     images_dir = staging_dir / "images"
     added = 0
     for img in doc.images:
-        local = _resolve_local(img.src, src_path)
-        if local is not None and local.is_file():
-            data = local.read_bytes()
+        if img.data is not None:  # inline image bytes (PDF/DOCX embedded image)
+            data: bytes | None = img.data
+            ext = (img.ext or "bin").lstrip(".").lower()
+        else:  # HTML: resolve the referenced file on disk
+            local = _resolve_local(img.src, src_path)
+            if local is not None and local.is_file():
+                data = local.read_bytes()
+                ext = local.suffix.lstrip(".").lower() or "bin"
+            else:
+                data = None
+        if data is not None:
             sha = hashlib.sha256(data).hexdigest()
-            ext = local.suffix.lstrip(".").lower() or "bin"
             images_dir.mkdir(parents=True, exist_ok=True)
             dest = images_dir / f"{sha}.{ext}"
             if not dest.exists():
