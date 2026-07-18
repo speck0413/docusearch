@@ -18,27 +18,37 @@ Public surface:
 from __future__ import annotations
 
 import io
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape
 
 from .ingest import extract_html
 
+if TYPE_CHECKING:
+    from .config import SourceConfig
+
 _SUPPORTED = ("pdf",)
 
 
-def html_to_pdf_bytes(html: str) -> bytes:
+def html_to_pdf_bytes(
+    html: str, *, content_selector: str = "", strip_selectors: Sequence[str] = ()
+) -> bytes:
     """Render one HTML document's extracted text to a single-column PDF (reportlab).
 
     Every segment becomes a wrapped paragraph (heading paths as sub-headings), so all text
     tokens survive; PyMuPDF then recovers them at ingest. XML-special characters are escaped so
     reportlab's paragraph markup can't drop code containing ``<``/``>``/``&``.
+
+    ``content_selector``/``strip_selectors`` mirror the source's ingest config so the derived
+    PDF carries the same **cleaned** article text the HTML store indexes — not framework chrome.
     """
     from reportlab.lib.pagesizes import letter  # lazy: [dev] harness dependency
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
-    doc = extract_html(html)
+    doc = extract_html(html, content_selector=content_selector, strip_selectors=list(strip_selectors))
     styles = getSampleStyleSheet()
     story: list[object] = []
     if doc.title:
@@ -91,4 +101,45 @@ def convert_corpus(src_dir: Path | str, dst_dir: Path | str, *, fmt: str = "pdf"
             result.converted += 1
         except Exception as err:  # noqa: BLE001 - one bad file must not abort the batch
             result.errors.append((str(html_path), f"{type(err).__name__}: {err}"))
+    return result
+
+
+def convert_source(
+    source: SourceConfig,
+    dst_dir: Path | str,
+    *,
+    fmt: str = "pdf",
+    progress: Callable[[int, int], None] | None = None,
+) -> ConvertResult:
+    """Convert exactly the files a source ingests — ``iter_files`` applies the same include/
+    exclude globs (R-REUSE-2) — into ``fmt`` under ``dst_dir``, mirroring relative paths and
+    applying the source's ``content_selector``/``strip_selectors`` so the derived corpus carries
+    the same cleaned content the HTML store indexes. This is how a real ingestion is *altered
+    for the format under test* (§15.4 / R-PROC-8). Per-file failures are recorded, not fatal.
+    """
+    if fmt not in _SUPPORTED:
+        raise ValueError(f"unsupported target format {fmt!r}; supported: {_SUPPORTED}")
+    from .ingest import iter_files  # lazy: keeps convert import light
+
+    src_root, dst = Path(source.location), Path(dst_dir)
+    files = list(iter_files(source.location, source.include, source.exclude))
+    total = len(files)
+    result = ConvertResult()
+    for i, path in enumerate(files, 1):
+        try:
+            rel = path.relative_to(src_root).with_suffix(f".{fmt}")
+            out = dst / rel
+            html = path.read_bytes().decode("utf-8", errors="replace")
+            data = html_to_pdf_bytes(
+                html,
+                content_selector=source.content_selector,
+                strip_selectors=source.strip_selectors,
+            )
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(data)
+            result.converted += 1
+        except Exception as err:  # noqa: BLE001 - one bad file must not abort the batch
+            result.errors.append((str(path), f"{type(err).__name__}: {err}"))
+        if progress is not None:
+            progress(i, total)
     return result

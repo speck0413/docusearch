@@ -217,6 +217,40 @@ def test_logical_key_unmapped_paths_do_not_collide() -> None:
     assert a != b  # distinct documents -> distinct keys, even on the unmapped fallback
 
 
+def test_convert_source_honors_selector_and_excludes(tmp_path: Path) -> None:
+    # Altering a real ingestion for the PDF format: the derived PDF must carry the CLEAN
+    # content_selector text (not chrome), and honor the source's include/exclude globs.
+    from docusearch.convert import convert_source
+
+    src = tmp_path / "site"
+    (src / "keep").mkdir(parents=True)
+    (src / "skip").mkdir(parents=True)
+    (src / "keep" / "page.html").write_text(
+        "<html><body><nav>BREADCRUMB-CHROME</nav>"
+        "<article><h1>Real</h1><p>ARTICLE-NONCE-4242 the calibration procedure.</p></article>"
+        "<footer>FOOTER-CHROME</footer></body></html>",
+        encoding="utf-8",
+    )
+    (src / "skip" / "junk.html").write_text("<article><p>EXCLUDED-9999</p></article>", "utf-8")
+
+    source = config.SourceConfig(
+        type="fs", name="s", version="", location=str(src),
+        include=["keep/**/*.html"], exclude=["skip/**"],
+        content_selector="article", strip_selectors=["nav", "footer"],
+        min_content_chars=5, audience=[],
+    )
+    dst = tmp_path / "pdf"
+    result = convert_source(source, dst, fmt="pdf")
+    assert result.converted == 1 and not result.errors  # only the included file
+    assert (dst / "keep" / "page.pdf").is_file()
+    assert not (dst / "skip" / "junk.pdf").exists()  # exclude honored
+
+    doc = extract_pdf((dst / "keep" / "page.pdf").read_bytes())
+    text = "\n".join(s.text for s in doc.segments)
+    assert "ARTICLE-NONCE-4242" in text  # clean article content survives
+    assert "CHROME" not in text  # nav/footer chrome was stripped, not baked into the PDF
+
+
 def test_summarize_empty_is_not_a_pass() -> None:
     # red-team M2: zero comparisons must never report PASS (an empty --queries file verifies
     # nothing, so compare.py must not exit 0 / print PASS).
