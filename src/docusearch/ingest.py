@@ -392,6 +392,59 @@ def extract_html(
     return doc
 
 
+def extract_pdf(data: bytes) -> ExtractedDoc:
+    """Extract text + page locators + link annotations from one PDF (§7.3, Phase 4a).
+
+    PyMuPDF is a ``[pdf]`` extra, imported lazily so non-PDF users never load it. Each page
+    becomes one ``body`` segment with a ``page N`` locator (R-ING-4); link annotations become
+    ``LinkRef``s. A PDF's text layer carries no code/table structure, so all text is ``body`` —
+    needles survive as prose, which the needles-through-conversion suite checks (§15.4).
+    """
+    import fitz  # lazy: the [pdf] extra is only loaded when a PDF is actually parsed
+
+    doc_obj = fitz.open(stream=data, filetype="pdf")
+    try:
+        segments: list[Segment] = []
+        links: list[LinkRef] = []
+        for i in range(doc_obj.page_count):
+            page = doc_obj.load_page(i)
+            locator = f"page {i + 1}"
+            text = page.get_text("text").strip()
+            if text:
+                segments.append(Segment(kind="body", text=text, heading_path=locator))
+            for link in page.get_links():
+                uri = link.get("uri")
+                if uri:
+                    links.append(LinkRef(target=str(uri), anchor="", link_type="pdf_link"))
+        title = _clean(str((doc_obj.metadata or {}).get("title") or ""))
+        if not title and segments:
+            title = _clean(segments[0].text.splitlines()[0])[:200]
+    finally:
+        doc_obj.close()
+    return ExtractedDoc(title=title, segments=segments, links=links)
+
+
+def extract_document(
+    path: Path,
+    ext: str,
+    *,
+    content_selector: str = "",
+    strip_selectors: Sequence[str] = (),
+) -> ExtractedDoc:
+    """Dispatch to the right extractor by file extension — the pluggable-parser seam (R-PROC-6).
+
+    HTML via selectolax (content_selector/strip_selectors apply), PDF via PyMuPDF. A new format
+    adds one branch here plus its extractor; the rest of the pipeline (chunker, links, store) is
+    format-agnostic because every extractor returns an :class:`ExtractedDoc`.
+    """
+    if ext.lower().lstrip(".") == "pdf":
+        return extract_pdf(path.read_bytes())
+    html = path.read_bytes().decode("utf-8", errors="replace")
+    return extract_html(
+        html, content_selector=content_selector, strip_selectors=list(strip_selectors)
+    )
+
+
 # ----------------------------------------------------------------- chunking
 
 
@@ -589,11 +642,11 @@ def _parse_file(task: _ParseTask) -> _ParseResult:
     if task.stored_hash is not None and task.stored_hash == file_hash and not task.force:
         return _ParseResult(task.path, task.ext, "skip", file_hash, 0.0, None, None, [])
     try:
-        html = path.read_bytes().decode("utf-8", errors="replace")
-        doc = extract_html(
-            html,
+        doc = extract_document(
+            path,
+            task.ext,
             content_selector=task.content_selector,
-            strip_selectors=list(task.strip_selectors),
+            strip_selectors=task.strip_selectors,
         )
         chunks = chunk_document(doc, chunk_tokens=task.chunk_tokens, overlap=task.chunk_overlap)
     except Exception as err:  # noqa: BLE001 - a bad file is reported, not fatal

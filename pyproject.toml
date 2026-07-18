@@ -43,6 +43,12 @@ server = [
 client = [
   "httpx>=0.27",
 ]
+# PDF format support (Phase 4a). PyMuPDF extracts text/page-locators/links; lazy-imported so
+# non-PDF users never load it. `reportlab` (harness-only, for convert.py building derived PDF
+# test corpora) is in [dev], not here — it isn't needed to ingest real PDFs.
+pdf = [
+  "pymupdf>=1.24",
+]
 # Cloud image enrichment (enrich.vision_images). Off by default; lazy-imported so core
 # ingest/search never pull the SDK. The SDK owns the Messages-API request shape, typed
 # errors, retries, and credential resolution (env key or `ant auth login` profile).
@@ -72,6 +78,8 @@ dev = [
   "httpx>=0.27",
   "anthropic>=0.69",
   "pillow>=10",
+  "pymupdf>=1.24",
+  "reportlab>=4.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -108,7 +116,7 @@ disallow_untyped_defs = true
 no_implicit_reexport = false  # __init__.py re-exports the public API (R-ARCH-2)
 
 [[tool.mypy.overrides]]
-module = ["yaml", "sentence_transformers", "hnswlib", "anthropic"]
+module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "reportlab.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -124,6 +132,11 @@ filterwarnings = [
   "error",
   # starlette's TestClient warns to install httpx2; third-party, fires at import.
   "ignore:Using .httpx. with .starlette.testclient. is deprecated",
+  # PyMuPDF's SWIG bindings emit this at C-module import; under `error` it becomes an
+  # exception raised inside SWIG's non-exception-safe native init → a hard segfault. It's a
+  # benign upstream (SWIG/py3.13) deprecation, so we exempt it. Production never runs
+  # warnings-as-errors, so the CLI is unaffected either way.
+  "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",
 ]
 markers = [
   "model: needs a downloaded embedding model (torch); slow. Skip with -m 'not model'.",
