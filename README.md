@@ -178,6 +178,70 @@ the tradeoff. Reproduce with `python -m harness.embed_benchmark`.
   exact-identifier lookups. On large real corpora the semantic gains grow — this compact,
   keyword-friendly corpus is a conservative lower bound.
 
+## Performance & scale
+
+Measured on a **14,938-document / 126,469-chunk** real corpus (mixed HTML/PDF/DOCX/Markdown),
+`bge-small-en-v1.5`, Apple-Silicon **CPU, single thread** (no GPU). Query latency:
+
+| Operation | p50 | p95 | Throughput (1 core) | Where this sits vs the industry |
+|---|---|---|---|---|
+| **BM25** (keyword) | 7 ms | **13 ms** | 148 q/s | Interactive search wants < 100 ms p95 (Nielsen's 0.1 s "feels instant"). Enterprise keyword engines (Elasticsearch/Solr) typically land 10–100 ms — this is at the **fast end**. |
+| **Hybrid** (BM25 + vector, RRF) | 17 ms | **24 ms** | 59 q/s | < 50 ms p95 is considered **great** for hybrid. The cost here is the CPU query-embedding (~10 ms); a GPU/MPS cuts that to ~1–2 ms. |
+| **Vector ANN** alone (HNSW) | 0.1 ms | **0.1 ms** | 15,900 q/s | HNSW is best-in-class; sub-millisecond at 10⁵–10⁶ vectors is the expected, and this hits it. |
+| **Federation**, fan-out over 3 stores | 15 ms | 17 ms | — | Fan-out is ~linear in the number of member stores searched. |
+| **Federation**, scoped to 1 store (`--stores`) | 5 ms | 6 ms | — | Scoping a query to the relevant store(s) cuts latency **~3×** — skip what you don't need. |
+
+Footprint for that same 15k-doc corpus:
+
+| Resource | Value | Context |
+|---|---|---|
+| On-disk index | **560 MB** (347 MB SQLite + 213 MB HNSW) ≈ 4.4 KB/chunk | Compact and linear; a laptop-sized index. |
+| Peak RAM, warm hybrid | **~985 MB** (bge-small ~130 MB + HNSW 213 MB resident + PyTorch) | A single modest box. **BM25-only** drops the model + ANN entirely → a few hundred MB, no PyTorch. |
+| Ingest (BM25) | ~60 docs/s (601 docs → 9.8 s, Gate 4d) | Embedding adds model-dependent time (see the model benchmark above; `bge-small` ≈ thousands of chunks/s). Ingest is incremental — unchanged files are skipped by content hash. |
+
+**Why this is a lightweight central server.** At **p95 24 ms** hybrid / **~60 q/s per core**, an
+ordinary 8-core box sustains ~**480 hybrid queries/second** — far above the handful of queries per
+second a few-hundred-person organization generates at peak, and **no GPU is required**. The whole
+index for a mid-size corpus fits in ~1 GB of RAM; a BM25-only deployment is lighter still. Vertical
+scale (more cores) and horizontal scale (federation, below) both apply. Everything is deterministic
+and offline-capable once the embedding model is cached.
+
+> Reproduce: query latency + memory with the perf harness on any ingested store; the model-quality
+> table above with `python -m harness.embed_benchmark`; federation parity with `python -m
+> harness.federated --corpus <dir> --shards 3`.
+
+## Central MCP server (one server for the whole company)
+
+`docusearch serve` exposes the catalog over **REST + MCP** on one lightweight process (§10). The
+MCP is designed to be a *central* company endpoint an AI connects to:
+
+- **Minimal registration.** Every MCP tool carries a one-line description, so connecting the server
+  costs almost no context. An agent that actually needs docusearch calls **`help()` first** — it
+  returns the full research + cited-report workflow on demand (identical to the local skill), so the
+  detailed instructions only load when they're used.
+- **Search tools** expose the search-relevant knobs: `search_docs(queries, top_k, prefix, stores,
+  bm25_only, roles)`, plus `list_stores()`, `get_document()`, `related_documents()`,
+  `catalog_stats()`, and `build_report()` (which verifies every citation and refuses hallucinated
+  ones). Reports built through the MCP are byte-identical to the CLI's, except references link to
+  the server's `/v1/documents` URLs instead of local `file://` paths.
+- **Federated, with per-query scoping.** Point one config at several member stores
+  (`federation:` — e.g. `python`, `rust`, `internal`, `acme`), and a query fans out across all of
+  them and merges as if it were one store. Tell it `--stores acme` (CLI) or `stores=["acme"]` (MCP)
+  to search **only** that store — the "which document stores" control, which also cuts latency.
+
+```yaml
+# federation.yaml — a central server over several independent stores
+federation:
+  - { name: python,   config: /srv/docusearch/python.yaml }
+  - { name: rust,     config: /srv/docusearch/rust.yaml }
+  - { name: internal, config: /srv/docusearch/internal.yaml }
+  - { name: acme,     config: /srv/docusearch/acme.yaml }
+```
+```bash
+docusearch serve --config federation.yaml            # REST + MCP for the whole company
+docusearch search --config federation.yaml --stores acme "match loop single bit"   # scope to ACME
+```
+
 ## Quick start (dev)
 
 ```bash
