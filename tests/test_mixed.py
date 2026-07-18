@@ -79,3 +79,29 @@ def test_convert_source_mixed_honors_selector_and_spreads_formats(tmp_path: Path
     # a converted (non-html) file must carry clean article text, no chrome baked in
     md_text = next(dst.rglob("*.md")).read_text(encoding="utf-8")
     assert "calibration procedure" in md_text and "CHROME" not in md_text
+
+
+def test_convert_mixed_reused_dst_has_no_stale_files(tmp_path: Path) -> None:
+    # Red-team M1: re-running convert_mixed into a dir that already holds a PREVIOUS run's output
+    # (from a larger/differently-sized source) must not leave stale files behind — they would be
+    # ingested as phantom documents. The output must reflect ONLY the current source.
+    src = tmp_path / "html"
+    src.mkdir()
+    for i in range(8):
+        (src / f"doc{i}.html").write_text(
+            f"<body><h1>Doc {i}</h1><p>STALECHK{i} body text here for indexing.</p></body>",
+            encoding="utf-8",
+        )
+    dst = tmp_path / "mixed"
+    assert convert_mixed(src, dst).converted == 8
+    assert len(list(dst.rglob("*.*"))) == 8
+
+    # source shrinks to 5 files; re-run into the SAME dst
+    for i in range(5, 8):
+        (src / f"doc{i}.html").unlink()
+    assert convert_mixed(src, dst).converted == 5
+    # dst must now hold exactly the 5 current files — no doc5/6/7 leftovers from run 1
+    assert len(list(dst.rglob("*.*"))) == 5
+    cfg = _mixed_config(tmp_path, dst)
+    res = Catalog(cfg).ingest()
+    assert res.documents == 5  # not 8 — no phantom stale documents

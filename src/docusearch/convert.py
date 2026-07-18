@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import io
 import re
+import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -312,6 +313,7 @@ def convert_corpus(src_dir: Path | str, dst_dir: Path | str, *, fmt: str = "pdf"
     if fmt not in _SUPPORTED:
         raise ValueError(f"unsupported target format {fmt!r}; supported: {_SUPPORTED}")
     src, dst = Path(src_dir), Path(dst_dir)
+    _reset_dst(dst, src)
     result = ConvertResult()
     for html_path in sorted(src.rglob("*.htm*")):
         rel = html_path.relative_to(src).with_suffix(f".{fmt}")
@@ -345,6 +347,7 @@ def convert_source(
     from .ingest import iter_files  # lazy: keeps convert import light
 
     src_root, dst = Path(source.location), Path(dst_dir)
+    _reset_dst(dst, src_root)
     files = list(iter_files(source.location, source.include, source.exclude))
     total = len(files)
     result = ConvertResult()
@@ -377,6 +380,19 @@ def _mixed_out(rel: Path, fmt: str) -> Path:
     return rel if fmt == "html" else rel.with_suffix(f".{fmt}")
 
 
+def _reset_dst(dst: Path, src: Path) -> None:
+    """Clear a derived-corpus output dir before writing, so files left by a PREVIOUS run (a source
+    of a different size or format assignment) can't linger and be ingested as phantom documents
+    (red-team M1). Refuses to touch the dir if it is the source itself or an ancestor of it — the
+    tool owns its output dir, never the input tree."""
+    if not dst.exists():
+        return
+    d, s = dst.resolve(), src.resolve()
+    if d == s or d in s.parents:
+        return
+    shutil.rmtree(d)
+
+
 def convert_mixed(
     src_dir: Path | str, dst_dir: Path | str, *, formats: Sequence[str] = _MIXED_FORMATS
 ) -> ConvertResult:
@@ -385,6 +401,7 @@ def convert_mixed(
     folder (mirrored path, assigned extension; ``html`` is copied as-is). Deterministic — the fixed
     sort + modulus make the assignment reproducible."""
     src, dst = Path(src_dir), Path(dst_dir)
+    _reset_dst(dst, src)
     result = ConvertResult()
     for idx, html_path in enumerate(sorted(src.rglob("*.htm*"))):
         fmt = formats[idx % len(formats)]
@@ -416,6 +433,7 @@ def convert_source_mixed(
     from .ingest import iter_files  # lazy: keeps convert import light
 
     src_root, dst = Path(source.location), Path(dst_dir)
+    _reset_dst(dst, src_root)
     files = list(iter_files(source.location, source.include, source.exclude))
     total = len(files)
     result = ConvertResult()
