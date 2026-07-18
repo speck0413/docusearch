@@ -13,6 +13,8 @@ objects. Heavy logic lives in ``ingest.py`` and ``search.py``.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import overload
 
@@ -20,7 +22,7 @@ from . import embed, ingest, search, vision
 from .config import DEFAULT_CONFIG_PATH, Config, ConfigError, load
 from .embed import EmbedProvider
 from .ingest import IngestResult
-from .search import SearchHit
+from .search import FederatedMember, FederatedSearch, SearchHit
 from .store import Store
 
 
@@ -202,3 +204,47 @@ class Catalog:
         """Render the current index audit (counts + anomalies)."""
         with Store.open(self.db_path) as store:
             return ingest.render_store_audit(store)
+
+
+def _open_member(name: str, member_config: Config) -> tuple[FederatedMember, Store]:
+    """Open one federation member's store and build its search machinery (hybrid if the store holds
+    embeddings for the member's configured model, else BM25), mirroring ``Catalog.search``."""
+    store = Store.open(member_config.paths.db_path)
+    provider = embed.make_provider(member_config.embed)
+    vector_index = None
+    if provider is not None and store.count_embeddings() > 0:
+        index_model = store.get_meta("embed_model")
+        if index_model is not None and index_model != provider.model_id:
+            warnings.warn(
+                f"federation member {name!r}: index embedded with {index_model!r} but embed.model "
+                f"is {provider.model_id!r}; using BM25 for this member.",
+                stacklevel=2,
+            )
+            provider = None
+        else:
+            ann = Path(member_config.paths.db_path).with_suffix(".hnsw")
+            vector_index = search.VectorIndex.load(store, provider.dim, ann)
+    return FederatedMember(store, provider, vector_index, name=name), store
+
+
+@contextmanager
+def open_federation(config: Config) -> Iterator[FederatedSearch]:
+    """Open every member store named in ``config.federation`` and yield a ``FederatedSearch`` over
+    them (R-TEST-3, §4f), closing all stores on exit. Each member is loaded from its own config
+    file, so members may use different embedding models. Scope a query to a subset by passing
+    ``stores=[...]`` to ``.search`` (e.g. only ACME). Member ``config`` paths are used as given
+    (absolute, or relative to the current working directory)."""
+    if not config.federation:
+        raise ConfigError("this config has no 'federation:' members to search")
+    members: list[FederatedMember] = []
+    stores: list[Store] = []
+    try:
+        for member in config.federation:
+            member_config = load(Path(member.config))
+            federated_member, store = _open_member(member.name, member_config)
+            members.append(federated_member)
+            stores.append(store)
+        yield FederatedSearch(members)
+    finally:
+        for store in stores:
+            store.close()

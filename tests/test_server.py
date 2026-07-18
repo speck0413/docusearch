@@ -75,6 +75,59 @@ def vector_client(tmp_path: Path) -> Iterator[Any]:
     yield TestClient(create_app(config))
 
 
+def test_cli_and_mcp_reports_are_identical_except_ref_scheme(tmp_path: Path) -> None:
+    # The MCP build_report and the CLI render the SAME spec through the SAME deterministic renderer,
+    # so the reports must match byte-for-byte except the reference LINK (served /v1/documents vs
+    # local file://) — the labels and every other line are identical.
+    import re
+
+    from docusearch import report, runlog
+    from docusearch.server import Service
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "spi.html").write_text("<body><h1>SPI</h1><p>PA drives the SPI bus.</p></body>", "utf-8")
+    config_path = tmp_path / "docusearch.yaml"
+    config_path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: docs\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(config_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store)
+        d, c = store._conn.execute(
+            "SELECT d.id, ch.id FROM chunks ch JOIN documents d ON ch.document_id=d.id LIMIT 1"
+        ).fetchone()
+    d, c = int(d), int(c)
+    spec = {
+        "title": "PA Overview", "subtitle": "sub", "request": "overview", "requested_by": "S",
+        "model": "m", "audience": ["engineering"], "evidence": [[d, c]],
+        "sections": [{"heading": "Overview", "kind": "overview", "body": f"PA drives SPI [D:{d}#{c}]."}],
+    }
+    base = "http://localhost:8321"
+    evidence = {(d, c)}
+    mcp = Service(config).build_report(spec, base_url=base, fmt="md")
+    cli = report.render_report(
+        title=spec["title"], subtitle=spec["subtitle"], sections=spec["sections"], evidence=evidence,
+        base_url=base, fmt="md", run_id=runlog.RUN_ID, audience=spec["audience"], embed_model="none",
+        sources=["docs"], request=spec["request"], requested_by=spec["requested_by"],
+        model=spec["model"],
+        ref_targets=report.reference_targets(config.paths.db_path, evidence),  # file:// (local CLI)
+    )
+
+    def norm(t: str) -> str:
+        t = re.sub(r"\d{4}-\d\d-\d\dT[\d:+.-]+", "TS", t)  # timestamp
+        t = re.sub(r"\d{8}T\d{6}-[0-9a-f]+", "RUN", t)  # run id
+        t = re.sub(r"(file://\S+|http://localhost:8321/v1/documents/\S+)", "REF", t)  # ref link
+        return t
+
+    assert norm(cli) == norm(mcp)  # identical content; only the ref link host differs
+    assert "file://" in cli and "/v1/documents/" in mcp  # each uses its context-correct scheme
+
+
 def _fake_vec() -> list[float]:
     from ._fakes import FakeProvider
 

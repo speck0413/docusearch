@@ -268,6 +268,21 @@ SCHEMA: tuple[_Node, ...] = (
             _Field("jsonl", True, inline="tmp/logs/<date>.jsonl (async, non-blocking)"),
         ),
     ),
+    _ListSection(
+        "federation",
+        (
+            _Field("name", "", inline="label for this member store, e.g. python | rust | acme"),
+            _Field("config", "", inline="path to that store's docusearch.yaml"),
+        ),
+        comment=(
+            "OPTIONAL — federate several independent stores into one searchable set (R-TEST-3).\n"
+            "List each member's name + its own config file. `serve` and `search` then fan out\n"
+            "across all members (signal-level RRF merge, deduped by content hash) and rank as if\n"
+            "it were one store. Scope a query to a subset with --stores (CLI) or the search_docs\n"
+            "`stores` argument (MCP/AI), e.g. --stores acme to search ONLY the ACME store.\n"
+            "Leave this out entirely for a normal single-store setup."
+        ),
+    ),
 )
 
 
@@ -447,6 +462,14 @@ class SourceConfig:
 
 
 @dataclass(frozen=True)
+class FederationMemberConfig:
+    """One member store of a federation: a label plus the path to that store's own config."""
+
+    name: str
+    config: str
+
+
+@dataclass(frozen=True)
 class EmbedConfig:
     model: str
     device: str
@@ -512,6 +535,7 @@ class Config:
     serve: ServeConfig
     enrich: EnrichConfig
     logging: LoggingConfig
+    federation: list[FederationMemberConfig]
 
     @classmethod
     def _from_mapping(cls, m: Mapping[str, Any]) -> Config:
@@ -576,6 +600,11 @@ class Config:
                 level=str(lg["level"]),
                 jsonl=bool(lg["jsonl"]),
             ),
+            federation=[
+                FederationMemberConfig(name=str(f["name"]), config=str(f["config"]))
+                for f in m.get("federation", [])
+                if isinstance(f, Mapping) and str(f.get("name", "")).strip()
+            ],
         )
 
 

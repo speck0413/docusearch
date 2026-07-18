@@ -523,3 +523,78 @@ border-radius:8px;padding:10px 12px;color:#cfe8ff;font-size:12.5px;overflow-x:au
 .kind-warning{border-left-color:#ffb703;}
 .kind-reference{border-left-color:#5aa9e6;}
 """
+
+
+_IMG_MEDIA = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp",
+              "bmp": "bmp", "svg": "svg+xml"}
+
+
+def reference_targets(
+    db_path: str, evidence: set[tuple[int, int]], *, base_url: str = ""
+) -> dict[tuple[int, int], tuple[str, str]]:
+    """Map each cited ``(doc_id, chunk_id)`` to ``(href, "store — title — heading")`` so a report's
+    references carry a meaningful label AND a link. The label is identical everywhere; only the href
+    differs by context: a **served** report (``base_url`` given) links to the HTTP
+    ``/v1/documents`` endpoint a remote client can open, while the local CLI (no ``base_url``) links
+    to the original ``file://`` document. Shared by the CLI and the MCP/REST builders (R-REUSE-2)."""
+    from pathlib import Path
+
+    from .store import Store
+
+    targets: dict[tuple[int, int], tuple[str, str]] = {}
+    if db_path == ":memory:" or not evidence:
+        return targets
+    with Store.open(db_path) as store:
+        for doc_id, chunk_id in evidence:
+            info = store.citation_target(doc_id, chunk_id)
+            if info is None:
+                continue
+            source, title, path, locator = info
+            parts = [p for p in (source, title or f"document {doc_id}") if p]
+            if locator and locator != title:
+                parts.append(locator)
+            label = " — ".join(parts)
+            if base_url:
+                href = f"{base_url}/v1/documents/{doc_id}?chunk={chunk_id}"
+            else:
+                try:
+                    href = Path(path).as_uri() if path else ""
+                except ValueError:  # non-absolute path -> leave as-is
+                    href = path
+            targets[(doc_id, chunk_id)] = (href, label)
+    return targets
+
+
+def evidence_images(
+    db_path: str, staging_dir: str, evidence: set[tuple[int, int]]
+) -> list[tuple[str, str]]:
+    """For every cited image chunk, embed its retained diagram as a base64 ``data:`` URI so the
+    report is self-contained — the figure renders even if the original file later disappears.
+    Returns ``[(data_uri, caption)]``, deduped by image, in citation order. Shared by CLI + MCP."""
+    import base64
+    from pathlib import Path
+
+    from .store import Store
+
+    out: list[tuple[str, str]] = []
+    if db_path == ":memory:" or not evidence:
+        return out
+    images_dir = (Path(staging_dir) / "images").resolve()
+    seen: set[str] = set()
+    with Store.open(db_path) as store:
+        for doc_id, chunk_id in sorted(evidence):
+            for img in store.images_for_chunk(doc_id, chunk_id):
+                sha, ext = str(img["sha256"]), str(img["ext"] or "").lower()
+                if sha in seen:
+                    continue
+                path = (images_dir / f"{sha}.{ext}").resolve()
+                if not path.is_relative_to(images_dir) or not path.is_file():
+                    continue
+                seen.add(sha)
+                media = _IMG_MEDIA.get(ext, "png")
+                b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+                caption = " — ".join(
+                    t for t in (str(img["alt"] or ""), str(img["caption"] or "")) if t
+                ) or f"figure [D:{doc_id}#{chunk_id}]"
+                out.append((f"data:image/{media};base64,{b64}", caption))
+    return out

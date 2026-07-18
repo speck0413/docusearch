@@ -91,6 +91,33 @@ def test_federated_matches_single_combined_store(tmp_path: Path) -> None:
         assert fed_top.path.rsplit("/", 1)[-1] == single_top.path.rsplit("/", 1)[-1]
 
 
+def test_open_federation_from_config(tmp_path: Path) -> None:
+    # A federation config lists named members by their own config paths; open_federation builds a
+    # FederatedSearch over them, and --stores-style scoping works end to end.
+    from docusearch.catalog import open_federation
+
+    _store_from_docs(tmp_path, "python", {"list.html": _doc("list", "SHARED77 append to a python list")})
+    _store_from_docs(tmp_path, "acme", {"loop.html": _doc("match loop", "SHARED77 acme match loop ATP")})
+    fed_cfg = tmp_path / "federation.yaml"
+    fed_cfg.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "fs").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "fed.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "ft").as_posix()}"\n'
+        'sources: []\nembed:\n  model: "none"\n'
+        f'federation:\n  - name: python\n    config: "{(tmp_path / "python.yaml").as_posix()}"\n'
+        f'  - name: acme\n    config: "{(tmp_path / "acme.yaml").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    cfg = config.load(fed_cfg)
+    assert [m.name for m in cfg.federation] == ["python", "acme"]
+    with open_federation(cfg) as fed:
+        assert set(fed.store_names()) == {"python", "acme"}
+        all_hits = fed.search("SHARED77", top_k=10)
+        assert any("acme-corpus" in h.path for h in all_hits)
+        assert any("python-corpus" in h.path for h in all_hits)
+        acme_only = fed.search("SHARED77", top_k=10, stores=["acme"])
+        assert acme_only and all("python-corpus" not in h.path for h in acme_only)
+
+
 def test_fusion_pool_over_fetches() -> None:
     # Regression guard: single-store hybrid and the federation must gather MORE than top_k
     # candidates per signal before RRF, or a doc ranked mid-list in both bm25 and vector (the

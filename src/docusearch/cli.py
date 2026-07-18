@@ -31,11 +31,11 @@ from typing import Any, TextIO
 
 import yaml
 
-from . import config, embed, ingest, runlog
+from . import config, embed, ingest, report, runlog
 from ._version import __version__
-from .catalog import Catalog
-from .config import Config
-from .search import SearchHit
+from .catalog import Catalog, open_federation
+from .config import Config, ConfigError
+from .search import SearchHit, roles_from_env
 from .store import Store, StoreError
 from .vision import VisionError
 
@@ -359,6 +359,12 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 def _cmd_search(args: argparse.Namespace) -> int:
     cfg = config.load(Path(args.config))
     _configure_logging(cfg)
+    stores = [s.strip() for s in (args.stores or "").split(",") if s.strip()]
+    if cfg.federation:
+        return _run_federated_search(cfg, args, stores)
+    if stores:
+        print("error: --stores needs a config with a 'federation:' section (single-store config).")
+        return 2
     catalog = Catalog(cfg)
     if args.batch_file:
         return _run_batch(catalog, cfg, args)
@@ -366,84 +372,65 @@ def _cmd_search(args: argparse.Namespace) -> int:
         print("Provide a query, or --batch-file <goldens.yaml>.")
         return 2
     hits = catalog.search(args.query, top_k=args.top_k, prefix=args.prefix)
-    if args.json:  # machine-readable for agents: everything needed to cite a hit
-        print(json.dumps(_json_result(args.query, hits), ensure_ascii=False))
-        runlog.log("cli.search", query=args.query, results=len(hits))
-        runlog.flush()
-        return 0
-    if not hits:
-        print("No results.")
-    else:
-        print(f"({hits[0].search_mode} search; embed_model={hits[0].embed_model_used})")
-    for i, hit in enumerate(hits, 1):
-        print(f"{i}. [{hit.citation}] {hit.title}  ({hit.locator})")
-        print(f"   {hit.snippet}")
-        print(f"   score={hit.score}  kind={hit.kind}  path={hit.path}")
+    banner = (
+        f"({hits[0].search_mode} search; embed_model={hits[0].embed_model_used})" if hits else ""
+    )
+    _print_hits(args.query, hits, args.json, banner)
     runlog.log("cli.search", query=args.query, results=len(hits))
     runlog.flush()
     return 0
 
 
-def _reference_targets(
-    db_path: str, evidence: set[tuple[int, int]]
-) -> dict[tuple[int, int], tuple[str, str]]:
-    """Map each cited ``(doc_id, chunk_id)`` to ``(file:// href, "store — title — heading")``
-    so report references open the original vendor document."""
-    targets: dict[tuple[int, int], tuple[str, str]] = {}
-    if db_path == ":memory:" or not evidence:
-        return targets
-    with Store.open(db_path) as store:
-        for doc_id, chunk_id in evidence:
-            info = store.citation_target(doc_id, chunk_id)
-            if info is None:
-                continue
-            source, title, path, locator = info
-            parts = [p for p in (source, title or f"document {doc_id}") if p]
-            if locator and locator != title:
-                parts.append(locator)
-            label = " — ".join(parts)
-            try:
-                href = Path(path).as_uri() if path else ""
-            except ValueError:  # non-absolute path -> leave as-is
-                href = path
-            targets[(doc_id, chunk_id)] = (href, label)
-    return targets
+def _print_hits(query: str, hits: list[SearchHit], as_json: bool, banner: str) -> None:
+    """Render search hits for the CLI — one path for single-store and federated results."""
+    if as_json:
+        print(json.dumps(_json_result(query, hits), ensure_ascii=False))
+        return
+    if not hits:
+        print("No results.")
+        return
+    print(banner)
+    for i, hit in enumerate(hits, 1):
+        print(f"{i}. [{hit.citation}] {hit.title}  ({hit.locator})")
+        print(f"   {hit.snippet}")
+        print(f"   score={hit.score}  kind={hit.kind}  path={hit.path}")
 
 
-_IMG_MEDIA = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp",
-              "bmp": "bmp", "svg": "svg+xml"}
+def _run_federated_search(cfg: Config, args: argparse.Namespace, stores: list[str]) -> int:
+    """Fan the query across the config's federation members (R-TEST-3), optionally scoped to the
+    named subset in ``--stores`` (e.g. only ACME)."""
+    if args.batch_file:
+        print("error: --batch-file is not supported with a federation; query one at a time.")
+        return 2
+    if not args.query:
+        print("Provide a query to search the federation.")
+        return 2
+    k = args.top_k if args.top_k is not None else cfg.search.top_k_default
+    try:
+        with open_federation(cfg) as fed:
+            available = fed.store_names()
+            unknown = [s for s in stores if s not in available]
+            if unknown:
+                print(f"error: unknown store(s) {unknown}; available: {sorted(available)}")
+                return 2
+            hits = fed.search(
+                args.query, top_k=k, prefix=args.prefix, roles=roles_from_env(),
+                stores=stores or None,
+            )
+    except (ConfigError, StoreError) as err:
+        print(f"error: {err}")
+        return 2
+    scope = ",".join(stores) if stores else f"all {len(cfg.federation)}"
+    _print_hits(args.query, hits, args.json, f"(federated search; stores: {scope})")
+    runlog.log("cli.search", query=args.query, results=len(hits), stores=stores or "all")
+    runlog.flush()
+    return 0
 
 
-def _evidence_images(
-    db_path: str, staging_dir: str, evidence: set[tuple[int, int]]
-) -> list[tuple[str, str]]:
-    """For every cited image chunk, embed its retained diagram as a base64 ``data:`` URI so the
-    report is self-contained — the figure renders even if the original file later disappears.
-    Returns ``[(data_uri, caption)]``, deduped by image, in citation order."""
-    import base64
-
-    out: list[tuple[str, str]] = []
-    if db_path == ":memory:" or not evidence:
-        return out
-    images_dir = (Path(staging_dir) / "images").resolve()
-    seen: set[str] = set()
-    with Store.open(db_path) as store:
-        for doc_id, chunk_id in sorted(evidence):
-            for img in store.images_for_chunk(doc_id, chunk_id):
-                sha, ext = str(img["sha256"]), str(img["ext"] or "").lower()
-                if sha in seen:
-                    continue
-                path = (images_dir / f"{sha}.{ext}").resolve()
-                if not path.is_relative_to(images_dir) or not path.is_file():
-                    continue
-                seen.add(sha)
-                media = _IMG_MEDIA.get(ext, "png")
-                b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-                caption = " — ".join(
-                    t for t in (str(img["alt"] or ""), str(img["caption"] or "")) if t
-                ) or f"figure [D:{doc_id}#{chunk_id}]"
-                out.append((f"data:image/{media};base64,{b64}", caption))
-    return out
+# Report-assembly helpers live in report.py so the CLI and the MCP/REST report builders share
+# one implementation (R-REUSE-2).
+_reference_targets = report.reference_targets
+_evidence_images = report.evidence_images
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
@@ -793,6 +780,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--batch-file", help="YAML goldens (id, query, expect_docs) to grade")
     p_search.add_argument("--out", help="write the graded golden report here")
     p_search.add_argument("--json", action="store_true", help="emit hits as JSON (for agents)")
+    p_search.add_argument(
+        "--stores",
+        default="",
+        help="federation only: comma-separated member names to search (e.g. acme). "
+        "Omit to search all members.",
+    )
     p_search.add_argument("--config", default="docusearch.yaml", help="config path")
     p_search.set_defaults(func=_cmd_search)
 

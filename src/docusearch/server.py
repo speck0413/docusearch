@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from . import citations, embed, report, runlog, search
 from ._version import __version__
+from .catalog import open_federation
 from .config import Config
 from .search import SearchHit
 from .store import Store
@@ -126,11 +127,26 @@ class Service:
         prefix: bool = False,
         roles: set[str] | None = None,
         bm25_only: bool | None = None,
+        stores: list[str] | None = None,
     ) -> tuple[list[list[SearchHit]], str, str]:
         """Return (per-query results, embed_model_used, search_mode). Text queries only;
-        pre-computed vectors + the 409 mismatch path arrive with the client (Phase 3b)."""
+        pre-computed vectors + the 409 mismatch path arrive with the client (Phase 3b).
+
+        When the config declares a ``federation:``, the query fans out across its member stores
+        (R-TEST-3); ``stores`` scopes it to a named subset (e.g. ``["acme"]``)."""
         cfg = self.config
         k = top_k if top_k is not None else cfg.search.top_k_default
+        if cfg.federation:
+            with open_federation(cfg) as fed:
+                available = fed.store_names()
+                unknown = [s for s in (stores or []) if s not in available]
+                if unknown:
+                    raise ValueError(f"unknown store(s) {unknown}; available: {sorted(available)}")
+                fed_results = [
+                    fed.search(q, top_k=k, prefix=prefix, roles=roles, stores=stores or None)
+                    for q in query_texts
+                ]
+            return fed_results, "(federation)", "federated"
         force_bm25 = cfg.search.bm25_only if bm25_only is None else bm25_only
         provider = None if force_bm25 else self._embed_provider()
         with Store.open(cfg.paths.db_path) as store:
@@ -157,6 +173,48 @@ class Service:
         model_used = provider.model_id if provider is not None else "none"
         mode = "hybrid" if (provider is not None and vector_index is not None) else "bm25"
         return result_lists, model_used, mode
+
+    def list_stores(self) -> dict[str, Any]:
+        """The document stores a query can target. In a federation, ``stores`` lists the member
+        names a search can be scoped to (pass a subset as ``stores=[...]``); empty for single-store."""
+        return {
+            "federated": bool(self.config.federation),
+            "stores": [m.name for m in self.config.federation],
+        }
+
+    def build_report(self, spec: dict[str, Any], *, base_url: str, fmt: str = "md") -> str:
+        """Render a cited report from an answer ``spec`` (title/sections/evidence/provenance),
+        verifying every citation against the evidence set (R-CIT-1) — the same renderer the CLI
+        uses, so a given spec yields an identical report save for the reference links: a SERVED
+        report links each reference to its HTTP ``/v1/documents`` URL (reachable by a remote MCP
+        client), where the local CLI links to the original ``file://`` document. Raises
+        ``citations.CitationError`` on a hallucinated citation."""
+        cfg = self.config
+        evidence = {(int(d), int(c)) for d, c in spec.get("evidence", [])}
+        sources = list(spec.get("sources", [])) or [s.name for s in cfg.sources]
+        return report.render_report(
+            title=str(spec.get("title", "Report")),
+            subtitle=str(spec.get("subtitle", "")),
+            body=str(spec.get("body", "")),
+            sections=spec.get("sections"),
+            evidence=evidence,
+            base_url=base_url,
+            fmt=fmt,
+            run_id=runlog.RUN_ID,
+            audience=list(spec.get("audience", [])),
+            embed_model=self.embed_info()["model"],
+            sources=sources,
+            images=list(spec.get("images", [])),
+            embedded_images=report.evidence_images(cfg.paths.db_path, cfg.paths.staging_dir, evidence),
+            request=str(spec.get("request", "")),
+            requested_by=str(spec.get("requested_by", "")),
+            model=str(spec.get("model", "")),
+            classification=str(spec.get("classification", "Confidential — Acme")),
+            # Rich reference labels (store — title — heading), but served /v1/documents HTTP links a
+            # remote client can open — identical to the CLI report save for the link host.
+            ref_targets=report.reference_targets(cfg.paths.db_path, evidence, base_url=base_url),
+            trace=spec.get("trace"),
+        )
 
     def search_vectors(
         self,
@@ -315,6 +373,7 @@ class SearchRequest(BaseModel):
     prefix: bool = False
     bm25_only: bool | None = None
     roles: list[str] | None = None
+    stores: list[str] | None = None  # federation: scope to named member stores
 
 
 class EmbedRequest(BaseModel):
@@ -323,11 +382,17 @@ class EmbedRequest(BaseModel):
 
 class ReportRequest(BaseModel):
     title: str
-    body: str  # the claim text, each factual sentence ending in a [GK] or [D:...] tag
+    body: str = ""  # legacy single-body form; prefer `sections` cards
+    sections: list[dict[str, str]] | None = None  # [{heading, kind, body}] card layout
+    subtitle: str = ""
     evidence: list[list[int]] = []  # the [doc_id, chunk_id] pairs the report is built on
     fmt: str = "md"
     audience: list[str] = []
     sources: list[str] = []
+    request: str = ""  # provenance: the verbatim ask this answers
+    requested_by: str = ""
+    model: str = ""  # which model generated it
+    trace: dict[str, Any] | None = None  # generation log (not citation-verified)
 
 
 def _mismatch_409(err: ModelMismatchError) -> HTTPException:
@@ -346,13 +411,61 @@ def _public_base(config: Config) -> str:
     return f"http://localhost:{config.serve.port}"
 
 
-def build_mcp(service: Service, config: Config) -> Any:
-    """The MCP server exposing the stable tool names over the same service layer (§10).
+_MCP_HELP = """# docusearch — research + cited report (MCP)
 
-    Tool names are a stable contract agents depend on. `serve` mounts this over streamable
-    HTTP at ``serve.mcp_path``. (annotate / list_versions / check_discrepancies /
-    create_report arrive with their features in Phases 3b/5.)
-    """
+Answer the user's question ONLY from this document catalog, then (optionally) render a cited
+report. Discover the domain's terminology from the search results themselves — never rely on prior
+knowledge of the domain.
+
+## Tools
+- `list_stores()` -> the document stores you can search. In a FEDERATION (e.g. python / rust /
+  acme) you may scope any search to a subset by name. Call this first if the user names a store.
+- `search_docs(queries, top_k=10, prefix=False, stores=None, bm25_only=False, roles=None)` ->
+  per-query hits {doc_id, chunk_id, citation, title, path, locator, kind, snippet, score}. ALWAYS
+  pass a LIST of query phrasings (batched). `stores=["acme"]` searches only those members; omit for
+  all. `prefix` = partial-term matching; `bm25_only` = skip vectors; `roles` = cooperative filter.
+- `get_document(doc_id, chunk=None)` -> full chunk text — use it to fill a card with real code / a
+  full procedure, not just a snippet.
+- `related_documents(doc_id, direction="both")` -> cross-referenced docs (follow leads).
+- `catalog_stats()` -> counts + embedding model (sanity-check the catalog is populated).
+- `build_report(spec, fmt="md")` -> a themed, cited report. VERIFIES every citation against your
+  evidence and refuses hallucinated ones. `fmt` is "md" or "html".
+
+## Ground rules
+- Cite everything: each catalog claim ends with `[D:<doc_id>#<chunk_id>]`; general knowledge ends
+  `[GK]`. Cite the exact (doc_id, chunk_id) the fact came from.
+- Don't assume acronyms — e.g. "PA" might be *Protocol Aware*, not power amplifier. Let the
+  retrieved documents define the terms. If the catalog doesn't cover something, say so plainly.
+- Batch your searches: send all phrasings for a round in one `search_docs` call.
+
+## Effort (the user picks): low | medium | high
+- low: one `search_docs` call (3-4 phrasings); a short, direct, cited answer.
+- medium: 6-8 phrasings; read the hits; one follow-up batch; a structured multi-card report.
+- high: many phrasings over several rounds; `get_document` the strongest hits; `related_documents`
+  to follow leads; keep going until new searches surface nothing new.
+
+## Workflow
+1. Discover + retrieve — plan phrasings for the effort level and `search_docs` them in one batched
+   call; repeat per the level. `get_document` the strongest hits for full text.
+2. Select evidence — the (doc_id, chunk_id) pairs whose text actually supports your answer.
+3. `build_report` with `sections` cards (kind: overview | procedure | code | hardware | config |
+   test-program | warning | reference), every catalog claim carrying its `[D:doc#chunk]` inline.
+   Include a `trace` (searches run + reasoning). The builder links each reference to the original
+   document automatically — you do not set references.
+
+## build_report spec (JSON object)
+{title, subtitle, request, requested_by, model, audience:[...],
+ evidence:[[doc_id, chunk_id], ...], sections:[{heading, kind, body}, ...],
+ trace:{prompt, queries:[...], retrieved:[...], reasoning}}
+"""
+
+
+def build_mcp(service: Service, config: Config) -> Any:
+    """The central MCP server (§10, R-API-1). Registration is deliberately **minimal** — each tool
+    carries a one-line description so connecting the server costs almost no context. An agent that
+    actually needs docusearch calls ``help()`` first to pull the full research + report workflow
+    (identical to the CLI skill). Tool names are a stable contract; ``serve`` mounts this over
+    streamable HTTP at ``serve.mcp_path``."""
     from mcp.server.fastmcp import FastMCP
 
     # serve at the sub-app root so mounting at serve.mcp_path yields a clean path
@@ -360,9 +473,29 @@ def build_mcp(service: Service, config: Config) -> Any:
     base = _public_base(config)
 
     @mcp.tool()
-    def search_docs(queries: list[str], top_k: int = 10) -> dict[str, Any]:
-        """Search the catalog (batch). Always pass a list of queries."""
-        results, model_used, mode = service.search(queries, top_k=top_k)
+    def help() -> str:  # noqa: A001 - the tool name agents look for
+        """Call FIRST — the full docusearch research + cited-report workflow, tools, and rules."""
+        return _MCP_HELP
+
+    @mcp.tool()
+    def list_stores() -> dict[str, Any]:
+        """The document stores you can search; in a federation, the member names to scope to."""
+        return service.list_stores()
+
+    @mcp.tool()
+    def search_docs(
+        queries: list[str],
+        top_k: int = 10,
+        prefix: bool = False,
+        stores: list[str] | None = None,
+        bm25_only: bool = False,
+        roles: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Search the catalog (batch: pass a LIST). `stores` scopes to federation members."""
+        results, model_used, mode = service.search(
+            queries, top_k=top_k, prefix=prefix, bm25_only=bm25_only,
+            roles=set(roles) if roles else None, stores=stores,
+        )
         return {
             "results": [[_hit_dict(h, base) for h in lst] for lst in results],
             "embed_model_used": model_used,
@@ -371,7 +504,7 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def get_document(doc_id: int, chunk: int | None = None) -> dict[str, Any] | None:
-        """Fetch a document's metadata + chunks by id."""
+        """Fetch a document's metadata + full chunk text by id."""
         return service.get_document(doc_id, chunk=chunk)
 
     @mcp.tool()
@@ -383,6 +516,15 @@ def build_mcp(service: Service, config: Config) -> Any:
     def catalog_stats() -> dict[str, Any]:
         """Counts + embedding model for the catalog."""
         return service.health()
+
+    @mcp.tool()
+    def build_report(spec: dict[str, Any], fmt: str = "md") -> dict[str, Any]:
+        """Render a cited report from an answer spec; verifies citations, refuses hallucinated ones."""
+        try:
+            rendered = service.build_report(spec, base_url=base, fmt=fmt)
+        except citations.CitationError as err:
+            return {"error": "HALLUCINATED_CITATION", "message": str(err)}
+        return {"fmt": fmt, "report": rendered}
 
     return mcp
 
@@ -426,13 +568,17 @@ def create_app(config: Config) -> FastAPI:
             except ValueError as err:  # wrong-dimension vector -> clean 400
                 raise HTTPException(status_code=400, detail=str(err)) from err
         else:
-            results, model_used, mode = service.search(
-                req.query_texts,
-                top_k=req.top_k,
-                prefix=req.prefix,
-                roles=roles,
-                bm25_only=req.bm25_only,
-            )
+            try:
+                results, model_used, mode = service.search(
+                    req.query_texts,
+                    top_k=req.top_k,
+                    prefix=req.prefix,
+                    roles=roles,
+                    bm25_only=req.bm25_only,
+                    stores=req.stores,
+                )
+            except ValueError as err:  # unknown federation store name -> clean 400
+                raise HTTPException(status_code=400, detail=str(err)) from err
         base = str(request.base_url).rstrip("/")
         runlog.log("api.search", queries=len(results), mode=mode)
         return {
@@ -476,26 +622,27 @@ def create_app(config: Config) -> FastAPI:
     @app.post("/v1/reports")
     def reports_route(req: ReportRequest, request: Request) -> dict[str, Any]:
         base = str(request.base_url).rstrip("/")
-        info = service.embed_info()
-        evidence = {(p[0], p[1]) for p in req.evidence if len(p) == 2}
+        spec: dict[str, Any] = {
+            "title": req.title,
+            "body": req.body,
+            "sections": req.sections,
+            "subtitle": req.subtitle,
+            "evidence": req.evidence,
+            "audience": req.audience,
+            "sources": req.sources,
+            "request": req.request,
+            "requested_by": req.requested_by,
+            "model": req.model,
+            "trace": req.trace,
+        }
         try:
-            rendered = report.render_report(
-                title=req.title,
-                body=req.body,
-                evidence=evidence,
-                base_url=base,
-                fmt=req.fmt,
-                run_id=runlog.RUN_ID,
-                audience=req.audience,
-                embed_model=info["model"],
-                sources=req.sources,
-            )
+            rendered = service.build_report(spec, base_url=base, fmt=req.fmt)
         except citations.CitationError as err:
             raise HTTPException(
                 status_code=400,
                 detail={"error": "HALLUCINATED_CITATION", "message": str(err)},
             ) from err
-        runlog.log("api.report", fmt=req.fmt, evidence=len(evidence))
+        runlog.log("api.report", fmt=req.fmt, evidence=len(req.evidence))
         return {"fmt": req.fmt, "report": rendered}
 
     # MCP over streamable HTTP, same service layer, at serve.mcp_path (R-API-1)
