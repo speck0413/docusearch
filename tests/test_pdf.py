@@ -4,6 +4,8 @@ uses PyMuPDF (the [pdf] runtime extra)."""
 
 from __future__ import annotations
 
+import importlib.util
+import sys
 from pathlib import Path
 
 from docusearch import config
@@ -11,6 +13,33 @@ from docusearch.catalog import Catalog
 from docusearch.convert import convert_corpus, html_to_pdf_bytes
 from docusearch.ingest import extract_document, extract_pdf
 from docusearch.store import Store
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_compare():  # type: ignore[no-untyped-def]
+    spec = importlib.util.spec_from_file_location(
+        "harness_compare", _ROOT / "harness" / "compare.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _corpus_cfg(tmp_path: Path, name: str, location: Path, include: str) -> config.Config:
+    path = tmp_path / f"{name}.yaml"
+    path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / name / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / name / "c.db").as_posix()}"\n'
+        f'  tmp_dir: "{(tmp_path / name / "t").as_posix()}"\n'
+        f'sources:\n  - name: {name}\n    location: "{location.as_posix()}"\n'
+        f'    include: ["{include}"]\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    return config.load(path)
 
 
 def _make_pdf(path: Path, pages: list[list[str]], *, link: str | None = None) -> None:
@@ -129,3 +158,50 @@ def test_needle_survives_pdf_conversion_and_ingest(tmp_path: Path) -> None:
     with Store.open(cfg.paths.db_path) as store:
         rows = store.chunks_for_document(1)
         assert any(r["locator"] == "page 1" for r in rows)
+
+
+def test_compare_formats_pdf_matches_html_baseline(tmp_path: Path) -> None:
+    # §15.4 format-equivalence: the PDF suite store must agree with the HTML baseline store —
+    # same logical doc retrieved for each query (overlap@10, top-1 logical match, MRR).
+    cmp = _load_compare()
+    src = tmp_path / "html" / "library"
+    src.mkdir(parents=True)
+    docs = {
+        "spi.html": "<body><h1>SPI</h1><p>The PA nWire SPI peripheral bus drives the MOSI "
+        "and SCLK signals to the DUT.</p></body>",
+        "match.html": "<body><h1>Match</h1><p>A match loop compares captured values per site "
+        "during a functional test pattern.</p></body>",
+        "timing.html": "<body><h1>Timing</h1><p>Clock edge timing with setup and hold windows "
+        "around the strobe reference.</p></body>",
+    }
+    for name, html in docs.items():
+        (src / name).write_text(html, encoding="utf-8")
+    html_root, pdf_root = tmp_path / "html", tmp_path / "pdf"
+    assert convert_corpus(html_root, pdf_root, fmt="pdf").converted == 3
+
+    base_cfg = _corpus_cfg(tmp_path, "base", html_root, "**/*.html")
+    suite_cfg = _corpus_cfg(tmp_path, "suite", pdf_root, "**/*.pdf")
+    Catalog(base_cfg).ingest()
+    Catalog(suite_cfg).ingest()
+
+    queries = [
+        "PA nWire SPI MOSI SCLK bus signals",
+        "match loop compare values per site",
+        "clock edge setup hold strobe timing",
+    ]
+    with Store.open(base_cfg.paths.db_path) as bstore, Store.open(suite_cfg.paths.db_path) as sstore:
+        comps = cmp.compare_formats(
+            queries,
+            baseline_search=cmp.make_searcher(bstore),
+            suite_search=cmp.make_searcher(sstore),
+            baseline_root=html_root,
+            suite_root=pdf_root,
+        )
+    summary = cmp.summarize(comps)
+    assert summary.mean_overlap_at_k >= 0.7  # §15.4 default gate
+    assert summary.top1_match_rate >= 0.8  # §15.4 default gate
+    assert summary.mrr >= 0.8
+    # logical keys map across formats (library/spi in both stores)
+    assert comps[0].suite[0] == "library/spi"
+    text = cmp.render_format_compare(comps, summary)
+    assert "overlap@10" in text and "top-1" in text and "MRR" in text
