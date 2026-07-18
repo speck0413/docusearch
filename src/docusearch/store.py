@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _MEMORY = ":memory:"
 
@@ -149,7 +149,19 @@ CREATE TABLE annotations (
 # docs did this come from"). Additive column; NULL for rows ingested before v2.
 _SCHEMA_V2 = "ALTER TABLE documents ADD COLUMN source_version TEXT;"
 
-_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SCHEMA_V1), (2, _SCHEMA_V2))
+# Migration 3 = vision enrichment provenance on images (enrich.vision_images). The stored
+# OCR text + producing model are what keep search deterministic (R-SRCH-5): the vision API
+# is called once here, never at query time. NULL vision_model = "not yet enriched".
+_SCHEMA_V3 = (
+    "ALTER TABLE images ADD COLUMN vision_text TEXT;\n"
+    "ALTER TABLE images ADD COLUMN vision_model TEXT;"
+)
+
+_MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, _SCHEMA_V1),
+    (2, _SCHEMA_V2),
+    (3, _SCHEMA_V3),
+)
 
 
 class Store:
@@ -491,6 +503,48 @@ class Store:
 
     def count_images(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])
+
+    # -- vision enrichment (enrich.vision_images) --------------------------------
+
+    def images_needing_vision(self, *, limit: int | None = None) -> list[sqlite3.Row]:
+        """Retained images with no vision result yet, ordered by sha for determinism.
+
+        ``vision_model IS NULL`` is the worklist marker, so a re-run only processes images
+        that were never enriched (idempotent, and no double API spend)."""
+        sql = (
+            "SELECT sha256, ext, doc_id, locator, alt, caption FROM images "
+            "WHERE vision_model IS NULL ORDER BY sha256"
+        )
+        if limit is not None:
+            return self._conn.execute(sql + " LIMIT ?", (limit,)).fetchall()
+        return self._conn.execute(sql).fetchall()
+
+    def set_image_vision(self, sha256: str, text: str, model: str) -> None:
+        """Persist an image's vision OCR text + producing model (provenance, R-SRCH-5)."""
+        self._conn.execute(
+            "UPDATE images SET vision_text=?, vision_model=? WHERE sha256=?",
+            (text, model, sha256),
+        )
+        self._maybe_commit()
+
+    def add_enrichment_chunk(
+        self, document_id: int, text: str, locator: str, *, kind: str = "enrichment"
+    ) -> int:
+        """Append an AI-generated searchable chunk to a document (kind='enrichment', §6).
+
+        Assigned the next ``ord`` after the document's existing chunks, so it never collides
+        with the ingest-time chunks. Firing the FTS trigger makes it BM25-searchable at once;
+        the caller embeds it if the index is hybrid."""
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(ord), -1) FROM chunks WHERE document_id=?", (document_id,)
+        ).fetchone()
+        ordv = int(row[0]) + 1
+        cur = self._conn.execute(
+            "INSERT INTO chunks(document_id, ord, kind, locator, text) VALUES (?, ?, ?, ?, ?)",
+            (document_id, ordv, kind, locator, text),
+        )
+        self._maybe_commit()
+        return int(cur.lastrowid or 0)
 
     # -- embeddings (Phase 2) ----------------------------------------------------
 

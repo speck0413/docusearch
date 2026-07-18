@@ -165,6 +165,81 @@ def test_remove_cli_unknown_source_lists_known(
     assert "Known sources" in out and "docs" in out
 
 
+def _vision_config(tmp_path: Path) -> None:
+    """The corpus config plus vision enabled (embed stays 'none' so tests need no model)."""
+    _write_corpus_config(tmp_path)
+    text = (tmp_path / "docusearch.yaml").read_text(encoding="utf-8")
+    text += 'enrich:\n  vision_images: true\n  vision_model: "claude-opus-4-8"\n'
+    (tmp_path / "docusearch.yaml").write_text(text, encoding="utf-8")
+
+
+class _StubVision:
+    model_id = "stub-vision-1"
+
+    def describe(self, image_bytes, *, media_type, alt="", caption="", context=""):  # type: ignore[no-untyped-def]
+        from docusearch.vision import ImageInsight
+
+        return ImageInsight(text="OCR nonce VZX9", description="a block diagram", model=self.model_id)
+
+
+def _stage_image(tmp_path: Path) -> None:
+    """Attach one image (row + staged original) to the ingested document."""
+    import hashlib
+
+    from docusearch.store import Store
+
+    data = b"\x89PNG\r\n\x1a\n stub"
+    sha = hashlib.sha256(data).hexdigest()
+    images = tmp_path / "staging" / "images"
+    images.mkdir(parents=True, exist_ok=True)
+    (images / f"{sha}.png").write_bytes(data)
+    with Store.open("./catalog.db") as store:
+        doc_id = next(iter(store.document_path_to_id().values()))
+        store.add_image(
+            sha256=sha, ext="png", doc_id=doc_id, locator="Fig", alt="", caption="", num_bytes=len(data)
+        )
+
+
+def test_vision_cli_off_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)  # vision off by default
+    cli.main(["ingest"])
+    capsys.readouterr()
+    rc = cli.main(["vision", "--yes"])
+    assert rc == 1
+    assert "vision_images is off" in capsys.readouterr().err
+
+
+def test_vision_cli_nothing_pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _vision_config(tmp_path)
+    cli.main(["ingest"])  # corpus html has no images
+    capsys.readouterr()
+    rc = cli.main(["vision", "--yes"])
+    assert rc == 0
+    assert "No images need vision" in capsys.readouterr().out
+
+
+def test_vision_cli_enriches_with_stub_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from docusearch import vision
+
+    monkeypatch.chdir(tmp_path)
+    _vision_config(tmp_path)
+    cli.main(["ingest"])
+    _stage_image(tmp_path)
+    monkeypatch.setattr(vision, "make_vision_provider", lambda enrich: _StubVision())
+    capsys.readouterr()
+    rc = cli.main(["vision", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Enriched 1 images" in out
+    capsys.readouterr()
+    cli.main(["search", "VZX9"])  # the enrichment chunk is BM25-searchable
+    assert "VZX9" in capsys.readouterr().out
+
+
 def test_search_json_emits_structured_hits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:  # type: ignore[no-untyped-def]

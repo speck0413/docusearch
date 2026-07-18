@@ -103,9 +103,10 @@ def test_add_document_records_source_version(tmp_path: Path) -> None:
         assert row["source_version"] == "2024.3"
 
 
-def test_migration_v2_upgrades_a_v1_database(tmp_path: Path) -> None:
-    # a database created at schema v1 (no source_version column) must upgrade cleanly and
-    # then accept the new column — additive migration, existing rows preserved.
+def test_migrations_upgrade_a_v1_database(tmp_path: Path) -> None:
+    # a database created at schema v1 (no source_version, no vision columns) must upgrade
+    # cleanly to the current version and accept the new columns — additive migrations,
+    # existing rows preserved.
     db = tmp_path / "old.db"
     conn = sqlite3.connect(db)
     conn.executescript(st._SCHEMA_V1)
@@ -114,11 +115,13 @@ def test_migration_v2_upgrades_a_v1_database(tmp_path: Path) -> None:
     conn.commit()
     conn.close()
     with st.Store.open(db) as store:
-        assert store.schema_version == 2
+        assert store.schema_version == st.SCHEMA_VERSION >= 3
         assert store.count_documents() == 1  # legacy row survived
         doc_id = store.add_document(path="/new.html", source_version="v9")
         row = store.get_document(doc_id)
         assert row is not None and row["source_version"] == "v9"
+        cols = {r[1] for r in store._conn.execute("PRAGMA table_info(images)")}
+        assert {"vision_text", "vision_model"} <= cols  # v3 columns present
 
 
 def test_embedding_provenance_read_and_clear(tmp_path: Path) -> None:

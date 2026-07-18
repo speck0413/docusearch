@@ -37,6 +37,7 @@ from .catalog import Catalog
 from .config import Config
 from .search import SearchHit
 from .store import Store, StoreError
+from .vision import VisionError
 
 
 def _configure_logging(cfg: Config) -> None:
@@ -131,6 +132,45 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     )
     print(f"Audit report: {report_path}")
     runlog.log("cli.ingest", documents=result.documents, chunks=result.chunks)
+    runlog.flush()
+    return 0
+
+
+def _cmd_vision(args: argparse.Namespace) -> int:
+    """Enrich retained images with cloud OCR + description (enrich.vision_images)."""
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    if not cfg.enrich.vision_images:
+        raise config.ConfigError(
+            "enrich.vision_images is off — set `enrich.vision_images: true` in your config "
+            "to run image vision (it calls a paid cloud API)."
+        )
+    with Store.open(cfg.paths.db_path) as store:
+        pending = len(store.images_needing_vision(limit=args.limit))
+    if pending == 0:
+        print("No images need vision enrichment (all retained images already enriched).")
+        return 0
+    print(
+        f"{pending} images will be sent to {cfg.enrich.vision_model!r} — a paid cloud API. "
+        "Auth: ANTHROPIC_API_KEY or an `ant auth login` profile.",
+        file=sys.stderr,
+    )
+    if not args.yes and sys.stdin.isatty():
+        confirm = input(f"Enrich {pending} images? [y/N] ").strip().lower()
+        if confirm not in {"y", "yes"}:
+            print("Aborted.")
+            return 1
+    log_path = runlog.active_log_path()
+    if log_path is not None:
+        print(f"Logging to {log_path} (tail -f to watch)", file=sys.stderr)
+    result = Catalog(cfg).enrich_vision(limit=args.limit, progress=_ProgressBar())
+    print(
+        f"Enriched {result.enriched} images "
+        f"({result.skipped} unsupported type, {result.failed} failed)."
+    )
+    for sha, msg in result.errors[:10]:
+        print(f"  ! {sha[:12]}…: {msg}", file=sys.stderr)
+    runlog.log("cli.vision", enriched=result.enriched, failed=result.failed)
     runlog.flush()
     return 0
 
@@ -677,6 +717,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_prune.add_argument("--config", default="docusearch.yaml", help="config path")
     p_prune.set_defaults(func=_cmd_prune)
 
+    p_vision = sub.add_parser(
+        "vision", help="enrich retained images with cloud OCR + description (enrich.vision_images)"
+    )
+    p_vision.add_argument(
+        "--limit", type=int, default=None, help="only enrich the first N pending images (cost cap)"
+    )
+    p_vision.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p_vision.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_vision.set_defaults(func=_cmd_vision)
+
     p_inspect = sub.add_parser(
         "inspect", help="sample a source and propose content_selector / strip_selectors"
     )
@@ -740,7 +790,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         result: int = args.func(args)
-    except (embed.EmbedError, config.ConfigError, StoreError) as err:
+    except (embed.EmbedError, config.ConfigError, StoreError, VisionError) as err:
         # Known, user-actionable failures (model mismatch, bad config, unusable DB):
         # print just the guidance, not a Python traceback the user can't act on.
         print(f"error: {err}", file=sys.stderr)

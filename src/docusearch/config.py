@@ -223,9 +223,24 @@ SCHEMA: tuple[_Node, ...] = (
         (
             _Field("preflight_sample", 150, inline="docs sampled for rule proposal (temp 0)"),
             _Field("ai_summaries", False, inline="Phase 5+ — off by default"),
-            _Field("vision_images", False, inline="Phase 5+ — off by default"),
+            _Field(
+                "vision_images",
+                False,
+                comment=(
+                    "Cloud image OCR + description. When true, `docusearch vision` sends each\n"
+                    "retained image ONCE to vision_model and stores the result (searchable +\n"
+                    "report-embeddable). Off by default: it calls a paid cloud API. Auth comes\n"
+                    "from the ANTHROPIC_API_KEY env var or an `ant auth login` profile — never\n"
+                    "put a key in this file."
+                ),
+            ),
+            _Field(
+                "vision_model",
+                "claude-opus-4-8",
+                inline="vision model id — e.g. claude-opus-4-8 (best) or claude-sonnet-5 (cheaper)",
+            ),
         ),
-        comment="Phase 5+ enrichment — all off by default.",
+        comment="Enrichment — all off by default.",
     ),
     _Section(
         "logging",
@@ -455,6 +470,7 @@ class EnrichConfig:
     preflight_sample: int
     ai_summaries: bool
     vision_images: bool
+    vision_model: str
 
 
 @dataclass(frozen=True)
@@ -538,6 +554,7 @@ class Config:
                 preflight_sample=int(en["preflight_sample"]),
                 ai_summaries=bool(en["ai_summaries"]),
                 vision_images=bool(en["vision_images"]),
+                vision_model=str(en["vision_model"]),
             ),
             logging=LoggingConfig(
                 level=str(lg["level"]),

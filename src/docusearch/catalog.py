@@ -16,8 +16,8 @@ import warnings
 from pathlib import Path
 from typing import overload
 
-from . import embed, ingest, search
-from .config import DEFAULT_CONFIG_PATH, Config, load
+from . import embed, ingest, search, vision
+from .config import DEFAULT_CONFIG_PATH, Config, ConfigError, load
 from .embed import EmbedProvider
 from .ingest import IngestResult
 from .search import SearchHit
@@ -78,6 +78,38 @@ class Catalog:
                 store.delete_document(doc_id)  # cascades chunks/embeddings/relations/images
             self._refresh_sidecar(store)
         return len(doc_ids)
+
+    def enrich_vision(
+        self,
+        *,
+        limit: int | None = None,
+        progress: vision.ProgressFn | None = None,
+    ) -> vision.VisionResult:
+        """Enrich retained images with cloud OCR + description (enrich.vision_images).
+
+        Sends each not-yet-enriched image to the configured vision model once, persists the
+        result, adds a searchable enrichment chunk, then embeds the new chunks (reusing the
+        ingest embed path, R-REUSE-2) so hybrid search finds them and refreshes the ANN
+        sidecar. Refuses with actionable guidance when vision is off."""
+        provider = vision.make_vision_provider(self.config.enrich)
+        if provider is None:
+            raise ConfigError(
+                "enrich.vision_images is off — set `enrich.vision_images: true` in your "
+                "config to run image vision (it calls a paid cloud API)."
+            )
+        with Store.open(self.db_path) as store:
+            result = vision.enrich_images(
+                store,
+                provider,
+                staging_dir=self.config.paths.staging_dir,
+                limit=limit,
+                progress=progress,
+            )
+            embed_provider = self._provider()
+            if embed_provider is not None and store.chunks_without_embeddings():
+                ingest._embed_chunks(store, embed_provider, self.config.embed.batch_size)
+                self._refresh_sidecar(store)
+        return result
 
     def _refresh_sidecar(self, store: Store) -> None:
         """Rebuild or remove the on-disk ANN index after the vector set changed."""
