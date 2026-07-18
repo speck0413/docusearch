@@ -14,6 +14,7 @@ Public surface:
     bm25_search(store, query, *, top_k, prefix, roles) -> list[SearchHit]
     hybrid_search(store, query, provider, vector_index, *, top_k, rrf_k, prefix, roles)
     search(store, queries, *, ...) -> list[SearchHit] | list[list[SearchHit]]   # batch
+    FederatedSearch([store|member, ...]).search(query, *, top_k, rrf_k, ...)     # fan-out + RRF + dedupe
 """
 
 from __future__ import annotations
@@ -21,10 +22,10 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections.abc import Hashable, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 
@@ -218,12 +219,16 @@ class VectorIndex:
 # ----------------------------------------------------------------- ranking
 
 
-def _rrf(ranked_lists: Sequence[Sequence[int]], k: int) -> dict[int, float]:
-    """Reciprocal Rank Fusion: sum of 1/(k + rank) across lists (§9, R-SRCH-2)."""
-    scores: dict[int, float] = {}
+_K = TypeVar("_K", bound=Hashable)
+
+
+def _rrf(ranked_lists: Sequence[Sequence[_K]], k: int) -> dict[_K, float]:
+    """Reciprocal Rank Fusion: sum of 1/(k + rank) across lists (§9, R-SRCH-2). Keyed by any
+    hashable id — chunk ids for bm25+vector fusion, cross-store dedup keys for federation."""
+    scores: dict[_K, float] = {}
     for ranked in ranked_lists:
-        for rank, chunk_id in enumerate(ranked, start=1):
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
+        for rank, key in enumerate(ranked, start=1):
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
     return scores
 
 
@@ -389,3 +394,67 @@ def search(
         else:
             results.append(bm25_search(store, query, top_k=top_k, prefix=prefix, roles=roles))
     return results[0] if single else results
+
+
+@dataclass
+class FederatedMember:
+    """One store in a federation plus the optional machinery to search it hybrid. A bare ``Store``
+    is treated as a BM25-only member."""
+
+    store: Store
+    provider: EmbedProvider | None = None
+    vector_index: VectorIndex | None = None
+
+
+class FederatedSearch:
+    """Fan one query out across several stores, merge the per-store results with RRF, and dedupe by
+    content_hash (R-TEST-3, §4f). Same call shape as single-store search — ``.search(query,
+    top_k=...)`` returns a ``list[SearchHit]``. A member carrying a provider + vector index is
+    searched hybrid, otherwise BM25. Stores are **borrowed, not owned**: the caller opens and closes
+    them. The same document present in more than one store (identical ``content_hash``) collapses to
+    a single result whose fused score reflects every store that returned it."""
+
+    def __init__(self, members: Sequence[FederatedMember | Store]):
+        self.members = [
+            m if isinstance(m, FederatedMember) else FederatedMember(m) for m in members
+        ]
+
+    def _member_hits(
+        self, member: FederatedMember, query: str, pool: int, prefix: bool, roles: set[str] | None
+    ) -> list[SearchHit]:
+        if member.provider is not None and member.vector_index is not None:
+            return hybrid_search(
+                member.store, query, member.provider, member.vector_index,
+                top_k=pool, prefix=prefix, roles=roles,
+            )
+        return bm25_search(member.store, query, top_k=pool, prefix=prefix, roles=roles)
+
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 10,
+        rrf_k: int = 60,
+        prefix: bool = False,
+        roles: set[str] | None = None,
+    ) -> list[SearchHit]:
+        pool = max(top_k, 10)  # pull a slightly deeper pool per store before fusing
+        ranked_keys: list[list[Hashable]] = []
+        rep: dict[Hashable, SearchHit] = {}  # dedup key -> representative hit (first store to return it)
+        for idx, member in enumerate(self.members):
+            hits = self._member_hits(member, query, pool, prefix, roles)
+            keys = member.store.chunk_dedup_keys([h.chunk_id for h in hits])
+            order: list[Hashable] = []
+            for hit in hits:
+                content_hash, ordn = keys.get(hit.chunk_id, ("", -1))
+                # empty content_hash -> store-local key, so distinct content never false-merges
+                key: Hashable = (content_hash, ordn) if content_hash else (idx, hit.chunk_id)
+                order.append(key)
+                rep.setdefault(key, hit)
+            ranked_keys.append(order)
+        fused = _rrf(ranked_keys, rrf_k)
+        ordered = sorted(fused.items(), key=lambda kv: (-kv[1], str(kv[0])))[:top_k]
+        return [
+            replace(rep[key], score=round(score, 6), search_mode="federated")
+            for key, score in ordered
+        ]

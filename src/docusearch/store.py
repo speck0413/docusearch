@@ -401,6 +401,22 @@ class Store:
         ).fetchall()
         return {str(r[0]): str(r[1]) for r in rows}
 
+    def chunk_dedup_keys(self, chunk_ids: Sequence[int]) -> dict[int, tuple[str, int]]:
+        """Map each chunk id to its cross-store identity ``(document content_hash, ord)`` — the key
+        a federated search dedupes/fuses on, so the same logical chunk appearing in more than one
+        store collapses to a single result (R-TEST-3). ``content_hash`` is empty only for a document
+        ingested without one; the caller falls back to a store-local key in that case so distinct
+        content never false-merges."""
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = self._conn.execute(
+            f"SELECT c.id, d.content_hash, c.ord FROM chunks c "
+            f"JOIN documents d ON c.document_id = d.id WHERE c.id IN ({placeholders})",
+            tuple(chunk_ids),
+        ).fetchall()
+        return {int(r[0]): (str(r[1] or ""), int(r[2])) for r in rows}
+
     def delete_document(self, doc_id: int) -> None:
         """Remove a document and everything it owns (for re-ingest of a changed file).
 
