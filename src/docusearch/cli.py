@@ -172,7 +172,9 @@ def _cmd_vision(args: argparse.Namespace) -> int:
         print(f"  ! {sha[:12]}…: {msg}", file=sys.stderr)
     runlog.log("cli.vision", enriched=result.enriched, failed=result.failed)
     runlog.flush()
-    return 0
+    # total failure (e.g. the `claude` binary is missing → every image failed) exits non-zero
+    # so automation notices; a partial failure still exits 0 with the count reported above.
+    return 1 if result.enriched == 0 and result.failed > 0 else 0
 
 
 def _cmd_audit(args: argparse.Namespace) -> int:

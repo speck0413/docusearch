@@ -204,7 +204,12 @@ class ClaudeCliVisionProvider:
             "--output-format",
             "json",
         ]
-        code, out, err = self._run(argv)
+        try:
+            code, out, err = self._run(argv)
+        except Exception as exc:  # noqa: BLE001 - missing `claude` binary, timeout, OSError…
+            raise VisionError(
+                f"claude CLI invocation failed: {type(exc).__name__}: {exc}"
+            ) from exc
         if code != 0:
             raise VisionError(
                 f"claude CLI vision failed (exit {code}): {(err or out).strip()[:200]}"
@@ -255,8 +260,8 @@ class AnthropicVisionProvider:
         caption: str = "",
         context: str = "",
     ) -> ImageInsight:
-        b64 = base64.standard_b64encode(image_path.read_bytes()).decode("ascii")
         try:
+            b64 = base64.standard_b64encode(image_path.read_bytes()).decode("ascii")
             resp = self._http().messages.create(
                 model=self._model_id,
                 max_tokens=self._max_tokens,
@@ -397,7 +402,7 @@ def enrich_images(
     A per-image failure (missing original, vision error) is recorded and the pass continues,
     matching the operability contract (visible progress, one-line errors, never abort a batch).
     """
-    images_dir = Path(staging_dir) / "images"
+    images_dir = (Path(staging_dir) / "images").resolve()
     todo = store.images_needing_vision(limit=limit)
     total = len(todo)
     result = VisionResult()
@@ -409,10 +414,13 @@ def enrich_images(
             result.skipped += 1
             _tick(progress, done, total)
             continue
-        path = images_dir / f"{sha}.{ext}"
-        if not path.is_file():
+        # Defence in depth: never read a file resolved outside images/ (the Phase-3 R1
+        # pattern, mirrors server.py). sha256 is normally a computed hex digest, so this
+        # only fires on a poisoned row.
+        path = (images_dir / f"{sha}.{ext}").resolve()
+        if not path.is_relative_to(images_dir) or not path.is_file():
             result.failed += 1
-            result.errors.append((sha, "original image missing from staging"))
+            result.errors.append((sha, "image path escapes staging or is missing"))
             _tick(progress, done, total)
             continue
         try:
@@ -423,9 +431,10 @@ def enrich_images(
                 caption=str(row["caption"] or ""),
                 context=str(row["locator"] or ""),
             )
-        except VisionError as err:
+        except Exception as err:  # noqa: BLE001 - one bad image must never abort the batch
             result.failed += 1
-            result.errors.append((sha, str(err)))
+            msg = str(err) if isinstance(err, VisionError) else f"{type(err).__name__}: {err}"
+            result.errors.append((sha, msg))
             _tick(progress, done, total)
             continue
         store.set_image_vision(sha, insight.text, insight.model)

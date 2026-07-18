@@ -235,6 +235,49 @@ def test_enrich_images_records_vision_error(tmp_path: Path) -> None:
         assert result.failed == 1 and "exploded" in result.errors[0][1]
 
 
+def test_enrich_images_confines_path_traversal(tmp_path: Path) -> None:
+    # red-team M2: a poisoned images row must not read a file resolved outside staging/images/
+    (tmp_path / "images").mkdir()
+    (tmp_path / "secret.png").write_bytes(b"secret")  # a sibling of images/, must stay unread
+    with Store.open(":memory:") as store:
+        doc_id = store.add_document(
+            path="/d.html", source="v", source_version="", title="D", content_hash="h",
+            content_type="documentation", fmt="html", audience=["e"], mtime=0.0, status="active",
+        )
+        store.add_image(
+            sha256="../secret", ext="png", doc_id=doc_id, locator="", alt="", caption="", num_bytes=6
+        )
+        prov = FakeVision()
+        result = enrich_images(store, prov, staging_dir=tmp_path)
+        assert result.failed == 1
+        assert prov.calls == []  # the escaping path was refused before any provider call
+
+
+def test_enrich_images_survives_non_visionerror(tmp_path: Path) -> None:
+    # red-team follow-up: a provider raising ANY exception (not just VisionError) must not abort
+    # the batch — the failure is recorded and the pass continues (operability).
+    class _Raw:
+        model_id = "raw"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def describe(self, image_path, *, media_type, alt="", caption="", context=""):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                raise FileNotFoundError("claude")  # a raw, non-VisionError exception
+            return ImageInsight("t", "d", self.model_id)
+
+    with Store.open(":memory:") as store:
+        _seed_image(store, tmp_path, "5" * 64)
+        _seed_image(store, tmp_path, "6" * 64)
+        prov = _Raw()
+        result = enrich_images(store, prov, staging_dir=tmp_path)
+        assert prov.calls == 2  # did NOT abort after the first image raised
+        assert result.enriched == 1 and result.failed == 1
+        assert "FileNotFoundError" in result.errors[0][1]
+
+
 def test_enrich_images_deterministic(tmp_path: Path) -> None:
     def run(root: Path) -> str:
         with Store.open(":memory:") as store:
@@ -302,6 +345,20 @@ def test_claude_cli_error_envelope_raises(tmp_path: Path) -> None:
         ClaudeCliVisionProvider("m", runner=runner).describe(_png_file(tmp_path), media_type="image/png")
 
 
+def test_claude_cli_wraps_exec_failure(tmp_path: Path) -> None:
+    # red-team H1: a missing `claude` binary / timeout must become VisionError, not crash the
+    # batch. Injected runner raising:
+    def boom(argv: list[str]) -> tuple[int, str, str]:
+        raise FileNotFoundError("no such file: claude")
+
+    with pytest.raises(VisionError, match="invocation failed"):
+        ClaudeCliVisionProvider("m", runner=boom).describe(_png_file(tmp_path), media_type="image/png")
+    # and the REAL subprocess path with a nonexistent binary (zero cost, no quota):
+    prov = ClaudeCliVisionProvider("m", cli="claude-does-not-exist-xyz", timeout=5)
+    with pytest.raises(VisionError):
+        prov.describe(_png_file(tmp_path), media_type="image/png")
+
+
 def test_claude_cli_raw_json_without_envelope(tmp_path: Path) -> None:
     # some invocations print the bare reply, not a result envelope — still parsed
     def runner(argv: list[str]) -> tuple[int, str, str]:
@@ -359,6 +416,13 @@ def test_anthropic_rejects_non_json(tmp_path: Path) -> None:
     prov = AnthropicVisionProvider("m", client=_StubClient("not json at all"))
     with pytest.raises(VisionError):
         prov.describe(_png_file(tmp_path), media_type="image/png")
+
+
+def test_anthropic_missing_file_is_vision_error(tmp_path: Path) -> None:
+    # red-team M1: a missing image file must be VisionError, not an uncaught FileNotFoundError
+    prov = AnthropicVisionProvider("m", client=_StubClient('{"text":"T","description":"D"}'))
+    with pytest.raises(VisionError):
+        prov.describe(tmp_path / "nope.png", media_type="image/png")
 
 
 # ------------------------------------------------------- local backend

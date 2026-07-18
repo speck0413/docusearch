@@ -240,6 +240,29 @@ def test_vision_cli_enriches_with_stub_provider(
     assert "VZX9" in capsys.readouterr().out
 
 
+class _FailVision:
+    model_id = "fail"
+
+    def describe(self, image_path, *, media_type, alt="", caption="", context=""):  # type: ignore[no-untyped-def]
+        raise RuntimeError("backend down")
+
+
+def test_vision_cli_total_failure_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from docusearch import vision
+
+    monkeypatch.chdir(tmp_path)
+    _vision_config(tmp_path)
+    cli.main(["ingest"])
+    _stage_image(tmp_path)
+    monkeypatch.setattr(vision, "make_vision_provider", lambda enrich: _FailVision())
+    capsys.readouterr()
+    rc = cli.main(["vision", "--yes"])  # every image fails -> non-zero exit for automation
+    assert rc == 1
+    assert "Enriched 0 images" in capsys.readouterr().out
+
+
 def test_search_json_emits_structured_hits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:  # type: ignore[no-untyped-def]
