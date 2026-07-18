@@ -33,6 +33,37 @@ class EmbedError(Exception):
     """Embedding provenance problem (e.g. re-indexing with a different model)."""
 
 
+def _best_device(has_cuda: bool, has_mps: bool) -> str:
+    """Pick the fastest available torch device, preferring discrete GPU.
+
+    Pure (no torch import) so the preference order is unit-testable on any host:
+    NVIDIA CUDA first, then Apple-Silicon Metal (``mps``), else ``cpu``.
+    """
+    if has_cuda:
+        return "cuda"
+    if has_mps:
+        return "mps"
+    return "cpu"
+
+
+def _detect_device() -> str:
+    """Resolve ``device: auto`` to a concrete torch device on this machine.
+
+    Works cross-platform (CUDA on Windows/Linux, MPS on macOS, cpu everywhere).
+    Any probe failure degrades to ``cpu`` so ``auto`` can never break ingestion.
+    """
+    try:
+        import torch
+
+        has_cuda = bool(torch.cuda.is_available())
+        # older torch builds lack the mps backend attribute entirely
+        mps = getattr(torch.backends, "mps", None)
+        has_mps = bool(mps is not None and mps.is_available())
+    except Exception:  # noqa: BLE001 -- never let device probing abort a run
+        return "cpu"
+    return _best_device(has_cuda, has_mps)
+
+
 @runtime_checkable
 class EmbedProvider(Protocol):
     """Anything that turns texts into L2-normalized float32 vectors, tagged by model."""
@@ -69,6 +100,8 @@ class LocalProvider:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
+            if self._device == "auto":  # resolve lazily so torch imports only when embedding
+                self._device = _detect_device()
             self._model = SentenceTransformer(
                 self._model_id,
                 device=self._device,
@@ -181,12 +214,11 @@ def make_provider(embed_config: EmbedConfig) -> EmbedProvider | None:
     if model == "auto":
         # 'auto' negotiates a model with a server (§8) — a client/server feature (Phase 3).
         raise NotImplementedError("embed.model 'auto' negotiation lands in Phase 3.")
-    device = embed_config.device
-    if device == "auto":
-        device = "cpu"  # deterministic default + low RSS; set device: cuda to opt into GPU
+    # device 'auto' is resolved lazily in LocalProvider (cuda -> mps -> cpu) so torch is
+    # imported only when we actually embed; cpu/cuda/mps pass straight through.
     return LocalProvider(
         model,
-        device=device,
+        device=embed_config.device,
         batch_size=embed_config.batch_size,
         trust_remote_code=embed_config.trust_remote_code,
     )

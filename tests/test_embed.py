@@ -52,6 +52,36 @@ def test_choose_auto_strategy() -> None:
     assert embed.choose_auto_strategy({"model": "m", "approx_mb": 1300}, 200) == "text"
 
 
+def test_best_device_prefers_cuda_then_mps_then_cpu() -> None:
+    # pure preference order (R-EMB-1): discrete GPU > Apple Metal > cpu
+    assert embed._best_device(has_cuda=True, has_mps=True) == "cuda"
+    assert embed._best_device(has_cuda=True, has_mps=False) == "cuda"
+    assert embed._best_device(has_cuda=False, has_mps=True) == "mps"
+    assert embed._best_device(has_cuda=False, has_mps=False) == "cpu"
+
+
+def test_detect_device_falls_back_to_cpu_without_torch(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_torch(name: str, *a: object, **k: object) -> object:
+        if name == "torch":
+            raise ImportError("no torch")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_torch)
+    assert embed._detect_device() == "cpu"  # a probe failure must never abort a run
+
+
+def test_make_provider_passes_device_through() -> None:
+    # cpu/cuda/mps/auto reach the provider unchanged; 'auto' is resolved lazily at load
+    for device in ("cpu", "cuda", "mps", "auto"):
+        prov = embed.make_provider(_embed_config(MODEL, device=device))
+        assert isinstance(prov, embed.LocalProvider)
+        assert prov._device == device
+
+
 def _asgi_client(config: object):  # type: ignore[no-untyped-def]
     import warnings
 

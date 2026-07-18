@@ -108,6 +108,7 @@ SCHEMA: tuple[_Node, ...] = (
         (
             _Field("type", "fs", inline="fs = filesystem folder (git/sharepoint later)"),
             _Field("name", "vendor-html", inline="a short label for this source"),
+            _Field("version", "", inline='doc release/version, e.g. "2024.3" (blank = untracked)'),
             _Field("location", "D:/docs/vendor-html", inline="folder to ingest (Windows or POSIX)"),
             _Field("include", ["**/*.html"], inline="glob whitelist"),
             _Field("exclude", ["**/nav/**"], inline="glob blacklist (framework/nav noise)"),
@@ -163,7 +164,16 @@ SCHEMA: tuple[_Node, ...] = (
                     "    nomic-ai/nomic-embed-text-v1.5           # 768d, needs trust_remote_code"
                 ),
             ),
-            _Field("device", "auto", inline="auto | cpu | cuda", choices=("auto", "cpu", "cuda")),
+            _Field(
+                "device",
+                "auto",
+                comment=(
+                    "Compute device for embedding:\n"
+                    "  auto -> best available (CUDA GPU, else Apple-Silicon Metal 'mps', else cpu)\n"
+                    "  cpu  -> most reproducible; cuda -> NVIDIA GPU; mps -> macOS GPU (Metal)"
+                ),
+                choices=("auto", "cpu", "cuda", "mps"),
+            ),
             _Field("batch_size", 128, inline="chunks embedded per batch"),
             _Field(
                 "auto_max_mb",
@@ -197,6 +207,11 @@ SCHEMA: tuple[_Node, ...] = (
             _Field("host", "0.0.0.0", inline="bind address"),
             _Field("port", 8321, inline="HTTP port for REST + MCP"),
             _Field("mcp_path", "/mcp", inline="MCP over streamable HTTP mounts here"),
+            _Field(
+                "self_heal_minutes",
+                60,
+                inline="auto-prune orphaned docs every N min while serving (0 = off)",
+            ),
         ),
         comment=(
             "Roles come from the DOCUSEARCH_ROLES env var on the client/agent process,\n"
@@ -246,26 +261,37 @@ def _comment(text: str, pad: str) -> Iterator[str]:
         yield f"{pad}#" + (f" {line}" if line else "")
 
 
+def _value_lines(key: str, default: _Value, pad: str, inline: str) -> list[str]:
+    """Field lines. A non-empty list renders as a block sequence (easier to edit)::
+
+        include:
+          - "**/*.html"
+
+    An empty list stays inline (``[]``); scalars stay ``key: value``.
+    """
+    tail = f"  # {inline}" if inline else ""
+    if isinstance(default, list) and default:
+        return [f"{pad}{key}:{tail}"] + [f"{pad}  - {_fmt(item)}" for item in default]
+    return [f"{pad}{key}: {_fmt(default)}{tail}"]
+
+
 def _field_lines(field: _Field, pad: str) -> Iterator[str]:
     if field.comment:
         yield from _comment(field.comment, pad)
-    line = f"{pad}{field.key}: {_fmt(field.default)}"
-    if field.inline:
-        line += f"  # {field.inline}"
-    yield line
+    yield from _value_lines(field.key, field.default, pad, field.inline)
 
 
 def _list_item_lines(fields: Sequence[_Field], pad: str) -> Iterator[str]:
     """Render one list entry: first field gets the ``- `` dash, rest align under it."""
     inner = pad + "  "
     for i, field in enumerate(fields):
-        prefix = f"{pad}- " if i == 0 else inner
         if field.comment:
             yield from _comment(field.comment, inner)
-        line = f"{prefix}{field.key}: {_fmt(field.default)}"
-        if field.inline:
-            line += f"  # {field.inline}"
-        yield line
+        if i == 0:  # first field carries the "- " dash (always a scalar here, e.g. type)
+            tail = f"  # {field.inline}" if field.inline else ""
+            yield f"{pad}- {field.key}: {_fmt(field.default)}{tail}"
+        else:
+            yield from _value_lines(field.key, field.default, inner, field.inline)
 
 
 def render_template(version: str = __version__, generated_on: date | None = None) -> str:
@@ -381,6 +407,7 @@ class PathsConfig:
 class SourceConfig:
     type: str
     name: str
+    version: str
     location: str
     include: list[str]
     exclude: list[str]
@@ -420,6 +447,7 @@ class ServeConfig:
     host: str
     port: int
     mcp_path: str
+    self_heal_minutes: int
 
 
 @dataclass(frozen=True)
@@ -470,6 +498,7 @@ class Config:
                 SourceConfig(
                     type=str(s["type"]),
                     name=str(s["name"]),
+                    version=str(s["version"]),
                     location=str(s["location"]),
                     include=_strs(s["include"]),
                     exclude=_strs(s["exclude"]),
@@ -503,6 +532,7 @@ class Config:
                 host=str(sv["host"]),
                 port=int(sv["port"]),
                 mcp_path=str(sv["mcp_path"]),
+                self_heal_minutes=int(sv["self_heal_minutes"]),
             ),
             enrich=EnrichConfig(
                 preflight_sample=int(en["preflight_sample"]),

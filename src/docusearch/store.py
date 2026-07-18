@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MEMORY = ":memory:"
 
@@ -144,7 +145,11 @@ CREATE TABLE annotations (
 );
 """
 
-_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SCHEMA_V1),)
+# Migration 2 = per-document source version label (provenance for "which release of the
+# docs did this come from"). Additive column; NULL for rows ingested before v2.
+_SCHEMA_V2 = "ALTER TABLE documents ADD COLUMN source_version TEXT;"
+
+_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SCHEMA_V1), (2, _SCHEMA_V2))
 
 
 class Store:
@@ -152,8 +157,37 @@ class Store:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        self._autocommit = True  # per-write commits; ingest defers these to batch fsyncs
 
     # -- lifecycle ---------------------------------------------------------------
+
+    def _maybe_commit(self) -> None:
+        """Commit now unless inside a ``deferred_commits`` block (bulk ingest batches)."""
+        if self._autocommit:
+            self._conn.commit()
+
+    def commit(self) -> None:
+        """Flush pending writes to disk (one fsync). Used to batch a deferred block."""
+        self._conn.commit()
+
+    @contextmanager
+    def deferred_commits(self) -> Iterator[None]:
+        """Suppress per-write commits inside the block so the caller can batch them.
+
+        Each ``add_*`` normally fsyncs on commit; on a bulk ingest that is hundreds of
+        thousands of fsyncs (the real "13% CPU, slow" cause). Inside this block the writes
+        accumulate in one transaction until the caller calls :meth:`commit`; on exit any
+        remainder is committed (or rolled back if the block raised)."""
+        previous = self._autocommit
+        self._autocommit = False
+        try:
+            yield
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        finally:
+            self._autocommit = previous
 
     @classmethod
     def open(cls, db_path: Path | str) -> Store:
@@ -259,6 +293,7 @@ class Store:
         *,
         path: str,
         source: str = "",
+        source_version: str = "",
         title: str = "",
         doc_id: str = "",
         content_hash: str = "",
@@ -271,12 +306,13 @@ class Store:
         """Insert a document row; returns its new integer id. ``path`` must be unique."""
         cur = self._conn.execute(
             "INSERT INTO documents"
-            "(path, source, title, doc_id, content_hash, content_type, fmt, "
+            "(path, source, source_version, title, doc_id, content_hash, content_type, fmt, "
             " audience, mtime, ingested_at, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 source,
+                source_version,
                 title,
                 doc_id,
                 content_hash,
@@ -288,7 +324,7 @@ class Store:
                 status,
             ),
         )
-        self._conn.commit()
+        self._maybe_commit()
         return int(cur.lastrowid or 0)
 
     def add_chunk(
@@ -305,8 +341,21 @@ class Store:
             "INSERT INTO chunks(document_id, ord, kind, locator, text) VALUES (?, ?, ?, ?, ?)",
             (document_id, ord, kind, locator, text),
         )
-        self._conn.commit()
+        self._maybe_commit()
         return int(cur.lastrowid or 0)
+
+    def add_chunks(self, document_id: int, chunks: Sequence[tuple[int, str, str, str]]) -> None:
+        """Bulk-insert a document's chunks in one ``executemany`` (ord, text, kind, locator).
+
+        The FTS index stays in sync via trigger. This is the ingest hot path — one call per
+        document instead of one per chunk cuts the Python↔SQLite round-trips substantially."""
+        if not chunks:
+            return
+        self._conn.executemany(
+            "INSERT INTO chunks(document_id, ord, kind, locator, text) VALUES (?, ?, ?, ?, ?)",
+            [(document_id, ordv, kind, locator, text) for ordv, text, kind, locator in chunks],
+        )
+        self._maybe_commit()
 
     def chunk_ids_matching(self, query: str) -> list[int]:
         """Raw FTS5 rowid match for ``query`` (unranked). Ranking lands in search.py.
@@ -332,6 +381,14 @@ class Store:
         row = self._conn.execute("SELECT id FROM documents WHERE path=?", (path,)).fetchone()
         return None if row is None else int(row[0])
 
+    def document_hashes(self) -> dict[str, str]:
+        """``{path: content_hash}`` for every document — the incremental-skip lookup, read
+        once so parallel parse workers can decide skip vs. re-parse without the DB."""
+        rows = self._conn.execute(
+            "SELECT path, content_hash FROM documents WHERE content_hash IS NOT NULL"
+        ).fetchall()
+        return {str(r[0]): str(r[1]) for r in rows}
+
     def delete_document(self, doc_id: int) -> None:
         """Remove a document and everything it owns (for re-ingest of a changed file).
 
@@ -356,6 +413,26 @@ class Store:
             c.execute("DELETE FROM images WHERE doc_id=?", (doc_id,))
             c.execute("DELETE FROM documents WHERE id=?", (doc_id,))
 
+    def document_ids_for_source(self, source: str) -> list[int]:
+        """Every document id ingested under the given source label (for purge)."""
+        rows = self._conn.execute(
+            "SELECT id FROM documents WHERE source=? ORDER BY id", (source,)
+        ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def all_document_paths(self) -> list[tuple[int, str]]:
+        """``(id, path)`` for every document — used to prune ones whose source file is gone."""
+        rows = self._conn.execute("SELECT id, path FROM documents ORDER BY id").fetchall()
+        return [(int(r[0]), str(r[1])) for r in rows]
+
+    def source_names(self) -> list[tuple[str, int]]:
+        """``(source, document_count)`` for every distinct source label, most docs first."""
+        rows = self._conn.execute(
+            "SELECT COALESCE(source, ''), COUNT(*) FROM documents "
+            "GROUP BY source ORDER BY COUNT(*) DESC, source"
+        ).fetchall()
+        return [(str(r[0]), int(r[1])) for r in rows]
+
     def add_relation(
         self, *, src_doc: int, dst_raw: str, link_type: str, confidence: float | None = None
     ) -> int:
@@ -364,12 +441,12 @@ class Store:
             "VALUES (?, NULL, ?, ?, ?, ?)",
             (src_doc, dst_raw, link_type, confidence, _utcnow_iso()),
         )
-        self._conn.commit()
+        self._maybe_commit()
         return int(cur.lastrowid or 0)
 
     def set_relation_dst(self, relation_id: int, dst_doc: int) -> None:
         self._conn.execute("UPDATE relations SET dst_doc=? WHERE id=?", (dst_doc, relation_id))
-        self._conn.commit()
+        self._maybe_commit()
 
     def unresolved_relations(self) -> list[tuple[int, str, str]]:
         """(relation_id, source document path, raw target) for every unresolved link."""
@@ -400,7 +477,7 @@ class Store:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (sha256, ext, doc_id, locator, alt, caption, num_bytes),
         )
-        self._conn.commit()
+        self._maybe_commit()
 
     def count_relations(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0])
@@ -444,6 +521,26 @@ class Store:
     def count_embeddings(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
 
+    def existing_embedding_model(self) -> tuple[str, int] | None:
+        """The ``(model, dim)`` of the vectors already in the index, or ``None`` if empty.
+
+        Read authoritatively from the embeddings rows themselves — not the ``embed_model``
+        meta flag, which is only written after a full pass and so is absent if a run was
+        interrupted (that gap is what let mixed-dimension vectors accumulate)."""
+        row = self._conn.execute("SELECT model, dim FROM embeddings LIMIT 1").fetchone()
+        return (str(row[0]), int(row[1])) if row is not None else None
+
+    def clear_embeddings(self) -> int:
+        """Drop every vector and its provenance meta; returns how many were removed.
+
+        The recovery path for switching embedding models (or healing a mixed index):
+        the chunks/documents stay, only the vectors are rebuilt on the next embed pass."""
+        n = self.count_embeddings()
+        with self._conn:
+            self._conn.execute("DELETE FROM embeddings")
+            self._conn.execute("DELETE FROM meta WHERE key IN ('embed_model', 'embed_dim')")
+        return n
+
     # -- document/audit read paths (Phase 1) -------------------------------------
 
     def get_document(self, doc_id: int) -> sqlite3.Row | None:
@@ -457,6 +554,20 @@ class Store:
             "SELECT id, ord, kind, locator, text FROM chunks WHERE document_id=? ORDER BY ord",
             (doc_id,),
         ).fetchall()
+
+    def citation_target(self, doc_id: int, chunk_id: int) -> tuple[str, str, str, str] | None:
+        """``(source, title, original path, chunk locator)`` for one cited pair, so a report
+        can link a reference to the original vendor document (not the chunk). None if the
+        chunk doesn't belong to the document (a mis-attributed citation)."""
+        row = self._conn.execute(
+            "SELECT d.source, d.title, d.path, c.locator "
+            "FROM chunks c JOIN documents d ON c.document_id = d.id "
+            "WHERE c.id=? AND d.id=?",
+            (chunk_id, doc_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""), str(row[3] or ""))
 
     def get_image(self, sha256: str) -> sqlite3.Row | None:
         row: sqlite3.Row | None = self._conn.execute(

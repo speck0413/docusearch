@@ -148,6 +148,32 @@ def test_embed_model_accepts_none_auto_and_hf_ids(tmp_path: Path, model: str) ->
     assert loaded.embed.model == model
 
 
+@pytest.mark.parametrize("device", ["auto", "cpu", "cuda", "mps"])
+def test_device_accepts_mps_for_apple_silicon(tmp_path: Path, device: str) -> None:
+    """R-EMB-1: macOS GPU (Metal) is a first-class device alongside cpu/cuda."""
+    path = tmp_path / "docusearch.yaml"
+    path.write_text(f"embed:\n  device: {device}\n", encoding="utf-8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        loaded = cfg.load(path)
+    assert loaded.embed.device == device
+
+
+def test_template_renders_lists_as_block_sequences() -> None:
+    """List fields (include/exclude/audience) render as easy-to-edit block sequences,
+    not inline flow arrays."""
+    text = cfg.render_template()
+    # block style: a "key:" line followed by dash items, not include: ["**/*.html"]
+    assert '\n      - "**/*.html"' in text  # include item as a block sequence entry
+    assert '\n      - "**/nav/**"' in text  # exclude item likewise
+    assert "include: [" not in text  # the old inline flow form is gone
+    # an empty list still renders inline (there is no item to dash)
+    assert "strip_selectors: []" in text
+    # and it still round-trips to the same typed defaults
+    data = yaml.safe_load(text)
+    assert data["sources"][0]["include"] == ["**/*.html"]
+
+
 def test_partial_source_inherits_field_defaults(tmp_path: Path) -> None:
     """A source entry with only name/location still gets sane field defaults."""
     path = tmp_path / "docusearch.yaml"
@@ -162,6 +188,17 @@ def test_partial_source_inherits_field_defaults(tmp_path: Path) -> None:
     assert src.location == "/data/docs"
     assert src.type == "fs"  # inherited default
     assert src.min_content_chars == 200  # inherited default
+    assert src.version == ""  # inherited default (blank = untracked)
+
+
+def test_source_version_loads_and_documents(tmp_path: Path) -> None:
+    assert "version" in cfg.render_template()  # documented in the template
+    path = tmp_path / "docusearch.yaml"
+    path.write_text(
+        'sources:\n  - name: mine\n    version: "2024.3"\n    location: /data/docs\n',
+        encoding="utf-8",
+    )
+    assert cfg.load(path).sources[0].version == "2024.3"
 
 
 def test_scalar_override_loads(tmp_path: Path) -> None:
