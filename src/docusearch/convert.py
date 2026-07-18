@@ -368,3 +368,75 @@ def convert_source(
         if progress is not None:
             progress(i, total)
     return result
+
+
+_MIXED_FORMATS = ("html", "md", "docx", "pdf")
+
+
+def _mixed_out(rel: Path, fmt: str) -> Path:
+    return rel if fmt == "html" else rel.with_suffix(f".{fmt}")
+
+
+def convert_mixed(
+    src_dir: Path | str, dst_dir: Path | str, *, formats: Sequence[str] = _MIXED_FORMATS
+) -> ConvertResult:
+    """Build the **mixed** suite (R-TEST-2, §15.4): sort the HTML files by full path, assign a
+    format by ``index % len(formats)`` (html/md/docx/pdf), and convert each into one interleaved
+    folder (mirrored path, assigned extension; ``html`` is copied as-is). Deterministic — the fixed
+    sort + modulus make the assignment reproducible."""
+    src, dst = Path(src_dir), Path(dst_dir)
+    result = ConvertResult()
+    for idx, html_path in enumerate(sorted(src.rglob("*.htm*"))):
+        fmt = formats[idx % len(formats)]
+        out = dst / _mixed_out(html_path.relative_to(src), fmt)
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if fmt == "html":
+                out.write_bytes(html_path.read_bytes())
+            else:
+                html = html_path.read_bytes().decode("utf-8", errors="replace")
+                out.write_bytes(_render_bytes(html, fmt, base_path=html_path))
+            result.converted += 1
+        except Exception as err:  # noqa: BLE001 - one bad file must not abort the batch
+            result.errors.append((str(html_path), f"{type(err).__name__}: {err}"))
+    return result
+
+
+def convert_source_mixed(
+    source: SourceConfig,
+    dst_dir: Path | str,
+    *,
+    formats: Sequence[str] = _MIXED_FORMATS,
+    progress: Callable[[int, int], None] | None = None,
+) -> ConvertResult:
+    """Mixed suite from a real source (R-TEST-2 on the operator's corpus): exactly the ingested
+    files, format assigned by ``index % len(formats)``, converters applying the source's selectors.
+    ``html`` files are copied raw (their content_selector is applied at ingest time, so the mix
+    still carries the same cleaned content across formats)."""
+    from .ingest import iter_files  # lazy: keeps convert import light
+
+    src_root, dst = Path(source.location), Path(dst_dir)
+    files = list(iter_files(source.location, source.include, source.exclude))
+    total = len(files)
+    result = ConvertResult()
+    for idx, path in enumerate(files):
+        fmt = formats[idx % len(formats)]
+        out = dst / _mixed_out(path.relative_to(src_root), fmt)
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if fmt == "html":
+                out.write_bytes(path.read_bytes())
+            else:
+                html = path.read_bytes().decode("utf-8", errors="replace")
+                out.write_bytes(
+                    _render_bytes(
+                        html, fmt, content_selector=source.content_selector,
+                        strip_selectors=source.strip_selectors, base_path=path,
+                    )
+                )
+            result.converted += 1
+        except Exception as err:  # noqa: BLE001 - one bad file must not abort the batch
+            result.errors.append((str(path), f"{type(err).__name__}: {err}"))
+        if progress is not None:
+            progress(idx + 1, total)
+    return result
