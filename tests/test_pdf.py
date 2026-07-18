@@ -75,6 +75,34 @@ def test_extract_pdf_text_page_locators_and_links(tmp_path: Path) -> None:
     assert doc.title  # title falls back to the first line when metadata has none
 
 
+def test_extract_pdf_font_based_headings(tmp_path: Path) -> None:
+    # font size/weight drives heading structure: bigger/bolder runs become heading-path locators
+    # instead of a flat "page N", so retrieval + citations point to the right section.
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    p = tmp_path / "doc.pdf"
+    c = canvas.Canvas(str(p), pagesize=letter)
+    c.setFont("Helvetica-Bold", 22)
+    c.drawString(72, 740, "Protocol Aware")
+    c.setFont("Helvetica-Bold", 15)
+    c.drawString(72, 700, "Timing")
+    c.setFont("Helvetica", 11)
+    c.drawString(72, 670, "The nonce ZQX-7734-FRB configures the bus at the ordinary body size.")
+    c.setFont("Helvetica-Bold", 15)
+    c.drawString(72, 630, "Capture")
+    c.setFont("Helvetica", 11)
+    c.drawString(72, 600, "Capture body text runs at the ordinary size here.")
+    c.showPage()
+    c.save()
+    doc = extract_pdf(p.read_bytes())
+    hpaths = [s.heading_path for s in doc.segments]
+    assert any("Protocol Aware > Timing" in h for h in hpaths)
+    assert any("Protocol Aware > Capture" in h for h in hpaths)
+    nonce_seg = next(s for s in doc.segments if "ZQX-7734-FRB" in s.text)
+    assert "Timing" in nonce_seg.heading_path  # body located under its heading, not "page 1"
+
+
 def test_extract_document_dispatch(tmp_path: Path) -> None:
     pdf = tmp_path / "a.pdf"
     _make_pdf(pdf, [["hello PDF world"]])
@@ -154,10 +182,11 @@ def test_needle_survives_pdf_conversion_and_ingest(tmp_path: Path) -> None:
         hits = cat.search(needle)
         assert hits, f"needle {needle} not recovered from the PDF"
         assert any(source in h.path for h in hits)
-    # PDFs carry page-based locators
+    # PDFs now carry FONT-INFERRED heading-path locators (the converted title becomes a heading),
+    # not a flat "page N" — so citations point to the section.
     with Store.open(cfg.paths.db_path) as store:
-        rows = store.chunks_for_document(1)
-        assert any(r["locator"] == "page 1" for r in rows)
+        rows = store.chunks_for_document(1)  # spi.pdf (sorted first)
+        assert any("SPI" in (r["locator"] or "") for r in rows)
 
 
 def _tiny_png() -> bytes:

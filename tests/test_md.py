@@ -74,6 +74,35 @@ def test_html_to_md_roundtrip_preserves_needles_all_placements() -> None:
         assert nonce in text, f"{nonce} lost in HTML->MD->extract"
 
 
+def test_html_to_md_escapes_underscore_identifiers() -> None:
+    # red-team H1: underscore-wrapped identifiers must NOT be eaten as markdown emphasis.
+    html = "<body><h1>API</h1><p>Override the __init__ and _missing_ and __dunder__ methods.</p></body>"
+    doc = extract_md(html_to_md_bytes(html))
+    text = "\n".join(s.text for s in doc.segments)
+    for ident in ("__init__", "_missing_", "__dunder__"):
+        assert ident in text, f"{ident} was lost to markdown emphasis"
+
+
+def test_html_to_md_multi_image_locators_distinct(tmp_path: Path) -> None:
+    # red-team M2: two images under different headings keep their own heading-path locators
+    # (not both collapsed onto the last heading).
+    from PIL import Image
+
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(tmp_path / "a.png", format="PNG")
+    Image.new("RGB", (8, 8), (9, 9, 9)).save(tmp_path / "b.png", format="PNG")
+    (tmp_path / "page.html").write_text(
+        "<body><h1>Doc</h1>"
+        '<h2>Alpha</h2><p>text</p><img src="a.png" alt="alpha diagram">'
+        '<h2>Beta</h2><p>text</p><img src="b.png" alt="beta diagram">'
+        "</body>",
+        encoding="utf-8",
+    )
+    doc = extract_md(html_to_md_bytes((tmp_path / "page.html").read_text(), base_path=tmp_path / "page.html"))
+    img_headings = {im.heading_path for im in doc.images}
+    assert any("Alpha" in h for h in img_headings)
+    assert any("Beta" in h for h in img_headings)  # not both under the last heading
+
+
 def test_convert_corpus_md_embeds_real_image_retainable(tmp_path: Path) -> None:
     from PIL import Image
 

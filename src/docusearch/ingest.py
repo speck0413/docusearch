@@ -399,29 +399,65 @@ def extract_html(
     return doc
 
 
-def extract_pdf(data: bytes) -> ExtractedDoc:
-    """Extract text + page locators + link annotations from one PDF (§7.3, Phase 4a).
+def _pdf_page_lines(page: object) -> list[tuple[float, bool, str]]:
+    """One ``(font_size, bold, text)`` per visual line, in reading order — the font signal a PDF
+    has instead of heading tags."""
+    out: list[tuple[float, bool, str]] = []
+    for block in page.get_text("dict").get("blocks", []):  # type: ignore[attr-defined]
+        for line in block.get("lines", []):
+            spans = line.get("spans", [])
+            text = _clean("".join(str(s.get("text", "")) for s in spans))
+            if not text:
+                continue
+            size = round(max((float(s.get("size", 0.0)) for s in spans), default=0.0), 1)
+            bold = any(
+                int(s.get("flags", 0)) & 16 or "bold" in str(s.get("font", "")).lower()
+                for s in spans
+            )
+            out.append((size, bold, text))
+    return out
 
-    PyMuPDF is a ``[pdf]`` extra, imported lazily so non-PDF users never load it. Each page
-    becomes one ``body`` segment with a ``page N`` locator (R-ING-4); link annotations become
-    ``LinkRef``s; embedded images are retained (R-ING-6) with their bytes carried inline so the
-    vision stage can enrich them. A PDF's text layer carries no code/table structure, so all text
-    is ``body`` — needles survive as prose, which the needles-through-conversion suite checks.
+
+def _pdf_heading_levels(pages: list[tuple[int, list[tuple[float, bool, str]]]]) -> dict[float, int]:
+    """Map each heading-sized font to a level (1 = largest). The body size is the most common
+    size (by character count); sizes clearly larger than it are headings, ranked descending.
+    Returns {} when the document has no size variation (fall back to page locators)."""
+    from collections import Counter
+
+    weight: Counter[float] = Counter()
+    for _, plines in pages:
+        for size, _bold, text in plines:
+            weight[size] += len(text)
+    if not weight:
+        return {}
+    body_size = weight.most_common(1)[0][0]
+    heading_sizes = sorted((s for s in weight if s > body_size * 1.12), reverse=True)
+    return {size: min(idx + 1, 6) for idx, size in enumerate(heading_sizes)}
+
+
+def extract_pdf(data: bytes) -> ExtractedDoc:
+    """Extract text, **font-inferred heading structure**, links, and images from one PDF (§7.3).
+
+    PyMuPDF is a ``[pdf]`` extra, imported lazily. A PDF has no heading tags, so headings are
+    inferred from **font size/weight** (R-ING-4): the body size is the document's most common size,
+    runs clearly larger than it become headings (ranked into levels), and body text is located by
+    the resulting heading path (``Chapter > Section``) instead of a flat ``page N`` — so retrieval
+    and citations point to the right section. A document with no size variation falls back to
+    ``page N``. Link annotations → ``LinkRef``; embedded images are retained with inline bytes for
+    the vision stage (R-ING-6).
     """
     import fitz  # lazy: the [pdf] extra is only loaded when a PDF is actually parsed
 
     doc_obj = fitz.open(stream=data, filetype="pdf")
     try:
-        segments: list[Segment] = []
         links: list[LinkRef] = []
         images: list[ImageRef] = []
         seen_xrefs: set[int] = set()  # a PDF image (xref) reused across pages is retained once
+        pages: list[tuple[int, list[tuple[float, bool, str]]]] = []
         for i in range(doc_obj.page_count):
             page = doc_obj.load_page(i)
+            pages.append((i, _pdf_page_lines(page)))
             locator = f"page {i + 1}"
-            text = page.get_text("text").strip()
-            if text:
-                segments.append(Segment(kind="body", text=text, heading_path=locator))
             for link in page.get_links():
                 uri = link.get("uri")
                 if uri:
@@ -438,15 +474,40 @@ def extract_pdf(data: bytes) -> ExtractedDoc:
                 blob = extracted.get("image")
                 if blob:
                     images.append(
-                        ImageRef(
-                            src=f"pdf:xref{xref}",
-                            alt="",
-                            caption="",
-                            heading_path=locator,
-                            data=bytes(blob),
-                            ext=str(extracted.get("ext") or "png"),
-                        )
+                        ImageRef(src=f"pdf:xref{xref}", alt="", caption="", heading_path=locator,
+                                 data=bytes(blob), ext=str(extracted.get("ext") or "png"))
                     )
+
+        level_of = _pdf_heading_levels(pages)
+        segments: list[Segment] = []
+        stack: list[tuple[int, str]] = []
+        buf: list[str] = []
+        buf_loc: str | None = None
+
+        def flush() -> None:
+            nonlocal buf, buf_loc
+            if buf:
+                segments.append(Segment("body", " ".join(buf), buf_loc or ""))
+                buf = []
+
+        for i, plines in pages:
+            page_loc = f"page {i + 1}"
+            for size, _bold, text in plines:
+                if size in level_of and len(text) <= 200:  # a heading (short, larger font)
+                    if stack and stack[-1][1] == text:
+                        continue  # same text at another size (e.g. title + H1) — not a new level
+                    flush()
+                    _push_heading(stack, level_of[size], text)
+                    segments.append(Segment("body", text, _heading_path(stack)))
+                else:  # body — located by the current heading path, else the page
+                    loc = _heading_path(stack) or page_loc
+                    if buf_loc is not None and buf_loc != loc:
+                        flush()
+                    buf_loc = loc
+                    buf.append(text)
+            flush()  # page boundary: keeps page-N-located body per page
+            buf_loc = None
+
         title = _clean(str((doc_obj.metadata or {}).get("title") or ""))
         if not title and segments:
             title = _clean(segments[0].text.splitlines()[0])[:200]
@@ -569,12 +630,15 @@ def extract_docx(data: bytes) -> ExtractedDoc:
 
 def _strip_front_matter(text: str) -> str:
     """Drop a leading YAML front-matter block (``---`` … ``---``, common in real Markdown like
-    MDN) so its keys aren't indexed as body prose."""
-    if text.startswith("---\n") or text.startswith("---\r\n"):
-        end = text.find("\n---", 3)
-        if end != -1:
-            nl = text.find("\n", end + 1)
-            return text[nl + 1 :] if nl != -1 else ""
+    MDN) so its keys aren't indexed as body prose. An *unclosed* ``---`` block (no terminator in
+    the first 64 lines) is treated as ordinary content, not silently swallowed."""
+    if not (text.startswith("---\n") or text.startswith("---\r\n")):
+        return text
+    end = text.find("\n---", 3)
+    # only strip a bounded, actually-closed block (guard against a stray leading '---')
+    if end != -1 and text.count("\n", 0, end) <= 64:
+        nl = text.find("\n", end + 1)
+        return text[nl + 1 :] if nl != -1 else ""
     return text
 
 
@@ -605,7 +669,8 @@ def _decode_data_uri(src: str) -> tuple[bytes | None, str]:
         return None, ""
     ext = header[len("data:image/") :].split(";", 1)[0].lower()
     try:
-        return base64.b64decode(payload), ("jpg" if ext == "jpeg" else ext)
+        # validate=True rejects non-base64 garbage (else b64decode silently keeps junk bytes)
+        return base64.b64decode(payload, validate=True), ("jpg" if ext == "jpeg" else ext)
     except Exception:  # noqa: BLE001 - a malformed data URI just isn't retained
         return None, ""
 

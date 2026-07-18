@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import contextlib
 import io
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from xml.sax.saxutils import escape
 
-from .ingest import extract_html
+from .ingest import ImageRef, Segment, extract_html
 
 if TYPE_CHECKING:
     from .config import SourceConfig
@@ -45,6 +46,40 @@ def _resolve_image(src: str, base_path: Path | str | None) -> Path | None:
 
     local = _resolve_local(src, Path(base_path))
     return local if local is not None and local.is_file() else None
+
+
+def _doc_blocks(doc: object) -> list[tuple[str, object]]:
+    """Interleave segments and images so each image is emitted **under its own heading path**, not
+    dumped in a trailing loop under the last heading (which collapsed every image's locator, §7.3
+    R-ING-6). Returns ``[("seg", Segment) | ("img", ImageRef)]`` in document order."""
+    from collections import defaultdict
+
+    by_head: dict[str, list[object]] = defaultdict(list)
+    for im in doc.images:  # type: ignore[attr-defined]
+        by_head[im.heading_path].append(im)
+    out: list[tuple[str, object]] = []
+    seen: set[int] = set()
+    last: str | None = None
+    for seg in doc.segments:  # type: ignore[attr-defined]
+        if last is not None and seg.heading_path != last:
+            out += [("img", im) for im in by_head.get(last, []) if id(im) not in seen]
+            seen.update(id(im) for im in by_head.get(last, []))
+        last = seg.heading_path
+        out.append(("seg", seg))
+    for ims in by_head.values():  # the last heading's images + any orphans
+        out += [("img", im) for im in ims if id(im) not in seen]
+        seen.update(id(im) for im in ims)
+    return out
+
+
+_MD_ESCAPE = re.compile(r"([\\`*_\[\]<>|~])")
+
+
+def _md_escape(text: str) -> str:
+    """Backslash-escape CommonMark metacharacters so identifiers survive as literal text — e.g.
+    ``__init__`` would otherwise be parsed as emphasis and its underscores stripped. markdown-it
+    unescapes them back at ingest, so the tokens are recovered intact."""
+    return _MD_ESCAPE.sub(r"\\\1", text)
 
 
 def html_to_pdf_bytes(
@@ -78,14 +113,17 @@ def html_to_pdf_bytes(
     if doc.title:
         story.append(Paragraph(escape(doc.title), styles["Title"]))
     last_heading: str | None = None
-    for seg in doc.segments:
-        if seg.heading_path and seg.heading_path != last_heading:
-            story.append(Paragraph(escape(seg.heading_path), styles["Heading2"]))
-            last_heading = seg.heading_path
-        # newlines -> spaces so code lines don't merge into an unbroken token run
-        story.append(Paragraph(escape(seg.text.replace("\n", " ")), styles["BodyText"]))
-        story.append(Spacer(1, 6))
-    for img in doc.images:
+    for kind, item in _doc_blocks(doc):
+        if item.heading_path and item.heading_path != last_heading:  # type: ignore[attr-defined]
+            story.append(Paragraph(escape(item.heading_path), styles["Heading2"]))  # type: ignore[attr-defined]
+            last_heading = item.heading_path  # type: ignore[attr-defined]
+        if kind == "seg":
+            seg = cast(Segment, item)
+            # newlines -> spaces so code lines don't merge into an unbroken token run
+            story.append(Paragraph(escape(seg.text.replace("\n", " ")), styles["BodyText"]))
+            story.append(Spacer(1, 6))
+            continue
+        img = cast(ImageRef, item)
         local = _resolve_image(img.src, base_path)
         if local is not None:  # embed the real image so it survives + can be vision-enriched
             try:
@@ -148,16 +186,19 @@ def html_to_docx_bytes(
         out.core_properties.title = doc.title
         out.add_heading(doc.title, level=1)
     last_heading: str | None = None
-    for seg in doc.segments:
-        if seg.heading_path and seg.heading_path != last_heading:
-            out.add_heading(seg.heading_path, level=2)
-            last_heading = seg.heading_path
-        if seg.kind == "table":
-            _add_docx_table(out, seg.text)  # a real DOCX table, so row boundaries survive
-        else:
-            # newlines -> spaces so code lines don't merge into an unbroken token run
-            out.add_paragraph(seg.text.replace("\n", " "))
-    for img in doc.images:
+    for kind, item in _doc_blocks(doc):
+        if item.heading_path and item.heading_path != last_heading:  # type: ignore[attr-defined]
+            out.add_heading(item.heading_path, level=2)  # type: ignore[attr-defined]
+            last_heading = item.heading_path  # type: ignore[attr-defined]
+        if kind == "seg":
+            seg = cast(Segment, item)
+            if seg.kind == "table":
+                _add_docx_table(out, seg.text)  # a real DOCX table, so row boundaries survive
+            else:
+                # newlines -> spaces so code lines don't merge into an unbroken token run
+                out.add_paragraph(seg.text.replace("\n", " "))
+            continue
+        img = cast(ImageRef, item)
         local = _resolve_image(img.src, base_path)
         if local is not None:  # embed the real image so it survives + can be vision-enriched
             with contextlib.suppress(Exception):  # a bad image falls back to its alt text below
@@ -175,7 +216,7 @@ def html_to_docx_bytes(
 def _md_table(linearized: str) -> list[str]:
     """A ``a | b`` / newline-per-row segment -> GFM table lines (header + separator + rows) so
     ``extract_md`` re-parses it as a real table."""
-    grid = [row.split(" | ") for row in linearized.split("\n") if row.strip()]
+    grid = [[_md_escape(c) for c in row.split(" | ")] for row in linearized.split("\n") if row.strip()]
     if not grid:
         return []
     ncols = max(len(r) for r in grid)
@@ -207,18 +248,22 @@ def html_to_md_bytes(
     if doc.title:
         lines += [f"# {doc.title}", ""]
     last_heading: str | None = None
-    for seg in doc.segments:
-        if seg.heading_path and seg.heading_path != last_heading:
-            lines += [f"## {seg.heading_path}", ""]
-            last_heading = seg.heading_path
-        if seg.kind == "code":
-            lines += ["```", seg.text, "```", ""]
-        elif seg.kind == "table":
-            lines += [*_md_table(seg.text), ""]
-        else:
-            lines += [seg.text.replace("\n", " "), ""]
-    for img in doc.images:
-        alt = " ".join(t for t in (img.alt, img.caption) if t).strip()
+    for kind, item in _doc_blocks(doc):
+        if item.heading_path and item.heading_path != last_heading:  # type: ignore[attr-defined]
+            # escape the heading text too, so `_`/`*` in a heading aren't parsed as emphasis
+            lines += [f"## {_md_escape(item.heading_path)}", ""]  # type: ignore[attr-defined]
+            last_heading = item.heading_path  # type: ignore[attr-defined]
+        if kind == "seg":
+            seg = cast(Segment, item)
+            if seg.kind == "code":
+                lines += ["```", seg.text, "```", ""]  # fenced code is literal — never escaped
+            elif seg.kind == "table":
+                lines += [*_md_table(seg.text), ""]
+            else:  # prose: escape CommonMark metacharacters so identifiers (__init__) survive
+                lines += [_md_escape(seg.text.replace("\n", " ")), ""]
+            continue
+        img = cast(ImageRef, item)
+        alt = _md_escape(" ".join(t for t in (img.alt, img.caption) if t).strip())
         local = _resolve_image(img.src, base_path)
         src = ""
         if local is not None:  # embed the real image inline as a data URI (self-contained)
