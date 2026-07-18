@@ -98,6 +98,34 @@ def test_needle_paraphrase_hybrid(tmp_path: Path) -> None:
     assert report.hybrid_paraphrase_recall_at5 >= 0.90
 
 
+def test_needles_survive_pdf_conversion(tmp_path: Path) -> None:
+    # §15.4 needles-through-conversion: the SAME 60 needles, but routed HTML -> PDF -> ingest.
+    # A needle lost here is a converter/extractor defect (every placement — prose/code/table/
+    # image-alt/deep — must still be recoverable by exact nonce from the PDF text layer).
+    needles = nd.generate_needles(seed=5, count=60)
+    filler = tmp_path / "filler"
+    filler.mkdir()
+    for i in range(4):
+        (filler / f"f{i}.html").write_text(
+            "<html><body><h1>Doc</h1><p>ordinary filler text about timing and interfaces of "
+            "the peripheral bus, long enough to clear the content filter.</p></body></html>",
+            encoding="utf-8",
+        )
+    pdf_dir = nd.build_pdf_haystack(filler, tmp_path / "work", needles)
+    assert (pdf_dir / "needle_000.pdf").is_file()  # needle files converted alongside filler
+
+    config = nd.conversion_config(tmp_path, pdf_dir, model="none", min_chars=5)
+    Catalog(config).ingest()
+    with Store.open(config.paths.db_path) as store:
+        report = nd.evaluate(store, needles)
+    assert report.exact_top1_rate == 1.0  # every placement's nonce survived the round trip
+    assert report.partial_recall_at10 >= 0.80
+    # every placement fully recovered
+    for placement in ("prose", "code", "table", "image", "deep"):
+        hit, tot = report.per_placement[placement]
+        assert hit == tot, f"{placement}: only {hit}/{tot} needles survived PDF conversion"
+
+
 def test_render_report_mentions_gates() -> None:
     report = nd.NeedleReport(
         seed=1,

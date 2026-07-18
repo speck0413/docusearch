@@ -51,6 +51,14 @@ def html_to_pdf_bytes(html: str) -> bytes:
         # newlines -> spaces so code lines don't merge into an unbroken token run
         story.append(Paragraph(escape(seg.text.replace("\n", " ")), styles["BodyText"]))
         story.append(Spacer(1, 6))
+    # Image alt/caption text carries needles too (§15.2 hides 10 nonces there); HTML ingest
+    # indexes it as an image_ref chunk, and a faithful render of a broken <img> shows its alt.
+    # Emit the same alt+caption string so those tokens survive the HTML -> PDF -> extract trip.
+    for img in doc.images:
+        caption = " ".join(t for t in (img.alt, img.caption) if t).strip()
+        if caption:
+            story.append(Paragraph(escape(caption), styles["Italic"]))
+            story.append(Spacer(1, 6))
     if not story:  # never emit an empty PDF — keep the doc present for the audit counts
         story.append(Paragraph(escape(doc.title or "(no extractable text)"), styles["BodyText"]))
     buf = io.BytesIO()

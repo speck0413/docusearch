@@ -68,6 +68,22 @@ def test_html_to_pdf_roundtrip_preserves_needles(tmp_path: Path) -> None:
     assert "CODE-NEEDLE-77" in text  # code needle survives too
 
 
+def test_html_to_pdf_preserves_image_alt_needles(tmp_path: Path) -> None:
+    # The needle suite hides 10 nonces in image alt/caption text. A faithful HTML->PDF render
+    # of a (deliberately broken) <img> shows its alt text, so the nonce must survive the round
+    # trip — otherwise those needles are lost in conversion (a §15.4 extractor/converter defect).
+    html = (
+        "<body><h1>Diagram</h1>"
+        "<p>Ordinary body prose PROSE-1000-XX here.</p>"
+        '<img src="missing-x.png" alt="calibration diagram IMG-5150-ALT for the gyroscope">'
+        "</body>"
+    )
+    doc = extract_pdf(html_to_pdf_bytes(html))
+    text = "\n".join(s.text for s in doc.segments)
+    assert "PROSE-1000-XX" in text  # prose still survives
+    assert "IMG-5150-ALT" in text  # and so does the image-alt needle
+
+
 def _pdf_corpus_config(tmp_path: Path, pdf_dir: Path) -> config.Config:
     path = tmp_path / "pdf.yaml"
     path.write_text(
