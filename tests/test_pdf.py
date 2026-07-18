@@ -205,3 +205,22 @@ def test_compare_formats_pdf_matches_html_baseline(tmp_path: Path) -> None:
     assert comps[0].suite[0] == "library/spi"
     text = cmp.render_format_compare(comps, summary)
     assert "overlap@10" in text and "top-1" in text and "MRR" in text
+
+
+def test_logical_key_unmapped_paths_do_not_collide() -> None:
+    # red-team M1: when a stored path doesn't resolve under the given root, the fallback must
+    # NOT collapse unrelated documents to the same bare-stem key (12 index.html would merge).
+    cmp = _load_compare()
+    root = Path("/corpus/html")
+    a = cmp._logical_key("/somewhere/else/library/index.html", root)
+    b = cmp._logical_key("/completely/different/tutorial/index.html", root)
+    assert a != b  # distinct documents -> distinct keys, even on the unmapped fallback
+
+
+def test_summarize_empty_is_not_a_pass() -> None:
+    # red-team M2: zero comparisons must never report PASS (an empty --queries file verifies
+    # nothing, so compare.py must not exit 0 / print PASS).
+    cmp = _load_compare()
+    summary = cmp.summarize([])
+    assert summary.queries == 0
+    assert summary.passes is False
