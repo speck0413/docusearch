@@ -224,6 +224,22 @@ def test_convert_embeds_real_image_pdf(tmp_path: Path) -> None:
     assert doc.images, "the real image should be embedded + retained through conversion"
 
 
+def test_convert_embeds_tall_image_without_layout_error(tmp_path: Path) -> None:
+    # a very tall diagram must be scaled to fit the page, not abort the whole PDF build
+    # (reportlab LayoutError "Flowable too large") — the real cause of dropped ACME block diagrams.
+    from PIL import Image
+
+    Image.new("RGB", (300, 1000), (50, 120, 200)).save(tmp_path / "tall.png", format="PNG")
+    (tmp_path / "page.html").write_text(
+        '<body><h1>D</h1><p>see</p><img src="tall.png" alt="tall block diagram"></body>',
+        encoding="utf-8",
+    )
+    dst = tmp_path / "pdf"
+    result = convert_corpus(tmp_path, dst, fmt="pdf")
+    assert result.converted == 1 and not result.errors  # no LayoutError, file converted
+    assert extract_pdf((dst / "page.pdf").read_bytes()).images  # and the image is retained
+
+
 def test_compare_formats_pdf_matches_html_baseline(tmp_path: Path) -> None:
     # §15.4 format-equivalence: the PDF suite store must agree with the HTML baseline store —
     # same logical doc retrieved for each query (overlap@10, top-1 logical match, MRR).

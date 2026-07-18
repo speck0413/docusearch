@@ -31,6 +31,10 @@ if TYPE_CHECKING:
     from .config import SourceConfig
 
 _SUPPORTED = ("pdf", "docx")
+# Max embedded-image box on a US-letter page (612x792 pt) inside 1" margins, with headroom so a
+# tall diagram (e.g. 450x990) is scaled down to fit instead of raising reportlab's LayoutError.
+_PDF_IMG_MAX_W = 450.0
+_PDF_IMG_MAX_H = 610.0
 
 
 def _resolve_image(src: str, base_path: Path | str | None) -> Path | None:
@@ -86,9 +90,12 @@ def html_to_pdf_bytes(
         if local is not None:  # embed the real image so it survives + can be vision-enriched
             try:
                 iw, ih = ImageReader(str(local)).getSize()
-                w = min(float(iw), 400.0)
-                story.append(RLImage(str(local), width=w, height=float(ih) * (w / float(iw))))
-                story.append(Spacer(1, 6))
+                if iw > 0 and ih > 0:
+                    # fit within the page box on BOTH axes (never upscale) so a tall diagram
+                    # doesn't overflow the frame and abort the whole PDF build (LayoutError).
+                    scale = min(_PDF_IMG_MAX_W / iw, _PDF_IMG_MAX_H / ih, 1.0)
+                    story.append(RLImage(str(local), width=iw * scale, height=ih * scale))
+                    story.append(Spacer(1, 6))
             except Exception:  # noqa: BLE001 - a bad image falls back to its alt text below
                 pass
         # Keep alt/caption text too (searchable; also the needle channel — §15.2 hides nonces here).
