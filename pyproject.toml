@@ -49,6 +49,13 @@ client = [
 pdf = [
   "pymupdf>=1.24",
 ]
+# DOCX format support (Phase 4b). python-docx extracts heading styles / paragraphs / tables /
+# hyperlinks / inline images; lazy-imported so non-DOCX users never load it. The same library
+# builds the derived DOCX test corpora in convert.py (read + write are one lib), so — unlike PDF
+# (PyMuPDF read + reportlab write) — no separate harness writer dependency is needed.
+docx = [
+  "python-docx>=1.1",
+]
 # Cloud image enrichment (enrich.vision_images). Off by default; lazy-imported so core
 # ingest/search never pull the SDK. The SDK owns the Messages-API request shape, typed
 # errors, retries, and credential resolution (env key or `ant auth login` profile).
@@ -80,6 +87,7 @@ dev = [
   "pillow>=10",
   "pymupdf>=1.24",
   "reportlab>=4.0",
+  "python-docx>=1.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -116,7 +124,7 @@ disallow_untyped_defs = true
 no_implicit_reexport = false  # __init__.py re-exports the public API (R-ARCH-2)
 
 [[tool.mypy.overrides]]
-module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "reportlab.*"]
+module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "reportlab.*", "docx", "docx.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

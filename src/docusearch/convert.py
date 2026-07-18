@@ -29,7 +29,7 @@ from .ingest import extract_html
 if TYPE_CHECKING:
     from .config import SourceConfig
 
-_SUPPORTED = ("pdf",)
+_SUPPORTED = ("pdf", "docx")
 
 
 def html_to_pdf_bytes(
@@ -76,6 +76,54 @@ def html_to_pdf_bytes(
     return buf.getvalue()
 
 
+def html_to_docx_bytes(
+    html: str, *, content_selector: str = "", strip_selectors: Sequence[str] = ()
+) -> bytes:
+    """Render one HTML document's extracted text to a DOCX (python-docx).
+
+    Mirrors :func:`html_to_pdf_bytes`: heading paths become ``Heading`` paragraphs, every segment
+    (body/code/table) becomes a paragraph, and image alt/caption text is emitted as a paragraph so
+    the image-placement needles survive (§15.2/§15.4). ``extract_docx`` recovers all of it at
+    ingest. ``content_selector``/``strip_selectors`` mirror the source's ingest config so the
+    derived DOCX carries the same cleaned content the HTML store indexes.
+    """
+    from docx import Document  # lazy: python-docx ([docx] extra / [dev])
+
+    doc = extract_html(html, content_selector=content_selector, strip_selectors=list(strip_selectors))
+    out = Document()
+    if doc.title:
+        out.core_properties.title = doc.title
+        out.add_heading(doc.title, level=1)
+    last_heading: str | None = None
+    for seg in doc.segments:
+        if seg.heading_path and seg.heading_path != last_heading:
+            out.add_heading(seg.heading_path, level=2)
+            last_heading = seg.heading_path
+        # newlines -> spaces so code lines don't merge into an unbroken token run
+        out.add_paragraph(seg.text.replace("\n", " "))
+    for img in doc.images:
+        caption = " ".join(t for t in (img.alt, img.caption) if t).strip()
+        if caption:
+            out.add_paragraph(caption)
+    if not doc.segments and not doc.images:  # never emit an empty DOCX (keep it in audit counts)
+        out.add_paragraph(doc.title or "(no extractable text)")
+    buf = io.BytesIO()
+    out.save(buf)
+    return buf.getvalue()
+
+
+def _render_bytes(
+    html: str, fmt: str, *, content_selector: str = "", strip_selectors: Sequence[str] = ()
+) -> bytes:
+    """Dispatch to the format's HTML->bytes renderer (the derived-corpus analog of the ingest
+    extractor dispatch). A new format adds one branch here plus its ``html_to_<fmt>_bytes``."""
+    if fmt == "pdf":
+        return html_to_pdf_bytes(html, content_selector=content_selector, strip_selectors=strip_selectors)
+    if fmt == "docx":
+        return html_to_docx_bytes(html, content_selector=content_selector, strip_selectors=strip_selectors)
+    raise ValueError(f"unsupported target format {fmt!r}; supported: {_SUPPORTED}")
+
+
 @dataclass
 class ConvertResult:
     converted: int = 0
@@ -95,7 +143,7 @@ def convert_corpus(src_dir: Path | str, dst_dir: Path | str, *, fmt: str = "pdf"
         out = dst / rel
         try:
             html = html_path.read_bytes().decode("utf-8", errors="replace")
-            data = html_to_pdf_bytes(html)
+            data = _render_bytes(html, fmt)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(data)
             result.converted += 1
@@ -130,8 +178,9 @@ def convert_source(
             rel = path.relative_to(src_root).with_suffix(f".{fmt}")
             out = dst / rel
             html = path.read_bytes().decode("utf-8", errors="replace")
-            data = html_to_pdf_bytes(
+            data = _render_bytes(
                 html,
+                fmt,
                 content_selector=source.content_selector,
                 strip_selectors=source.strip_selectors,
             )

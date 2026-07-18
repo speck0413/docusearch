@@ -22,6 +22,7 @@ Public surface (grows through Phase 1):
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import time
@@ -424,6 +425,66 @@ def extract_pdf(data: bytes) -> ExtractedDoc:
     return ExtractedDoc(title=title, segments=segments, links=links)
 
 
+def _docx_heading_level(style_name: str) -> int:
+    """`Heading 3` -> 3, `Title` -> 1, anything else -> 1 (a lone top-level heading)."""
+    tail = style_name.rsplit(" ", 1)[-1]
+    return int(tail) if tail.isdigit() else 1
+
+
+def _linearize_docx_table(table: object) -> str:
+    """Flatten a python-docx table to the same ``|``-separated form HTML tables use (§7.3)."""
+    rows: list[str] = []
+    for row in table.rows:  # type: ignore[attr-defined]
+        cells = [_clean(cell.text) for cell in row.cells]
+        if any(cells):
+            rows.append(" | ".join(cells))
+    return "\n".join(rows)
+
+
+def extract_docx(data: bytes) -> ExtractedDoc:
+    """Extract headings, paragraphs, tables, and hyperlinks from one DOCX (§7.3, Phase 4b).
+
+    python-docx is a ``[docx]`` extra, imported lazily so non-DOCX users never load it. Body
+    elements are walked **in document order** (paragraphs and tables interleave) so heading paths
+    and chunk order match the source: ``Heading N`` styles drive the heading path (R-ING-4),
+    other paragraphs are ``body``, tables are ``table`` (linearized), and w:hyperlink relationships
+    become ``LinkRef``s (R-ING-5). Every extractor returns the common :class:`ExtractedDoc`.
+    """
+    from docx import Document  # lazy: the [docx] extra is only loaded when a DOCX is parsed
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    doc_obj = Document(io.BytesIO(data))
+    segments: list[Segment] = []
+    links: list[LinkRef] = []
+    stack: list[tuple[int, str]] = []
+    for child in doc_obj.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            para = Paragraph(child, doc_obj)
+            text = _clean(para.text)
+            style = (para.style.name if para.style else "") or ""
+            if style.startswith(("Heading", "Title")):
+                _push_heading(stack, _docx_heading_level(style), text)
+                if text:
+                    segments.append(Segment("body", text, _heading_path(stack)))
+            elif text:
+                segments.append(Segment("body", text, _heading_path(stack)))
+            for hl in para.hyperlinks:
+                if hl.address:
+                    links.append(
+                        LinkRef(target=hl.address, anchor=_clean(hl.text), link_type="docx_hyperlink")
+                    )
+        elif child.tag == qn("w:tbl"):
+            table_text = _linearize_docx_table(Table(child, doc_obj))
+            if table_text:
+                segments.append(Segment("table", table_text, _heading_path(stack)))
+    title = _clean(str(doc_obj.core_properties.title or ""))
+    if not title and segments:
+        title = _clean(segments[0].text.splitlines()[0])[:200]
+    return ExtractedDoc(title=title, segments=segments, links=links)
+
+
 def extract_document(
     path: Path,
     ext: str,
@@ -433,12 +494,16 @@ def extract_document(
 ) -> ExtractedDoc:
     """Dispatch to the right extractor by file extension — the pluggable-parser seam (R-PROC-6).
 
-    HTML via selectolax (content_selector/strip_selectors apply), PDF via PyMuPDF. A new format
-    adds one branch here plus its extractor; the rest of the pipeline (chunker, links, store) is
-    format-agnostic because every extractor returns an :class:`ExtractedDoc`.
+    HTML via selectolax (content_selector/strip_selectors apply), PDF via PyMuPDF, DOCX via
+    python-docx. A new format adds one branch here plus its extractor; the rest of the pipeline
+    (chunker, links, store) is format-agnostic because every extractor returns an
+    :class:`ExtractedDoc`.
     """
-    if ext.lower().lstrip(".") == "pdf":
+    fmt = ext.lower().lstrip(".")
+    if fmt == "pdf":
         return extract_pdf(path.read_bytes())
+    if fmt == "docx":
+        return extract_docx(path.read_bytes())
     html = path.read_bytes().decode("utf-8", errors="replace")
     return extract_html(
         html, content_selector=content_selector, strip_selectors=list(strip_selectors)
