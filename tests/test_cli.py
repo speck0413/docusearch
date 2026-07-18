@@ -127,6 +127,45 @@ def test_show_cli_prints_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert "ZZQ42" in out
 
 
+def test_show_cli_prints_full_chunk_not_truncated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from docusearch.store import Store
+
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)
+    cli.main(["ingest"])
+    needle = "ENDNEEDLE_QZX"
+    big = ("word " * 260) + needle  # ~1300 chars; the needle sits well past 800
+    with Store.open("./catalog.db") as s:
+        doc_id = next(iter(s.document_path_to_id().values()))
+        s.add_enrichment_chunk(doc_id, big, "loc")
+    capsys.readouterr()
+    rc = cli.main(["show", str(doc_id)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert needle in out  # full text printed — no 800-char cap (the reported bug)
+
+
+def test_show_cli_max_chars_caps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from docusearch.store import Store
+
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)
+    cli.main(["ingest"])
+    needle = "TAILNEEDLE_ZZ"
+    big = ("word " * 260) + needle
+    with Store.open("./catalog.db") as s:
+        doc_id = next(iter(s.document_path_to_id().values()))
+        s.add_enrichment_chunk(doc_id, big, "loc")
+    capsys.readouterr()
+    cli.main(["show", str(doc_id), "--max-chars", "50"])
+    out = capsys.readouterr().out
+    assert needle not in out and "…" in out  # opt-in cap truncates with an ellipsis
+
+
 def test_show_cli_missing_doc_returns_1(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:  # type: ignore[no-untyped-def]

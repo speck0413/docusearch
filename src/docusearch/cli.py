@@ -568,10 +568,13 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print(f"# doc {doc['id']}: {doc['title']}")
         print(f"path: {doc['path']}")
         print(f"fmt: {doc['fmt']}  audience: {doc['audience']}  status: {doc['status']}")
+        cap = int(getattr(args, "max_chars", 0) or 0)
         for chunk in store.chunks_for_document(args.doc_id):
             print(f"\n-- chunk {chunk['id']} [{chunk['kind']}] {chunk['locator']}")
             text = str(chunk["text"])
-            print(text if len(text) <= 800 else text[:800] + " …")
+            # Full text by default (0 = no cap): `show` is for verbatim inspection, so it must
+            # not silently truncate. `--max-chars N` opts into a display cap.
+            print(text if cap <= 0 or len(text) <= cap else text[:cap] + " …")
     runlog.log("cli.show", doc_id=args.doc_id)
     runlog.flush()
     return 0
@@ -764,8 +767,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--config", default="docusearch.yaml", help="config path")
     p_report.set_defaults(func=_cmd_report)
 
-    p_show = sub.add_parser("show", help="print a document's chunks by id")
+    p_show = sub.add_parser("show", help="print a document's chunks by id (full text)")
     p_show.add_argument("doc_id", type=int, help="document id")
+    p_show.add_argument(
+        "--max-chars", type=int, default=0, help="cap each chunk's printed text (0 = full text)"
+    )
     p_show.add_argument("--config", default="docusearch.yaml", help="config path")
     p_show.set_defaults(func=_cmd_show)
 
