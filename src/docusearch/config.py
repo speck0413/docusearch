@@ -235,9 +235,23 @@ SCHEMA: tuple[_Node, ...] = (
                 ),
             ),
             _Field(
+                "vision_provider",
+                "claude-cli",
+                comment=(
+                    "Which vision backend `docusearch vision` uses:\n"
+                    "  claude-cli : shell out to the `claude` CLI — uses your Claude Code login,\n"
+                    "               NO API key (the natural path if you already run Claude Code)\n"
+                    "  anthropic  : Anthropic Messages API — needs ANTHROPIC_API_KEY or an `ant`\n"
+                    "               profile ([vision] extra)\n"
+                    "  local      : a local transformers model — offline, no key ([vision-local]\n"
+                    "               extra); set vision_model to a HF id, e.g. google/gemma-3-4b-it"
+                ),
+                choices=("claude-cli", "anthropic", "local"),
+            ),
+            _Field(
                 "vision_model",
                 "claude-opus-4-8",
-                inline="vision model id — e.g. claude-opus-4-8 (best) or claude-sonnet-5 (cheaper)",
+                inline="model id — claude-cli/anthropic: claude-opus-4-8 | sonnet; local: HF id",
             ),
         ),
         comment="Enrichment — all off by default.",
@@ -470,6 +484,7 @@ class EnrichConfig:
     preflight_sample: int
     ai_summaries: bool
     vision_images: bool
+    vision_provider: str
     vision_model: str
 
 
@@ -554,6 +569,7 @@ class Config:
                 preflight_sample=int(en["preflight_sample"]),
                 ai_summaries=bool(en["ai_summaries"]),
                 vision_images=bool(en["vision_images"]),
+                vision_provider=str(en["vision_provider"]),
                 vision_model=str(en["vision_model"]),
             ),
             logging=LoggingConfig(

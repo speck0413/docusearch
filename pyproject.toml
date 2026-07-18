@@ -49,6 +49,13 @@ client = [
 vision = [
   "anthropic>=0.69",
 ]
+# Local (offline) image vision via transformers — a small multimodal model, no key. torch
+# comes with the [embeddings] extra; this adds the image + vision-model bits. Lazy-imported.
+vision-local = [
+  "transformers>=4.50",
+  "pillow>=10",
+  "accelerate>=0.30",
+]
 # Developer/validation tooling. Includes every extra so the full suite runs.
 dev = [
   "ruff==0.14.0",
@@ -64,6 +71,7 @@ dev = [
   "mcp>=1.2",
   "httpx>=0.27",
   "anthropic>=0.69",
+  "pillow>=10",
 ]
 
 [tool.hatch.build.targets.wheel]

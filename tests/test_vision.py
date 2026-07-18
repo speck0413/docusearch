@@ -1,10 +1,10 @@
-"""Vision enrichment stage — cloud image OCR + description (enrich.vision_images).
+"""Vision enrichment stage — image OCR + description (enrich.vision_images, R-ING-9).
 
-Determinism (R-SRCH-5) here is by *persistence*, not temperature: Opus 4.8 / Sonnet 5
-reject sampling params, so the model is called once at enrichment time and the result is
-stored; search never re-calls it, so ranked results over the stored text stay identical.
-The real Anthropic provider is exercised with a stub client (no network, no key); the
-orchestration is exercised with an injected fake provider.
+Determinism (R-SRCH-5) here is by *persistence*, not sampling: the model is called once at
+enrichment time and the result is stored; search never re-calls it, so ranked results over the
+stored text stay identical. The three backends are exercised with injected fakes (a subprocess
+runner for the CLI, a stub client for the API, a stub pipeline for local) — no network, key,
+or model download; the orchestration is exercised with an injected fake provider.
 """
 
 from __future__ import annotations
@@ -20,13 +20,22 @@ from docusearch import config, vision
 from docusearch.store import Store
 from docusearch.vision import (
     AnthropicVisionProvider,
+    ClaudeCliVisionProvider,
     ImageInsight,
+    LocalVisionProvider,
     VisionError,
+    _local_reply_text,
     enrich_images,
     make_vision_provider,
 )
 
 PNG = b"\x89PNG\r\n\x1a\n fake-png-bytes"
+
+
+def _png_file(tmp_path: Path) -> Path:
+    p = tmp_path / "img.png"
+    p.write_bytes(PNG)
+    return p
 
 
 # --------------------------------------------------------------------------- fakes
@@ -38,18 +47,18 @@ class FakeVision:
     model_id = "fake-vision-1"
 
     def __init__(self) -> None:
-        self.calls: list[tuple[bytes, str, str, str, str]] = []
+        self.calls: list[tuple[Path, str, str, str, str]] = []
 
     def describe(
         self,
-        image_bytes: bytes,
+        image_path: Path,
         *,
         media_type: str,
         alt: str = "",
         caption: str = "",
         context: str = "",
     ) -> ImageInsight:
-        self.calls.append((image_bytes, media_type, alt, caption, context))
+        self.calls.append((image_path, media_type, alt, caption, context))
         return ImageInsight(
             text=f"OCR[{caption or alt}]",
             description=f"block diagram at {context}",
@@ -88,16 +97,24 @@ def _seed_image(store: Store, staging: Path, sha: str, ext: str = "png") -> int:
 # --------------------------------------------------------------------------- config
 
 
-def test_vision_model_default_is_opus(tmp_path: Path) -> None:
+def test_vision_defaults(tmp_path: Path) -> None:
     cfg = config.load(tmp_path / "docusearch.yaml")
     assert cfg.enrich.vision_images is False
+    assert cfg.enrich.vision_provider == "claude-cli"  # no-key default
     assert cfg.enrich.vision_model == "claude-opus-4-8"
 
 
-def test_template_documents_vision_model(tmp_path: Path) -> None:
+def test_template_documents_vision(tmp_path: Path) -> None:
     config.load(tmp_path / "docusearch.yaml")
     text = (tmp_path / "docusearch.yaml").read_text()
-    assert "vision_model" in text
+    assert "vision_provider" in text and "vision_model" in text
+
+
+def test_bad_vision_provider_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "docusearch.yaml"
+    path.write_text("enrich:\n  vision_provider: nope\n", encoding="utf-8")
+    with pytest.raises(config.ConfigError):
+        config.load(path)
 
 
 # ----------------------------------------------------------------------- store v3
@@ -128,21 +145,26 @@ def test_add_enrichment_chunk_is_searchable(tmp_path: Path) -> None:
         assert store.chunk_ids_matching("unique_nonce_zqx")
 
 
-# -------------------------------------------------------------------- provider API
+# ------------------------------------------------------------- provider dispatch
+
+
+def _enrich_on(tmp_path: Path, provider: str) -> Any:
+    cfg = config.load(tmp_path / "docusearch.yaml")
+    return cfg.enrich.__class__(
+        preflight_sample=cfg.enrich.preflight_sample,
+        ai_summaries=cfg.enrich.ai_summaries,
+        vision_images=True,
+        vision_provider=provider,
+        vision_model="m-1",
+    )
 
 
 def test_make_vision_provider_gating(tmp_path: Path) -> None:
     cfg = config.load(tmp_path / "docusearch.yaml")
     assert make_vision_provider(cfg.enrich) is None  # off by default
-    on = cfg.enrich.__class__(  # dataclass replace-lite
-        preflight_sample=cfg.enrich.preflight_sample,
-        ai_summaries=cfg.enrich.ai_summaries,
-        vision_images=True,
-        vision_model="claude-sonnet-5",
-    )
-    provider = make_vision_provider(on)
-    assert isinstance(provider, AnthropicVisionProvider)
-    assert provider.model_id == "claude-sonnet-5"
+    assert isinstance(make_vision_provider(_enrich_on(tmp_path, "claude-cli")), ClaudeCliVisionProvider)
+    assert isinstance(make_vision_provider(_enrich_on(tmp_path, "anthropic")), AnthropicVisionProvider)
+    assert isinstance(make_vision_provider(_enrich_on(tmp_path, "local")), LocalVisionProvider)
 
 
 def test_image_insight_searchable_text() -> None:
@@ -164,7 +186,7 @@ def test_enrich_images_basic(tmp_path: Path) -> None:
         assert result.failed == 0
         assert len(prov.calls) == 2
         assert prov.calls[0][1] == "image/png"  # media_type resolved from ext
-        # the insight is persisted + searchable
+        assert prov.calls[0][0].name.endswith(".png")  # a path is passed, not bytes
         assert store.images_needing_vision() == []
         assert store.chunk_ids_matching("diagram")
 
@@ -177,8 +199,8 @@ def test_enrich_images_idempotent(tmp_path: Path) -> None:
         chunks_after_first = store.count_chunks()
         second = enrich_images(store, prov, staging_dir=tmp_path)
         assert second.enriched == 0
-        assert len(prov.calls) == 1  # not re-called
-        assert store.count_chunks() == chunks_after_first  # no duplicate enrichment chunk
+        assert len(prov.calls) == 1
+        assert store.count_chunks() == chunks_after_first
 
 
 def test_enrich_images_skips_unsupported_ext(tmp_path: Path) -> None:
@@ -193,12 +215,24 @@ def test_enrich_images_skips_unsupported_ext(tmp_path: Path) -> None:
 
 def test_enrich_images_missing_file(tmp_path: Path) -> None:
     with Store.open(":memory:") as store:
-        # seed a row but delete the staged original
         _seed_image(store, tmp_path, "0" * 64)
         (tmp_path / "images" / f"{'0' * 64}.png").unlink()
         result = enrich_images(store, FakeVision(), staging_dir=tmp_path)
         assert result.failed == 1
         assert result.errors and result.errors[0][0] == "0" * 64
+
+
+def test_enrich_images_records_vision_error(tmp_path: Path) -> None:
+    class _Boom:
+        model_id = "boom"
+
+        def describe(self, image_path, *, media_type, alt="", caption="", context=""):  # type: ignore[no-untyped-def]
+            raise VisionError("provider exploded")
+
+    with Store.open(":memory:") as store:
+        _seed_image(store, tmp_path, "7" * 64)
+        result = enrich_images(store, _Boom(), staging_dir=tmp_path)
+        assert result.failed == 1 and "exploded" in result.errors[0][1]
 
 
 def test_enrich_images_deterministic(tmp_path: Path) -> None:
@@ -224,7 +258,62 @@ def test_enrich_images_progress_callback(tmp_path: Path) -> None:
         assert seen and seen[-1] == ("vision", 1, 1)
 
 
-# ------------------------------------------------------- real provider (stubbed)
+# ------------------------------------------------------- claude CLI backend
+
+
+def _cli_ok(result_obj: dict[str, str]) -> Any:
+    """A runner that emits a `claude -p --output-format json` success envelope."""
+    captured: dict[str, Any] = {}
+
+    def runner(argv: list[str]) -> tuple[int, str, str]:
+        captured["argv"] = argv
+        return 0, json.dumps({"type": "result", "is_error": False, "result": json.dumps(result_obj)}), ""
+
+    runner.captured = captured  # type: ignore[attr-defined]
+    return runner
+
+
+def test_claude_cli_builds_argv_and_parses(tmp_path: Path) -> None:
+    runner = _cli_ok({"text": "PA nWire SPI", "description": "an SPI block"})
+    prov = ClaudeCliVisionProvider("claude-opus-4-8", runner=runner)
+    img = _png_file(tmp_path)
+    insight = prov.describe(img, media_type="image/png", context="Setup")
+    assert insight.text == "PA nWire SPI" and insight.description == "an SPI block"
+    assert insight.model == "claude-cli:claude-opus-4-8"
+    argv = runner.captured["argv"]  # type: ignore[attr-defined]
+    assert argv[0] == "claude" and "-p" in argv
+    assert argv[argv.index("--model") + 1] == "claude-opus-4-8"
+    assert argv[argv.index("--allowedTools") + 1] == "Read"
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert str(img) in argv[argv.index("-p") + 1]  # the image path is in the prompt
+
+
+def test_claude_cli_nonzero_exit_raises(tmp_path: Path) -> None:
+    prov = ClaudeCliVisionProvider("m", runner=lambda argv: (1, "", "boom"))
+    with pytest.raises(VisionError, match="exit 1"):
+        prov.describe(_png_file(tmp_path), media_type="image/png")
+
+
+def test_claude_cli_error_envelope_raises(tmp_path: Path) -> None:
+    def runner(argv: list[str]) -> tuple[int, str, str]:
+        return 0, json.dumps({"type": "result", "is_error": True, "result": "quota"}), ""
+
+    with pytest.raises(VisionError):
+        ClaudeCliVisionProvider("m", runner=runner).describe(_png_file(tmp_path), media_type="image/png")
+
+
+def test_claude_cli_raw_json_without_envelope(tmp_path: Path) -> None:
+    # some invocations print the bare reply, not a result envelope — still parsed
+    def runner(argv: list[str]) -> tuple[int, str, str]:
+        return 0, '{"text": "T", "description": "D"}', ""
+
+    insight = ClaudeCliVisionProvider("m", runner=runner).describe(
+        _png_file(tmp_path), media_type="image/png"
+    )
+    assert insight.text == "T" and insight.description == "D"
+
+
+# ------------------------------------------------------- anthropic backend (stubbed)
 
 
 class _StubMessages:
@@ -235,9 +324,7 @@ class _StubMessages:
         self._outer.last = kwargs
         if self._outer.raises is not None:
             raise self._outer.raises
-        return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=self._outer.reply)]
-        )
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text=self._outer.reply)])
 
 
 class _StubClient:
@@ -248,35 +335,65 @@ class _StubClient:
         self.messages = _StubMessages(self)
 
 
-def test_anthropic_provider_builds_request_and_parses() -> None:
+def test_anthropic_builds_request_and_parses(tmp_path: Path) -> None:
     client = _StubClient(json.dumps({"text": "PA nWire SPI", "description": "an SPI block"}))
     prov = AnthropicVisionProvider("claude-opus-4-8", client=client)
-    insight = prov.describe(PNG, media_type="image/png", caption="Fig 2", context="Setup")
-    assert insight.text == "PA nWire SPI"
-    assert insight.description == "an SPI block"
-    assert insight.model == "claude-opus-4-8"
-    # request shape: image block (base64) precedes the text block; structured output; no temperature
+    insight = prov.describe(_png_file(tmp_path), media_type="image/png", caption="Fig 2")
+    assert insight.text == "PA nWire SPI" and insight.model == "claude-opus-4-8"
     sent = client.last
     assert sent["model"] == "claude-opus-4-8"
-    assert "temperature" not in sent
+    assert "temperature" not in sent  # Opus 4.8 / Sonnet 5 reject it
     blocks = sent["messages"][0]["content"]
-    assert blocks[0]["type"] == "image"
-    assert blocks[0]["source"]["media_type"] == "image/png"
+    assert blocks[0]["type"] == "image" and blocks[0]["source"]["media_type"] == "image/png"
     assert blocks[1]["type"] == "text"
     assert sent["output_config"]["format"]["type"] == "json_schema"
 
 
-def test_anthropic_provider_wraps_api_error() -> None:
-    client = _StubClient("", raises=RuntimeError("boom"))
-    prov = AnthropicVisionProvider("claude-opus-4-8", client=client)
+def test_anthropic_wraps_api_error(tmp_path: Path) -> None:
+    prov = AnthropicVisionProvider("m", client=_StubClient("", raises=RuntimeError("boom")))
     with pytest.raises(VisionError):
-        prov.describe(PNG, media_type="image/png")
+        prov.describe(_png_file(tmp_path), media_type="image/png")
 
 
-def test_anthropic_provider_rejects_non_json() -> None:
-    prov = AnthropicVisionProvider("claude-opus-4-8", client=_StubClient("not json at all"))
+def test_anthropic_rejects_non_json(tmp_path: Path) -> None:
+    prov = AnthropicVisionProvider("m", client=_StubClient("not json at all"))
     with pytest.raises(VisionError):
-        prov.describe(PNG, media_type="image/png")
+        prov.describe(_png_file(tmp_path), media_type="image/png")
+
+
+# ------------------------------------------------------- local backend
+
+
+def test_local_reply_text_extracts_from_shapes() -> None:
+    # chat-list shape (last assistant turn)
+    chat = [{"generated_text": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "A"}]}]
+    assert _local_reply_text(chat) == "A"
+    # plain-string shape
+    assert _local_reply_text([{"generated_text": "hello"}]) == "hello"
+
+
+def test_local_provider_parses_stub_pipeline(tmp_path: Path) -> None:
+    Image = pytest.importorskip("PIL.Image")  # noqa: N806 - pillow is a [vision-local] extra
+    img = tmp_path / "real.png"
+    Image.new("RGB", (4, 4), (10, 20, 30)).save(img)
+
+    def pipe(messages: Any, max_new_tokens: int = 0) -> Any:
+        return [{"generated_text": [{"role": "assistant", "content": '{"text": "T", "description": "D"}'}]}]
+
+    prov = LocalVisionProvider("google/gemma-3-4b-it", pipeline=pipe)
+    insight = prov.describe(img, media_type="image/png", context="Setup")
+    assert insight.text == "T" and insight.description == "D"
+    assert insight.model == "google/gemma-3-4b-it"
+
+
+def test_local_provider_wraps_failure(tmp_path: Path) -> None:
+    pytest.importorskip("PIL.Image")
+
+    def boom(messages: Any, max_new_tokens: int = 0) -> Any:
+        raise RuntimeError("cuda oom")
+
+    with pytest.raises(VisionError):
+        LocalVisionProvider("m", pipeline=boom).describe(_png_file(tmp_path), media_type="image/png")
 
 
 def test_media_type_map_covers_common_raster() -> None:

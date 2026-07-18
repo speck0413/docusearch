@@ -176,7 +176,7 @@ def _vision_config(tmp_path: Path) -> None:
 class _StubVision:
     model_id = "stub-vision-1"
 
-    def describe(self, image_bytes, *, media_type, alt="", caption="", context=""):  # type: ignore[no-untyped-def]
+    def describe(self, image_path, *, media_type, alt="", caption="", context=""):  # type: ignore[no-untyped-def]
         from docusearch.vision import ImageInsight
 
         return ImageInsight(text="OCR nonce VZX9", description="a block diagram", model=self.model_id)

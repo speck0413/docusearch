@@ -98,7 +98,7 @@ def test_remove_unknown_source_is_noop(tmp_path: Path) -> None:
 class _StubVision:
     model_id = "stub-vision-1"
 
-    def describe(self, image_bytes, *, media_type, alt="", caption="", context=""):  # type: ignore[no-untyped-def]
+    def describe(self, image_path, *, media_type, alt="", caption="", context=""):  # type: ignore[no-untyped-def]
         return vision.ImageInsight(text=f"OCR {context}", description="a block diagram", model=self.model_id)
 
 
