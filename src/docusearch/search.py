@@ -116,6 +116,15 @@ def _pool_size(top_k: int, roles: set[str] | None) -> int:
     return top_k if roles is None else max(top_k * 5, 50)
 
 
+def _fusion_pool(top_k: int, roles: set[str] | None) -> int:
+    """Candidates gathered from EACH signal (BM25, vector) before RRF fusion. Deeper than the
+    returned ``top_k`` on purpose: a document ranked moderately in *both* signals — the hybrid
+    sweet spot — never surfaces if each signal is cut at ``top_k`` first (measured on the auto-QA
+    set: gold recall@10 rises 83% -> 92% going from a pool of 10 to 40, then plateaus). The
+    federation and single-store hybrid share this depth so they rank identically (R-TEST-3)."""
+    return max(_pool_size(top_k, roles), top_k * 4, 40)
+
+
 # ----------------------------------------------------------------- vector index
 
 
@@ -278,7 +287,7 @@ def hybrid_search(
     roles: set[str] | None = None,
 ) -> list[SearchHit]:
     """Fuse BM25 and vector rankings with RRF (R-SRCH-2), role-filtered, deterministic."""
-    pool = _pool_size(top_k, roles)
+    pool = _fusion_pool(top_k, roles)  # over-fetch each signal so mid-ranked hybrid hits survive
     match = sanitize_query(query, prefix=prefix)
     bm25_ids = [int(row["chunk_id"]) for row in store.bm25(match, pool)] if match else []
     query_vec = provider.embed([query])[0]
@@ -462,7 +471,13 @@ class FederatedSearch:
         roles: set[str] | None = None,
         stores: Sequence[str] | None = None,
     ) -> list[SearchHit]:
-        pool = max(top_k * 4, 40)  # deep per-store pool: the global re-rank needs the candidates
+        # Mirror single-store hybrid EXACTLY (§9): it RRFs the top-`pool` BM25 chunks with the
+        # top-`pool` vector chunks, over the SAME deepened fusion pool. The federation fuses the
+        # same depth, or it would rank differently from one combined store. Each store returns its
+        # own top-`pool`; the global top-`pool` of a signal is a subset of the union of the per-store
+        # top-`pool` lists (a globally top-`pool` chunk is at worst top-`pool` within its own,
+        # smaller, store), so gathering `pool` per store loses nothing before the global re-rank.
+        pool = _fusion_pool(top_k, roles)
         bm25_best: dict[Hashable, float] = {}  # best BM25 score per dedup key, across stores
         vec_best: dict[Hashable, float] = {}  # best cosine per dedup key, across stores
         rep: dict[Hashable, SearchHit] = {}
@@ -485,7 +500,8 @@ class FederatedSearch:
                     rep.setdefault(key, hit)
 
         def _order(scored: dict[Hashable, float]) -> list[Hashable]:
-            return [k for k, _ in sorted(scored.items(), key=lambda kv: (-kv[1], str(kv[0])))]
+            ranked = sorted(scored.items(), key=lambda kv: (-kv[1], str(kv[0])))
+            return [k for k, _ in ranked[:pool]]  # top-`pool` per signal, like single-store hybrid
 
         ranked_lists = [order for order in (_order(bm25_best), _order(vec_best)) if order]
         fused = _rrf(ranked_lists, rrf_k)

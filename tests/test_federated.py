@@ -91,6 +91,17 @@ def test_federated_matches_single_combined_store(tmp_path: Path) -> None:
         assert fed_top.path.rsplit("/", 1)[-1] == single_top.path.rsplit("/", 1)[-1]
 
 
+def test_fusion_pool_over_fetches() -> None:
+    # Regression guard: single-store hybrid and the federation must gather MORE than top_k
+    # candidates per signal before RRF, or a doc ranked mid-list in both bm25 and vector (the
+    # hybrid sweet spot) is dropped before fusion — measured to cost ~9 pts of gold recall.
+    from docusearch.search import _fusion_pool
+
+    assert _fusion_pool(10, None) >= 40
+    assert _fusion_pool(10, None) > 10
+    assert _fusion_pool(50, None) >= 50  # scales with top_k
+
+
 def test_federated_subset_selection_by_name(tmp_path: Path) -> None:
     # Named stores (Python, ACME, …); a query can be scoped to a subset so "only search ACME"
     # never returns hits from the other stores.
