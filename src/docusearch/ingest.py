@@ -22,9 +22,10 @@ Public surface (grows through Phase 1):
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +35,10 @@ from . import embed, runlog
 from .config import Config, SourceConfig
 from .embed import EmbedProvider
 from .store import Store
+
+# A progress sink: (phase, done, total). ``phase`` is "ingest" (files) or "embed"
+# (chunks). Optional everywhere — library callers pass nothing; the CLI renders a bar.
+ProgressFn = Callable[[str, int, int], None]
 
 _HASH_BLOCK = 1 << 20
 
@@ -537,41 +542,86 @@ def _stage_images(
     return added
 
 
-def _ingest_file(
-    path: Path,
-    source: SourceConfig,
-    config: Config,
-    store: Store,
-    *,
-    force: bool,
-    result: IngestResult,
-) -> None:
-    ext = path.suffix.lstrip(".").lower() or "html"
-    result.per_extension[ext] = result.per_extension.get(ext, 0) + 1
-    abspath = path.resolve().as_posix()
+# --- parallel parse (§7) -----------------------------------------------------------
+# The CPU-heavy part of ingest (read + extract + chunk) runs in worker processes; the DB
+# writes stay in the single main-process writer and are applied in file order, so the
+# result is byte-identical to a serial run (R-SRCH-5) — parallelism only speeds it up.
 
-    file_hash = content_hash(path)
-    existing = store.document_content_hash(abspath)
-    if existing is not None and existing == file_hash and not force:
-        result.skipped_unchanged += 1
-        return
-    if existing is not None:
-        doc_id_old = store.document_id_for_path(abspath)
-        if doc_id_old is not None:
-            store.delete_document(doc_id_old)
 
+@dataclass
+class _ParseTask:
+    """One file's parse job — picklable, so it crosses the spawn boundary to a worker."""
+
+    path: str  # resolved posix path (also the document's DB key)
+    ext: str
+    content_selector: str
+    strip_selectors: tuple[str, ...]
+    chunk_tokens: int
+    chunk_overlap: int
+    stored_hash: str | None  # the DB's current hash for this path (for the skip decision)
+    force: bool
+
+
+@dataclass
+class _ParseResult:
+    """A worker's output for one file — picklable, consumed serially in the main process."""
+
+    path: str
+    ext: str
+    status: str  # "skip" | "ok" | "error"
+    file_hash: str
+    mtime: float
+    error: str | None
+    doc: ExtractedDoc | None
+    chunks: list[Chunk]
+
+
+def _parse_file(task: _ParseTask) -> _ParseResult:
+    """Worker: hash, extract, and chunk one file. Pure CPU/IO, touches no DB — this is the
+    part that runs in a process pool. Unchanged files short-circuit before the parse."""
+    path = Path(task.path)
+    try:
+        file_hash = content_hash(path)
+    except OSError as err:
+        return _ParseResult(
+            task.path, task.ext, "error", "", 0.0, f"{type(err).__name__}: {err}", None, []
+        )
+    if task.stored_hash is not None and task.stored_hash == file_hash and not task.force:
+        return _ParseResult(task.path, task.ext, "skip", file_hash, 0.0, None, None, [])
     try:
         html = path.read_bytes().decode("utf-8", errors="replace")
         doc = extract_html(
             html,
-            content_selector=source.content_selector,
-            strip_selectors=source.strip_selectors,
+            content_selector=task.content_selector,
+            strip_selectors=list(task.strip_selectors),
         )
-    except Exception as err:  # a genuinely unparseable file — reported, not fatal
-        result.parse_errors += 1
-        result.errors.append((abspath, f"{type(err).__name__}: {err}"))
-        return
+        chunks = chunk_document(doc, chunk_tokens=task.chunk_tokens, overlap=task.chunk_overlap)
+    except Exception as err:  # noqa: BLE001 - a bad file is reported, not fatal
+        return _ParseResult(
+            task.path, task.ext, "error", file_hash, 0.0, f"{type(err).__name__}: {err}", None, []
+        )
+    return _ParseResult(
+        task.path, task.ext, "ok", file_hash, path.stat().st_mtime, None, doc, chunks
+    )
 
+
+def _write_parsed(
+    res: _ParseResult, source: SourceConfig, config: Config, store: Store, result: IngestResult
+) -> None:
+    """Main process: turn one parse result into DB rows (single writer, called in file order
+    so doc/chunk ids are assigned deterministically)."""
+    result.per_extension[res.ext] = result.per_extension.get(res.ext, 0) + 1
+    if res.status == "skip":
+        result.skipped_unchanged += 1
+        return
+    if res.status == "error" or res.doc is None:
+        result.parse_errors += 1
+        result.errors.append((res.path, res.error or "parse failed"))
+        return
+    doc = res.doc
+    old = store.document_id_for_path(res.path)  # re-ingest of a changed/forced file
+    if old is not None:
+        store.delete_document(old)
     if not doc.content_selector_matched:
         result.content_selector_misses += 1
     if doc.text_length < source.min_content_chars:
@@ -579,41 +629,46 @@ def _ingest_file(
         return
     if not source.audience:
         result.untagged_audience_docs += 1
-
     doc_id = store.add_document(
-        path=abspath,
+        path=res.path,
         source=source.name,
+        source_version=source.version,
         title=doc.title,
-        content_hash=file_hash,
+        content_hash=res.file_hash,
         content_type="documentation",
-        fmt=ext,
+        fmt=res.ext,
         audience=source.audience,
-        mtime=path.stat().st_mtime,
+        mtime=res.mtime,
         status="active",
     )
     result.documents += 1
-
-    chunks = chunk_document(
-        doc, chunk_tokens=config.index.chunk_tokens, overlap=config.index.chunk_overlap
-    )
-    for chunk in chunks:
-        store.add_chunk(
-            document_id=doc_id,
-            ord=chunk.ord,
-            text=chunk.text,
-            kind=chunk.kind,
-            locator=chunk.locator,
-        )
+    store.add_chunks(doc_id, [(c.ord, c.text, c.kind, c.locator) for c in res.chunks])
     image_chunks = _stage_images(
-        doc, path, Path(config.paths.staging_dir), store, doc_id, len(chunks), result
+        doc, Path(res.path), Path(config.paths.staging_dir), store, doc_id, len(res.chunks), result
     )
-    total_chunks = len(chunks) + image_chunks
+    total_chunks = len(res.chunks) + image_chunks
     result.chunks += total_chunks
     if total_chunks == 0:
         result.zero_chunk_docs += 1
-
     for link in doc.links:
         store.add_relation(src_doc=doc_id, dst_raw=link.target, link_type=link.link_type)
+
+
+def _resolve_workers(requested: int | None, n_tasks: int) -> int:
+    """How many parse workers to use. Auto: parallelize only when there's enough work to
+    amortize process-spawn cost. ``DOCUSEARCH_INGEST_WORKERS`` overrides; 1 = serial."""
+    if requested is None:
+        env = os.environ.get("DOCUSEARCH_INGEST_WORKERS")
+        if env:
+            try:
+                requested = int(env)
+            except ValueError:
+                requested = None
+    if requested is not None:
+        return max(1, requested)
+    if n_tasks < 250:  # small ingests: spawn overhead isn't worth it
+        return 1
+    return min(os.cpu_count() or 1, 8)
 
 
 def _resolve_links(store: Store) -> None:
@@ -627,7 +682,13 @@ def _resolve_links(store: Store) -> None:
                 store.set_relation_dst(rel_id, dst)
 
 
-def _embed_chunks(store: Store, provider: EmbedProvider, batch_size: int) -> int:
+def _embed_chunks(
+    store: Store,
+    provider: EmbedProvider,
+    batch_size: int,
+    *,
+    progress: ProgressFn | None = None,
+) -> int:
     """Batch-embed every chunk that lacks a vector and store it, tagged by model (§7.7).
 
     Only un-embedded chunks are processed, so incremental re-ingest embeds just the new
@@ -635,20 +696,38 @@ def _embed_chunks(store: Store, provider: EmbedProvider, batch_size: int) -> int
     different model must be re-indexed fresh.
     """
     # Provenance guard runs FIRST — before the no-pending early-out — so a swap to a
-    # different (even same-dimension) model is refused even when no new chunks need
-    # embedding (R-EMB-3: never silently mix models in one index).
-    existing_model = store.get_meta("embed_model")
-    if existing_model is not None and existing_model != provider.model_id:
+    # different model is refused even when no new chunks need embedding (R-EMB-3: never
+    # silently mix models in one index). We read the *embeddings rows*, not the
+    # ``embed_model`` meta flag: the flag is written only after a full pass, so an
+    # interrupted run leaves committed vectors with no flag — exactly the gap that used
+    # to let a later, different-dimension model mix in and crash the ANN build.
+    existing = store.existing_embedding_model()
+    if existing is not None and existing[0] != provider.model_id:
+        old_model, old_dim = existing
         raise embed.EmbedError(
-            f"index was embedded with {existing_model!r} but the configured model is "
-            f"{provider.model_id!r}. Re-index fresh (delete the db) to switch models."
+            f"index already holds vectors from {old_model!r} (dim {old_dim}), but the "
+            f"configured model is {provider.model_id!r}. Vectors from different models "
+            f"can't share one index. Recover with either:\n"
+            f"  - docusearch ingest --reembed   (drop old vectors, re-embed with the new model)\n"
+            f"  - point paths.db_path at a fresh database\n"
+            f"(this can happen if a previous embedding run was interrupted mid-way)."
         )
     pending = store.chunks_without_embeddings()
     if not pending:
         return 0
-    dim = provider.dim
+    dim = provider.dim  # loads the model (may download) — only reached when there is work
+    if existing is not None and existing[1] != dim:  # same name, different dim: still refuse
+        raise embed.EmbedError(
+            f"index holds {existing[1]}-dim vectors but {provider.model_id!r} produces "
+            f"{dim}-dim; run `docusearch ingest --reembed` or use a fresh db_path."
+        )
+    # Record provenance up front so an interrupted run stays self-describing (the guard
+    # above then catches any later model swap instead of silently mixing).
+    store.set_meta("embed_model", provider.model_id)
+    store.set_meta("embed_dim", str(dim))
+    total = len(pending)
     embedded = 0
-    for start in range(0, len(pending), batch_size):
+    for start in range(0, total, batch_size):
         batch = pending[start : start + batch_size]
         vectors = provider.embed([text for _, text in batch])
         rows = [
@@ -657,8 +736,8 @@ def _embed_chunks(store: Store, provider: EmbedProvider, batch_size: int) -> int
         ]
         store.add_embeddings(rows)
         embedded += len(rows)
-    store.set_meta("embed_model", provider.model_id)
-    store.set_meta("embed_dim", str(dim))
+        if progress is not None:
+            progress("embed", embedded, total)
     return embedded
 
 
@@ -670,16 +749,35 @@ def run_ingest(
     store: Store,
     *,
     force: bool = False,
+    reembed: bool = False,
     provider: EmbedProvider | None = _FROM_CONFIG,
+    progress: ProgressFn | None = None,
+    workers: int | None = None,
 ) -> IngestResult:
     """Ingest every configured source into the store and return an audit result (§7).
 
     ``provider`` defaults to whatever ``embed.model`` selects (None => BM25-only,
     R-CFG-4); pass an explicit provider to override (used by tests/harness).
+    ``force`` re-parses every file AND rebuilds all vectors (a full rebuild); ``reembed``
+    rebuilds only the vectors (keeps parsed docs — the cheap model switch). Both drop
+    existing vectors up front, which also heals an orphaned/mixed embeddings table.
+    ``progress`` receives (phase, done, total) callbacks for a live bar (CLI only).
+    ``workers`` sets the parse-pool size (None => auto by corpus size; 1 => serial;
+    ``DOCUSEARCH_INGEST_WORKERS`` overrides). Results are always applied in file order,
+    so the worker count never changes the index (R-SRCH-5).
     """
     prov = embed.make_provider(config.embed) if provider is _FROM_CONFIG else provider
     result = IngestResult()
     start = time.perf_counter()
+    if reembed or force:
+        # A full rebuild (--force) and an explicit --reembed both start vectors from a
+        # clean slate. This is authoritative: it clears vectors that the per-document
+        # re-ingest cascade would miss — orphans, or docs whose path changed — instead of
+        # relying on the cascade and then tripping the model-mismatch guard on stragglers.
+        store.clear_embeddings()
+    # Classify every source up front so the file total (for progress) is known before we
+    # start the slow parse loop.
+    worklist: list[tuple[Path, SourceConfig]] = []
     for source in config.sources:
         root = Path(source.location)
         if not root.is_dir():
@@ -690,17 +788,62 @@ def run_ingest(
         result.included += len(included)
         result.excluded_glob += excluded_glob
         result.other_files += other
-        for path in included:
-            _ingest_file(path, source, config, store, force=force, result=result)
+        worklist += [(path, source) for path in included]
 
-    _resolve_links(store)
+    total_files = len(worklist)
+    # Build one picklable parse task per file (the DB's current hashes let workers decide
+    # skip-vs-reparse without touching the DB).
+    stored = store.document_hashes()
+    tasks = [
+        _ParseTask(
+            path=path.resolve().as_posix(),
+            ext=(path.suffix.lstrip(".").lower() or "html"),
+            content_selector=source.content_selector,
+            strip_selectors=tuple(source.strip_selectors),
+            chunk_tokens=config.index.chunk_tokens,
+            chunk_overlap=config.index.chunk_overlap,
+            stored_hash=stored.get(path.resolve().as_posix()),
+            force=force,
+        )
+        for path, source in worklist
+    ]
+    sources = [source for _, source in worklist]
+    n_workers = _resolve_workers(workers, total_files)
+
+    # Parse in parallel (CPU-bound extract+chunk across cores — the real fix for the slow,
+    # ~1-core-bound ingest, R-PERF-1), but apply DB writes serially IN FILE ORDER so ids are
+    # assigned deterministically and the result is byte-identical to a serial run (R-SRCH-5).
+    # Commits are batched per file (deferred_commits) to avoid per-insert fsync churn.
+    with store.deferred_commits():
+        if n_workers <= 1:
+            parsed: Iterator[_ParseResult] = (_parse_file(t) for t in tasks)
+            for done, (res, source) in enumerate(zip(parsed, sources, strict=True), 1):
+                _write_parsed(res, source, config, store, result)
+                store.commit()
+                if progress is not None:
+                    progress("ingest", done, total_files)
+        else:
+            import concurrent.futures as _cf
+            import multiprocessing as _mp
+
+            ctx = _mp.get_context("spawn")  # spawn-safe: workers re-import the module
+            with _cf.ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+                ordered = pool.map(_parse_file, tasks, chunksize=8)  # results stay in order
+                for done, (res, source) in enumerate(zip(ordered, sources, strict=True), 1):
+                    _write_parsed(res, source, config, store, result)
+                    store.commit()
+                    if progress is not None:
+                        progress("ingest", done, total_files)
+
+    with store.deferred_commits():  # link resolution is another burst of small updates
+        _resolve_links(store)
     result.relations_total = store.count_relations()
     result.relations_resolved = store.count_resolved_relations()
     result.relations_unresolved = result.relations_total - result.relations_resolved
 
     if prov is not None:  # embed at index time unless embed.model: none (R-CFG-4)
         embed_start = time.perf_counter()
-        result.embedded = _embed_chunks(store, prov, config.embed.batch_size)
+        result.embedded = _embed_chunks(store, prov, config.embed.batch_size, progress=progress)
         result.timings_ms["embed"] = (time.perf_counter() - embed_start) * 1000.0
         # Build/refresh the ANN sidecar for file-backed indexes (§7.7). In-memory stores
         # fall back to numpy brute-force at query time, so no sidecar is needed there.

@@ -137,6 +137,134 @@ def test_show_cli_missing_doc_returns_1(
     assert cli.main(["show", "999"]) == 1
 
 
+def test_remove_cli_purges_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)  # source label is "docs"
+    cli.main(["ingest"])
+    capsys.readouterr()
+    rc = cli.main(["remove", "docs", "--yes"])  # --yes skips the confirmation prompt
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Removed 1 documents" in out
+    capsys.readouterr()
+    cli.main(["audit"])
+    assert "documents: **0**" in capsys.readouterr().out  # index is empty again
+
+
+def test_remove_cli_unknown_source_lists_known(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)
+    cli.main(["ingest"])
+    capsys.readouterr()
+    rc = cli.main(["remove", "delete_me_next", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "No documents found" in out
+    assert "Known sources" in out and "docs" in out
+
+
+def test_search_json_emits_structured_hits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    _write_corpus_config(tmp_path)
+    cli.main(["ingest"])
+    capsys.readouterr()
+    rc = cli.main(["search", "ZZQ42", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["hits"], "expected at least one hit"
+    hit = payload["hits"][0]
+    assert {"doc_id", "chunk_id", "citation", "snippet"} <= hit.keys()
+    assert hit["citation"] == f"D:{hit['doc_id']}#{hit['chunk_id']}"
+
+
+def test_report_cli_renders_html_with_verified_citations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])  # config gives base_url + embed model label
+    (tmp_path / "answer.yaml").write_text(
+        'title: "PA overview"\n'
+        'body: "PA is controlled over the nWire bus [D:12#3]. A general fact [GK]."\n'
+        "evidence:\n  - [12, 3]\n"
+        'audience: ["engineering"]\n',
+        encoding="utf-8",
+    )
+    rc = cli.main(["report", "--spec", "answer.yaml", "--format", "html", "--out", "r.html"])
+    assert rc == 0
+    html = (tmp_path / "r.html").read_text(encoding="utf-8")
+    assert "<html" in html.lower() and "PA overview" in html
+    assert "documents/12?chunk=3" in html  # citation resolved to a reference URL
+
+
+def test_report_cli_refuses_hallucinated_citation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])
+    (tmp_path / "answer.yaml").write_text(
+        'title: "x"\nbody: "claim [D:99#9]"\nevidence:\n  - [1, 1]\n', encoding="utf-8"
+    )
+    rc = cli.main(["report", "--spec", "answer.yaml", "--out", "r.md"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert err.startswith("error:") and "evidence" in err  # refused, cleanly
+
+
+def test_cli_prints_clean_error_not_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    # a known, actionable failure (bad enum here; model mismatch in the wild) should print
+    # a one-line "error: …" with guidance, and exit 1 — not dump a Python traceback.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "docusearch.yaml").write_text("embed:\n  device: gpu\n", encoding="utf-8")
+    rc = cli.main(["ingest"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert err.startswith("error:")
+    assert "cuda" in err  # names the accepted options so the user can fix it
+
+
+def test_self_heal_thread_starts_only_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from docusearch import config as cfg
+    from docusearch.catalog import Catalog
+
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])
+    cat = Catalog(cfg.load(tmp_path / "docusearch.yaml"))
+    assert cli._start_self_heal(cat, 0) is None  # disabled
+    thread = cli._start_self_heal(cat, 60)  # enabled -> a running daemon thread
+    assert thread is not None and thread.is_alive() and thread.daemon
+
+
+def test_serve_config_has_self_heal_interval(tmp_path: Path) -> None:
+    from docusearch import config as cfg
+
+    assert cfg.default().serve.self_heal_minutes == 60  # default: hourly
+    path = tmp_path / "docusearch.yaml"
+    path.write_text("serve:\n  self_heal_minutes: 0\n", encoding="utf-8")
+    assert cfg.load(path).serve.self_heal_minutes == 0  # 0 disables it
+
+
+def test_models_cli_lists_cache_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    cache = tmp_path / "hfcache"
+    cache.mkdir()
+    monkeypatch.setenv("HF_HUB_CACHE", str(cache))  # isolate from the real model cache
+    rc = cli.main(["models"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Model cache:" in out and str(cache) in out
+    assert "delete-cache" in out  # tells the user how to purge
+
+
 def test_search_batch_file_grades_goldens(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:  # type: ignore[no-untyped-def]

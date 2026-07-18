@@ -39,10 +39,64 @@ class Catalog:
     def db_path(self) -> str:
         return self.config.paths.db_path
 
-    def ingest(self, *, force: bool = False) -> IngestResult:
-        """Ingest every configured source into the index (§7). Returns audit counts."""
+    def ingest(
+        self,
+        *,
+        force: bool = False,
+        reembed: bool = False,
+        progress: ingest.ProgressFn | None = None,
+    ) -> IngestResult:
+        """Ingest every configured source into the index (§7). Returns audit counts.
+
+        ``reembed`` drops existing vectors first (switch models / heal a mixed index);
+        ``progress`` receives (phase, done, total) callbacks for a live progress bar.
+        """
         with Store.open(self.db_path) as store:
-            return ingest.run_ingest(self.config, store, force=force)
+            return ingest.run_ingest(
+                self.config, store, force=force, reembed=reembed, progress=progress
+            )
+
+    def prune_missing(self, *, apply: bool = False) -> int:
+        """Remove documents whose source file no longer exists (e.g. after the source folder
+        was moved or renamed, which orphans the path-keyed originals). Returns the count;
+        with ``apply=False`` it only counts (dry run)."""
+        with Store.open(self.db_path) as store:
+            missing = [i for i, p in store.all_document_paths() if not Path(p).exists()]
+            if apply and missing:
+                for doc_id in missing:
+                    store.delete_document(doc_id)
+                self._refresh_sidecar(store)
+        return len(missing)
+
+    def remove_source(self, name: str) -> int:
+        """Purge everything ingested under source label ``name`` — documents and their
+        chunks, embeddings, relations, and images — and refresh the ANN sidecar. Returns
+        the number of documents removed (0 if the label isn't present)."""
+        with Store.open(self.db_path) as store:
+            doc_ids = store.document_ids_for_source(name)
+            for doc_id in doc_ids:
+                store.delete_document(doc_id)  # cascades chunks/embeddings/relations/images
+            self._refresh_sidecar(store)
+        return len(doc_ids)
+
+    def _refresh_sidecar(self, store: Store) -> None:
+        """Rebuild or remove the on-disk ANN index after the vector set changed."""
+        if self.db_path == ":memory:":
+            return
+        ann_path = Path(self.db_path).with_suffix(".hnsw")
+        if store.count_embeddings() == 0:
+            store.clear_embeddings()  # drop now-stale embed_model/dim provenance too
+            ann_path.unlink(missing_ok=True)
+            return
+        model = store.existing_embedding_model()
+        if self.config.index.ann and model is not None:
+            search.VectorIndex.build(
+                store,
+                model[1],
+                ann_path,
+                m=self.config.index.ann_m,
+                ef_construction=self.config.index.ann_ef_construction,
+            )
 
     def _provider(self) -> EmbedProvider | None:
         """The embedding provider for queries, or None (BM25-only) when not applicable."""

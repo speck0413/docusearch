@@ -3,9 +3,13 @@
 Every command resolves the config, does one job, and logs one event.
 
     docusearch init [--config PATH] [--force]
-    docusearch ingest [--dry-run] [--force] [--config PATH]
+    docusearch ingest [--dry-run] [--force] [--reembed] [--config PATH]
     docusearch audit [--config PATH]
-    docusearch search <query> [--top-k N] [--prefix] [--batch-file F --out O] [--config PATH]
+    docusearch remove <source> [--yes] [--config PATH]
+    docusearch models
+    docusearch inspect [<source>] [--sample N] [--config PATH]
+    docusearch search <query> [--top-k N] [--prefix] [--json] [--batch-file F --out O] [--config PATH]
+    docusearch report --spec SPEC.yaml [--format md|html] [--out FILE] [--config PATH]
     docusearch show <doc_id> [--config PATH]
     docusearch serve [--host H] [--port P] [--config PATH]
     docusearch gate <n> [--name NAME] [--config PATH]
@@ -16,18 +20,23 @@ The console entry point is ``main`` (see pyproject ``[project.scripts]``).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
+import os
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import yaml
 
-from . import config, ingest, runlog
+from . import config, embed, ingest, runlog
 from ._version import __version__
 from .catalog import Catalog
 from .config import Config
 from .search import SearchHit
-from .store import Store
+from .store import Store, StoreError
 
 
 def _configure_logging(cfg: Config) -> None:
@@ -36,6 +45,35 @@ def _configure_logging(cfg: Config) -> None:
         level=cfg.logging.level,
         enabled=cfg.logging.jsonl,
     )
+
+
+class _ProgressBar:
+    """Render ``(phase, done, total)`` callbacks to stderr.
+
+    On a TTY it redraws one line in place (``\\r``); when output is piped/redirected it
+    prints a line each time it crosses a 10% boundary, so logs stay readable instead of
+    scrolling thousands of lines. Long-running work (embedding on GPU) finally has a
+    heartbeat so it's obvious the process is alive, not hung."""
+
+    def __init__(self, stream: TextIO | None = None) -> None:
+        self._stream = stream if stream is not None else sys.stderr
+        self._isatty = self._stream.isatty()
+        self._last_decile: dict[str, int] = {}
+
+    def __call__(self, phase: str, done: int, total: int) -> None:
+        if total <= 0:
+            return
+        pct = done * 100 // total
+        if self._isatty:
+            end = "\n" if done >= total else ""
+            self._stream.write(f"\r  {phase}: {done}/{total} ({pct}%)      {end}")
+            self._stream.flush()
+            return
+        decile = pct // 10
+        if decile != self._last_decile.get(phase) or done >= total:
+            self._last_decile[phase] = decile
+            self._stream.write(f"  {phase}: {done}/{total} ({pct}%)\n")
+            self._stream.flush()
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -72,7 +110,14 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         runlog.flush()
         return 0
 
-    result = Catalog(cfg).ingest(force=args.force)
+    log_path = runlog.active_log_path()
+    if log_path is not None:
+        print(f"Logging to {log_path} (tail -f to watch)", file=sys.stderr)
+    if args.force:
+        print("Full rebuild (--force): re-parsing files and re-embedding.", file=sys.stderr)
+    elif args.reembed:
+        print("Re-embedding: dropping existing vectors first.", file=sys.stderr)
+    result = Catalog(cfg).ingest(force=args.force, reembed=args.reembed, progress=_ProgressBar())
     reports = Path(cfg.paths.tmp_dir) / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     report_path = reports / f"ingest-audit-{runlog.RUN_ID}.md"
@@ -82,7 +127,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     print(
         f"Ingested {result.documents} docs, {result.chunks} chunks, {result.images} images "
         f"({result.skipped_unchanged} unchanged, {result.stripped_empty} too short, "
-        f"{result.excluded_glob} excluded)."
+        f"{result.excluded_glob} excluded); embedded {result.embedded} chunks."
     )
     print(f"Audit report: {report_path}")
     runlog.log("cli.ingest", documents=result.documents, chunks=result.chunks)
@@ -104,6 +149,169 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_remove(args: argparse.Namespace) -> int:
+    """Purge everything ingested under a source label (delete_me_next -> gone)."""
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    name = args.source
+    with Store.open(cfg.paths.db_path) as store:
+        count = len(store.document_ids_for_source(name))
+        known = store.source_names()
+    if count == 0:
+        print(f"No documents found for source {name!r}.")
+        if known:
+            listing = ", ".join(f"{n or '(blank)'} ({c})" for n, c in known)
+            print(f"Known sources: {listing}")
+        return 0
+    if not args.yes and sys.stdin.isatty():
+        confirm = input(f"Remove {count} documents for source {name!r}? [y/N] ").strip().lower()
+        if confirm not in {"y", "yes"}:
+            print("Aborted.")
+            return 1
+    removed = Catalog(cfg).remove_source(name)
+    print(f"Removed {removed} documents (chunks, embeddings, relations, images) for {name!r}.")
+    runlog.log("cli.remove", source=name, removed=removed)
+    runlog.flush()
+    return 0
+
+
+def _cmd_prune(args: argparse.Namespace) -> int:
+    """Remove documents whose source file no longer exists (e.g. after a folder rename)."""
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    cat = Catalog(cfg)
+    n = cat.prune_missing(apply=False)
+    if n == 0:
+        print("No documents with missing source files — nothing to prune.")
+        return 0
+    print(
+        f"{n} documents reference source files that no longer exist "
+        "(the source folder was likely moved or renamed, orphaning the originals)."
+    )
+    if not args.yes and sys.stdin.isatty():
+        confirm = input(f"Remove these {n} orphaned documents? [y/N] ").strip().lower()
+        if confirm not in {"y", "yes"}:
+            print("Aborted.")
+            return 1
+    removed = cat.prune_missing(apply=True)
+    print(f"Pruned {removed} orphaned documents (chunks, vectors, relations, images).")
+    runlog.log("cli.prune", removed=removed)
+    runlog.flush()
+    return 0
+
+
+def _hf_cache_dir() -> Path:
+    """Where the Hugging Face hub caches downloaded embedding models (cross-platform)."""
+    hub = os.environ.get("HF_HUB_CACHE")
+    if hub:
+        return Path(hub)
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return Path(hf_home) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _human(num_bytes: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if num_bytes < 1024 or unit == "TB":
+            return f"{num_bytes:.0f} {unit}" if unit == "B" else f"{num_bytes:.1f} {unit}"
+        num_bytes /= 1024
+    return f"{num_bytes:.1f} TB"
+
+
+def _list_cached_models(cache: Path) -> list[tuple[str, str]]:
+    """(repo_id, human size) for every model in the HF cache — via huggingface_hub when
+    available (accurate, dedups blobs), else a plain directory scan."""
+    try:  # huggingface_hub ships with sentence-transformers ([embeddings] extra)
+        from huggingface_hub import scan_cache_dir
+
+        info = scan_cache_dir(cache)  # honors the resolved cache dir
+        rows = [
+            (r.repo_id, r.size_on_disk_str) for r in sorted(info.repos, key=lambda r: r.repo_id)
+        ]
+        if rows:
+            rows.append(("TOTAL", _human(info.size_on_disk)))
+        return rows
+    except Exception:  # noqa: BLE001 -- CacheNotFound / missing lib -> manual scan
+        entries: list[tuple[str, int]] = []
+        if cache.is_dir():
+            for child in sorted(cache.iterdir()):
+                if child.is_dir() and child.name.startswith("models--"):
+                    size = sum(
+                        f.stat().st_size
+                        for f in child.rglob("*")
+                        if f.is_file() and not f.is_symlink()  # skip snapshot symlinks
+                    )
+                    entries.append((child.name[len("models--") :].replace("--", "/"), size))
+        rows = [(repo_id, _human(size)) for repo_id, size in entries]
+        if rows:
+            rows.append(("TOTAL", _human(sum(s for _, s in entries))))
+        return rows
+
+
+def _cmd_models(args: argparse.Namespace) -> int:
+    """List downloaded embedding models and where to delete them (disk hygiene)."""
+    cache = _hf_cache_dir()
+    print(f"Model cache: {cache}")
+    rows = _list_cached_models(cache)
+    if rows:
+        for repo_id, size in rows:
+            print(f"  {repo_id:50s} {size:>10s}")
+    else:
+        print("  (empty — no models downloaded yet)")
+    print("\nDelete a model you no longer use:")
+    print("  huggingface-cli delete-cache     # interactive picker (needs huggingface_hub[cli])")
+    print(f"  # …or delete its folder under {cache}")
+    return 0
+
+
+def _cmd_inspect(args: argparse.Namespace) -> int:
+    """Sample a source and propose content_selector / strip_selectors for its shape."""
+    import random
+
+    from . import inspector
+
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    src = next((s for s in cfg.sources if s.name == args.source), None)
+    if src is None and args.source is None:
+        src = cfg.sources[0] if cfg.sources else None
+    if src is None:
+        print(f"No source named {args.source!r}. Sources: {[s.name for s in cfg.sources]}")
+        return 1
+    files = list(ingest.iter_files(src.location, src.include, src.exclude))
+    if not files:
+        print(f"No files found for source {src.name!r} at {src.location}")
+        return 1
+    sample_n = args.sample if args.sample is not None else cfg.enrich.preflight_sample
+    random.seed(0)  # deterministic sample
+    picked = random.sample(files, min(sample_n, len(files)))
+    docs = []
+    for f in picked:
+        with contextlib.suppress(OSError):
+            docs.append(f.read_text("utf-8", errors="replace"))
+    result = inspector.inspect_html(docs)
+
+    print(f"Inspected {result.sampled} of {len(files)} files in source {src.name!r}\n")
+    print("Body-container candidates  (selector: matched% / text-coverage%):")
+    for sel, mr, cov in result.content_candidates:
+        marker = "  <- suggested" if sel == result.content_selector else ""
+        print(f"  {sel:26s} {mr * 100:4.0f}% / {cov * 100:4.0f}%{marker}")
+    if not result.content_candidates:
+        print("  (no common container matched; keep content_selector empty)")
+    print("\nSuggested config for this source (paste into docusearch.yaml):")
+    print(f'    content_selector: "{result.content_selector}"')
+    if result.strip_selectors:
+        print("    strip_selectors:")
+        for s in result.strip_selectors:
+            print(f'      - "{s}"')
+    else:
+        print("    strip_selectors: []")
+    runlog.log("cli.inspect", source=src.name, sampled=result.sampled)
+    runlog.flush()
+    return 0
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
     cfg = config.load(Path(args.config))
     _configure_logging(cfg)
@@ -114,6 +322,11 @@ def _cmd_search(args: argparse.Namespace) -> int:
         print("Provide a query, or --batch-file <goldens.yaml>.")
         return 2
     hits = catalog.search(args.query, top_k=args.top_k, prefix=args.prefix)
+    if args.json:  # machine-readable for agents: everything needed to cite a hit
+        print(json.dumps(_json_result(args.query, hits), ensure_ascii=False))
+        runlog.log("cli.search", query=args.query, results=len(hits))
+        runlog.flush()
+        return 0
     if not hits:
         print("No results.")
     else:
@@ -125,6 +338,111 @@ def _cmd_search(args: argparse.Namespace) -> int:
     runlog.log("cli.search", query=args.query, results=len(hits))
     runlog.flush()
     return 0
+
+
+def _reference_targets(
+    db_path: str, evidence: set[tuple[int, int]]
+) -> dict[tuple[int, int], tuple[str, str]]:
+    """Map each cited ``(doc_id, chunk_id)`` to ``(file:// href, "store — title — heading")``
+    so report references open the original vendor document."""
+    targets: dict[tuple[int, int], tuple[str, str]] = {}
+    if db_path == ":memory:" or not evidence:
+        return targets
+    with Store.open(db_path) as store:
+        for doc_id, chunk_id in evidence:
+            info = store.citation_target(doc_id, chunk_id)
+            if info is None:
+                continue
+            source, title, path, locator = info
+            parts = [p for p in (source, title or f"document {doc_id}") if p]
+            if locator and locator != title:
+                parts.append(locator)
+            label = " — ".join(parts)
+            try:
+                href = Path(path).as_uri() if path else ""
+            except ValueError:  # non-absolute path -> leave as-is
+                href = path
+            targets[(doc_id, chunk_id)] = (href, label)
+    return targets
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Render a cited answer spec (YAML) to an md/html report, verifying every citation
+    against the evidence the agent actually retrieved (refuses hallucinated references)."""
+    from . import citations, report
+
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    spec = yaml.safe_load(Path(args.spec).read_text(encoding="utf-8")) or {}
+    evidence = {(int(d), int(c)) for d, c in spec.get("evidence", [])}
+    fmt = args.format or ("html" if str(args.out or "").endswith(".html") else "md")
+    base_url = f"http://localhost:{cfg.serve.port}"
+    # header provenance: CLI flags win over spec fields (agents can pass either)
+    sources = list(spec.get("sources", [])) or [s.name for s in cfg.sources]
+    # References link to the ORIGINAL vendor document (file://), labelled "store — title —
+    # heading", so the reader can open the parsed source, not an opaque chunk URL.
+    ref_targets = _reference_targets(cfg.paths.db_path, evidence)
+    try:
+        rendered = report.render_report(
+            title=str(spec.get("title", "Report")),
+            subtitle=str(spec.get("subtitle", "")),
+            body=str(spec.get("body", "")),
+            sections=spec.get("sections"),
+            evidence=evidence,
+            base_url=base_url,
+            fmt=fmt,
+            run_id=runlog.RUN_ID,
+            audience=list(spec.get("audience", [])),
+            embed_model=cfg.embed.model,
+            sources=sources,
+            images=list(spec.get("images", [])),
+            request=args.request or str(spec.get("request", "")),
+            requested_by=args.requested_by or str(spec.get("requested_by", "")),
+            model=args.model or str(spec.get("model", "")),
+            classification=(
+                args.classification
+                if args.classification is not None
+                else str(spec.get("classification", "Confidential — Acme"))
+            ),
+            ref_targets=ref_targets,
+            trace=spec.get("trace"),
+        )
+    except citations.CitationError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(rendered, encoding="utf-8")
+        print(f"Wrote {fmt} report to {out}")
+    else:
+        print(rendered)
+    runlog.log("cli.report", spec=str(args.spec), out=str(args.out or "-"), fmt=fmt)
+    runlog.flush()
+    return 0
+
+
+def _json_result(query: str, hits: list[SearchHit]) -> dict[str, Any]:
+    """One query's hits as a plain dict — the agent-facing search shape."""
+    return {
+        "query": query,
+        "mode": hits[0].search_mode if hits else "bm25",
+        "embed_model": hits[0].embed_model_used if hits else "none",
+        "hits": [
+            {
+                "doc_id": h.doc_id,
+                "chunk_id": h.chunk_id,
+                "citation": h.citation,
+                "title": h.title,
+                "path": h.path,
+                "locator": h.locator,
+                "kind": h.kind,
+                "score": h.score,
+                "snippet": h.snippet,
+            }
+            for h in hits
+        ],
+    }
 
 
 def _graded_pass(entry: dict[str, Any], hits: list[SearchHit]) -> bool | None:
@@ -167,7 +485,19 @@ def _run_batch(catalog: Catalog, cfg: Config, args: argparse.Namespace) -> int:
     entries = yaml.safe_load(Path(args.batch_file).read_text(encoding="utf-8")) or []
     queries = [str(e.get("query", "")) for e in entries]
     top_k = args.top_k if args.top_k is not None else cfg.search.top_k_default
+    # One process, one model load, all queries embedded together — this is the throughput
+    # win over N separate `search` calls (each of which would reload the model).
     results = catalog.search(queries, top_k=top_k)
+    if args.json:  # agents: structured results for every query in the batch
+        print(
+            json.dumps(
+                [_json_result(q, hits) for q, hits in zip(queries, results, strict=False)],
+                ensure_ascii=False,
+            )
+        )
+        runlog.log("cli.search.batch", queries=len(entries), json=True)
+        runlog.flush()
+        return 0
     report = _render_golden(entries, results)
     out = (
         Path(args.out)
@@ -205,8 +535,43 @@ def _cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _self_heal_loop(cat: Catalog, minutes: int) -> None:  # pragma: no cover - lifetime loop
+    """Periodically prune orphaned documents for the life of a long-running server."""
+    while True:
+        time.sleep(minutes * 60)
+        try:
+            pruned = cat.prune_missing(apply=True)
+            if pruned:
+                runlog.log("serve.selfheal.periodic", pruned=pruned)
+        except Exception:  # noqa: BLE001 - a healer failure must never take the server down
+            pass
+
+
+def _start_self_heal(cat: Catalog, minutes: int) -> threading.Thread | None:
+    """Start the periodic self-heal as a daemon thread; ``None`` if disabled (minutes<=0)."""
+    if minutes <= 0:
+        return None
+    thread = threading.Thread(
+        target=_self_heal_loop, args=(cat, minutes), name="docusearch-selfheal", daemon=True
+    )
+    thread.start()
+    return thread
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:  # pragma: no cover - blocks on uvicorn
     cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    # Self-healing (R-ING): documents are keyed by absolute path, so a moved/renamed source
+    # folder leaves orphans. The server is long-running and rarely restarted, so prune on
+    # startup AND periodically (serve.self_heal_minutes) — never serve dead docs / broken refs.
+    cat = Catalog(cfg)
+    healed = cat.prune_missing(apply=True)
+    if healed:
+        print(
+            f"Self-heal: pruned {healed} orphaned documents (source files gone).", file=sys.stderr
+        )
+        runlog.log("serve.selfheal", pruned=healed)
+    _start_self_heal(cat, cfg.serve.self_heal_minutes)
     from .server import serve
 
     serve(cfg, host=args.host, port=args.port)  # blocks until interrupted
@@ -282,12 +647,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest = sub.add_parser("ingest", help="ingest sources into the index")
     p_ingest.add_argument("--config", default="docusearch.yaml", help="config path")
     p_ingest.add_argument("--dry-run", action="store_true", help="preview the plan, touch nothing")
-    p_ingest.add_argument("--force", action="store_true", help="re-ingest all (ignore hash cache)")
+    p_ingest.add_argument(
+        "--force",
+        action="store_true",
+        help="full rebuild: re-parse every file (ignore hash cache) AND re-embed all vectors",
+    )
+    p_ingest.add_argument(
+        "--reembed",
+        action="store_true",
+        help="drop existing vectors first, then re-embed (switch models / heal a mixed index)",
+    )
     p_ingest.set_defaults(func=_cmd_ingest)
 
     p_audit = sub.add_parser("audit", help="print the current index audit (counts + anomalies)")
     p_audit.add_argument("--config", default="docusearch.yaml", help="config path")
     p_audit.set_defaults(func=_cmd_audit)
+
+    p_remove = sub.add_parser("remove", help="purge everything ingested under a source label")
+    p_remove.add_argument("source", help="the source name to purge (e.g. delete_me_next)")
+    p_remove.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p_remove.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_remove.set_defaults(func=_cmd_remove)
+
+    p_models = sub.add_parser("models", help="list downloaded embedding models + how to delete")
+    p_models.set_defaults(func=_cmd_models)
+
+    p_prune = sub.add_parser("prune", help="remove documents whose source file no longer exists")
+    p_prune.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p_prune.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_prune.set_defaults(func=_cmd_prune)
+
+    p_inspect = sub.add_parser(
+        "inspect", help="sample a source and propose content_selector / strip_selectors"
+    )
+    p_inspect.add_argument("source", nargs="?", default=None, help="source name (default: first)")
+    p_inspect.add_argument("--sample", type=int, default=None, help="how many files to sample")
+    p_inspect.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_inspect.set_defaults(func=_cmd_inspect)
 
     p_search = sub.add_parser("search", help="search the index (hybrid if embeddings exist)")
     p_search.add_argument("query", nargs="?", help="search text (omit when using --batch-file)")
@@ -295,8 +691,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--prefix", action="store_true", help="prefix matching (partial terms)")
     p_search.add_argument("--batch-file", help="YAML goldens (id, query, expect_docs) to grade")
     p_search.add_argument("--out", help="write the graded golden report here")
+    p_search.add_argument("--json", action="store_true", help="emit hits as JSON (for agents)")
     p_search.add_argument("--config", default="docusearch.yaml", help="config path")
     p_search.set_defaults(func=_cmd_search)
+
+    p_report = sub.add_parser("report", help="render a cited answer spec (YAML) to md/html")
+    p_report.add_argument(
+        "--spec", required=True, help="YAML: title, body (with [D:] cites), evidence"
+    )
+    p_report.add_argument("--format", choices=("md", "html"), default=None, help="output format")
+    p_report.add_argument("--out", help="write here (default: stdout); format inferred from .html")
+    p_report.add_argument("--request", default="", help="the exact request this report answers")
+    p_report.add_argument("--requested-by", default="", help="user the report is for")
+    p_report.add_argument("--model", default="", help="model that generated the report")
+    p_report.add_argument(
+        "--classification",
+        default=None,
+        help="confidentiality banner (default: Confidential — Acme)",
+    )
+    p_report.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_report.set_defaults(func=_cmd_report)
 
     p_show = sub.add_parser("show", help="print a document's chunks by id")
     p_show.add_argument("doc_id", type=int, help="document id")
@@ -324,7 +738,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.func is None:
         parser.print_help(sys.stderr)
         return 2
-    result: int = args.func(args)
+    try:
+        result: int = args.func(args)
+    except (embed.EmbedError, config.ConfigError, StoreError) as err:
+        # Known, user-actionable failures (model mismatch, bad config, unusable DB):
+        # print just the guidance, not a Python traceback the user can't act on.
+        print(f"error: {err}", file=sys.stderr)
+        return 1
     return result
 
 

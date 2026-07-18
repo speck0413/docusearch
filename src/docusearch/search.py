@@ -139,8 +139,17 @@ class VectorIndex:
     def _stack(rows: list[tuple[int, bytes]], dim: int) -> tuple[np.ndarray, list[int]]:
         if not rows:
             return np.zeros((0, dim), dtype=np.float32), []
-        matrix = np.stack([np.frombuffer(blob, dtype=np.float32) for _, blob in rows])
-        return matrix.astype(np.float32), [cid for cid, _ in rows]
+        vectors = []
+        for cid, blob in rows:
+            vec = np.frombuffer(blob, dtype=np.float32)
+            if vec.shape[0] != dim:  # a mixed-model index (e.g. interrupted model swap)
+                raise ValueError(
+                    f"chunk {cid} has a {vec.shape[0]}-dim vector but the index dimension "
+                    f"is {dim}: the embeddings table mixes models. Heal it with "
+                    f"`docusearch ingest --reembed` (or use a fresh db_path)."
+                )
+            vectors.append(vec)
+        return np.stack(vectors).astype(np.float32), [cid for cid, _ in rows]
 
     @classmethod
     def build(

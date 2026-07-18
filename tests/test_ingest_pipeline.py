@@ -71,6 +71,42 @@ def corpus(tmp_path: Path) -> tuple[Path, cfg.Config]:
     return root, _config(root, tmp_path)
 
 
+def _index_dump(store: Store) -> tuple[list, list]:
+    docs = store._conn.execute(  # type: ignore[attr-defined]
+        "SELECT id, path, title, content_hash, source_version FROM documents ORDER BY id"
+    ).fetchall()
+    chunks = store._conn.execute(  # type: ignore[attr-defined]
+        "SELECT id, document_id, ord, kind, locator, text FROM chunks ORDER BY id"
+    ).fetchall()
+    return [tuple(r) for r in docs], [tuple(r) for r in chunks]
+
+
+def test_parallel_parse_is_byte_identical_to_serial(tmp_path: Path) -> None:
+    # The parse pool must never change the index: same doc/chunk ids, text, and order as a
+    # serial run (R-SRCH-5). Writes are applied in file order regardless of worker count.
+    root = tmp_path / "corpus"
+    root.mkdir()
+    _build_corpus(root)
+    for i in range(40):  # enough files that a pool is meaningful
+        (root / f"extra{i:02d}.html").write_text(
+            f"<body><h1>Doc {i}</h1><p>content about topic {i} timing bus registers here</p>"
+            f'<p>link <a href="index.html">home</a></p></body>',
+            encoding="utf-8",
+        )
+
+    def ingest_with(workers: int, name: str) -> tuple[list, list]:
+        run_dir = tmp_path / name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        config = _config(root, run_dir)
+        with Store.open(config.paths.db_path) as store:
+            ingest.run_ingest(config, store, workers=workers)
+            return _index_dump(store)
+
+    serial = ingest_with(1, "serial")
+    parallel = ingest_with(4, "parallel")
+    assert parallel == serial
+
+
 def test_ingest_counts(corpus: tuple[Path, cfg.Config]) -> None:
     root, config = corpus
     with Store.open(config.paths.db_path) as store:

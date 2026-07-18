@@ -35,9 +35,10 @@ def test_markdown_has_banner_body_and_references() -> None:
 def test_references_are_numbered_and_deduped() -> None:
     body = "A [D:1#2]. B [D:1#2]. C [D:5#7]."
     out = report.render_report(fmt="md", **_kwargs(body=body, evidence={(1, 2), (5, 7)}))  # type: ignore[arg-type]
-    assert "1. http://host:8321/v1/documents/1?chunk=2" in out
-    assert "2. http://host:8321/v1/documents/5?chunk=7" in out
-    assert "3. " not in out.split("## References")[1]  # deduped -> only 2 refs
+    refs = out.split("## References")[1]
+    assert "1. [" in refs and "http://host:8321/v1/documents/1?chunk=2" in refs
+    assert "http://host:8321/v1/documents/5?chunk=7" in refs
+    assert "3. " not in refs  # deduped -> only 2 refs
 
 
 def test_refuses_citation_outside_evidence() -> None:
@@ -69,6 +70,90 @@ def test_html_output_is_valid_ish() -> None:
     assert "<html" in out.lower() and "</html>" in out.lower()
     assert "SPI timing summary" in out
     assert 'href="http://host:8321/v1/documents/1?chunk=2"' in out
+
+
+def test_html_sections_render_as_cards_with_inline_citations() -> None:
+    sections = [
+        {"heading": "Overview", "kind": "overview", "body": "PA drives the bus [D:101#2]."},
+        {
+            "heading": "Example",
+            "kind": "code",
+            "body": "Run it [D:318#2]:\n```\npa.frame('WRITE')\n```\n",
+        },
+    ]
+    out = report.render_report(
+        fmt="html",
+        title="Protocol Aware",
+        sections=sections,  # type: ignore[arg-type]
+        evidence={(101, 2), (318, 2)},
+        base_url="http://host:8321",
+    )
+    assert 'class="card kind-overview"' in out and 'class="card kind-code"' in out
+    assert "<h2>Overview</h2>" in out and "<h2>Example</h2>" in out
+    # inline citation -> superscript link to the numbered reference anchor
+    assert '<sup class="cite"><a href="#ref-1">1</a></sup>' in out
+    assert 'id="ref-1"' in out and 'id="ref-2"' in out
+    assert '<pre class="code">' in out  # fenced code became a code block
+    assert "midnight" not in out.lower()  # (theme is via CSS vars, not literal text)
+    assert "#0a1730" in out  # the midnight-blue background is present in the inlined CSS
+
+
+def test_header_provenance_and_ai_warning() -> None:
+    out = report.render_report(
+        fmt="html",
+        request="how do I control PA",
+        requested_by="Stephen Peck",
+        model="claude-haiku-4-5",
+        classification="Confidential — Acme",
+        **_kwargs(),  # type: ignore[arg-type]
+    )
+    assert "Confidential — Acme" in out  # confidentiality ribbon
+    assert "AI-generated" in out and "double-checked" in out  # the warning
+    assert "how do I control PA" in out  # the exact request
+    assert "Stephen Peck" in out and "claude-haiku-4-5" in out  # who/what generated it
+    assert "vendor-html" in out  # document store name in the banner
+
+
+def test_references_link_to_original_documents() -> None:
+    # ref_targets overrides the chunk URL with a file link labelled store — title — heading
+    targets = {
+        (1, 2): ("file:///docs/acme/spi.html", "FOR_DEBUG — SPI Overview — Timing"),
+        (1, 3): ("file:///docs/acme/spi.html", "FOR_DEBUG — SPI Overview"),
+    }
+    out = report.render_report(
+        fmt="html",
+        ref_targets=targets,
+        **_kwargs(),  # type: ignore[arg-type]
+    )
+    assert 'href="file:///docs/acme/spi.html"' in out
+    assert "FOR_DEBUG — SPI Overview — Timing" in out
+    assert "v1/documents/1?chunk=2" not in out  # the chunk URL is gone
+
+
+def test_generation_log_is_collapsible_and_not_citation_verified() -> None:
+    trace = {
+        "prompt": "effort: high",
+        "queries": ["controlling PA", "PA engines"],
+        "retrieved": ["[D:9#999] some doc — snippet"],  # a chunk NOT in evidence is fine here
+        "reasoning": "grouped into cards by subsystem",
+    }
+    out = report.render_report(fmt="html", trace=trace, **_kwargs())  # type: ignore[arg-type]
+    assert "<details" in out and "Generation log" in out  # collapsible section present
+    assert "<details" in out and " open" not in out.split("Generation log")[0][-40:]  # collapsed
+    assert "controlling PA" in out and "grouped into cards" in out
+    # the trace's [D:9#999] must NOT be treated as a citation (it's a log, not a claim)
+    assert "some doc" in out
+
+
+def test_sections_citation_outside_evidence_is_refused() -> None:
+    with pytest.raises(citations.CitationError):
+        report.render_report(
+            fmt="html",
+            title="x",
+            sections=[{"heading": "H", "kind": "code", "body": "bad [D:9#999]"}],  # type: ignore[arg-type]
+            evidence={(1, 2)},
+            base_url="http://h",
+        )
 
 
 def test_deterministic() -> None:

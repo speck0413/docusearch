@@ -139,6 +139,20 @@ def test_hybrid_is_deterministic_across_independent_ingests(tmp_path: Path) -> N
     assert sigs[0] == sigs[1]  # byte-identical ranked hybrid results (R-SRCH-5)
 
 
+def test_vectorindex_stack_rejects_mixed_dims() -> None:
+    # defense-in-depth: a mixed-dimension embeddings table must raise an actionable error
+    # (pointing at --reembed), not the opaque numpy "all input arrays must have the same
+    # shape" that the interrupted-model-swap bug produced.
+    import numpy as np
+
+    rows = [
+        (1, np.zeros(8, dtype=np.float32).tobytes()),
+        (2, np.zeros(4, dtype=np.float32).tobytes()),  # wrong dim
+    ]
+    with pytest.raises(ValueError, match="reembed|mixes models"):
+        search.VectorIndex._stack(rows, 8)
+
+
 def test_rrf_fusion_math() -> None:
     fused = search._rrf([[10, 20, 30], [30, 40]], k=60)
     # 30 appears in both lists (rank 3 in first, rank 1 in second)

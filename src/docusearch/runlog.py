@@ -161,6 +161,17 @@ def flush() -> None:
         _active.flush()
 
 
+def active_log_path() -> Path | None:
+    """The JSONL file the process-wide logger writes to, or ``None`` if disabled.
+
+    Same path formula as the writer (``<log_dir>/<date>.jsonl``) so callers can tell the
+    user where to tail progress without reaching into internals."""
+    logger = _active
+    if logger is None or not logger.enabled:
+        return None
+    return logger._dir / f"{date.today().isoformat()}.jsonl"
+
+
 def shutdown() -> None:
     """Flush and stop the process-wide logger (also runs at exit)."""
     global _active
