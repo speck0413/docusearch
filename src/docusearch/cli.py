@@ -410,6 +410,42 @@ def _reference_targets(
     return targets
 
 
+_IMG_MEDIA = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp",
+              "bmp": "bmp", "svg": "svg+xml"}
+
+
+def _evidence_images(
+    db_path: str, staging_dir: str, evidence: set[tuple[int, int]]
+) -> list[tuple[str, str]]:
+    """For every cited image chunk, embed its retained diagram as a base64 ``data:`` URI so the
+    report is self-contained — the figure renders even if the original file later disappears.
+    Returns ``[(data_uri, caption)]``, deduped by image, in citation order."""
+    import base64
+
+    out: list[tuple[str, str]] = []
+    if db_path == ":memory:" or not evidence:
+        return out
+    images_dir = (Path(staging_dir) / "images").resolve()
+    seen: set[str] = set()
+    with Store.open(db_path) as store:
+        for doc_id, chunk_id in sorted(evidence):
+            for img in store.images_for_chunk(doc_id, chunk_id):
+                sha, ext = str(img["sha256"]), str(img["ext"] or "").lower()
+                if sha in seen:
+                    continue
+                path = (images_dir / f"{sha}.{ext}").resolve()
+                if not path.is_relative_to(images_dir) or not path.is_file():
+                    continue
+                seen.add(sha)
+                media = _IMG_MEDIA.get(ext, "png")
+                b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+                caption = " — ".join(
+                    t for t in (str(img["alt"] or ""), str(img["caption"] or "")) if t
+                ) or f"figure [D:{doc_id}#{chunk_id}]"
+                out.append((f"data:image/{media};base64,{b64}", caption))
+    return out
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     """Render a cited answer spec (YAML) to an md/html report, verifying every citation
     against the evidence the agent actually retrieved (refuses hallucinated references)."""
@@ -426,6 +462,8 @@ def _cmd_report(args: argparse.Namespace) -> int:
     # References link to the ORIGINAL vendor document (file://), labelled "store — title —
     # heading", so the reader can open the parsed source, not an opaque chunk URL.
     ref_targets = _reference_targets(cfg.paths.db_path, evidence)
+    # Embed any cited diagram directly in the report (self-contained; survives file moves).
+    embedded_images = _evidence_images(cfg.paths.db_path, cfg.paths.staging_dir, evidence)
     try:
         rendered = report.render_report(
             title=str(spec.get("title", "Report")),
@@ -440,6 +478,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
             embed_model=cfg.embed.model,
             sources=sources,
             images=list(spec.get("images", [])),
+            embedded_images=embedded_images,
             request=args.request or str(spec.get("request", "")),
             requested_by=args.requested_by or str(spec.get("requested_by", "")),
             model=args.model or str(spec.get("model", "")),

@@ -78,6 +78,7 @@ def render_report(
     embed_model: str = "none",
     sources: Sequence[str] = (),
     images: Sequence[str] = (),
+    embedded_images: Sequence[tuple[str, str]] = (),
     request: str = "",
     requested_by: str = "",
     model: str = "",
@@ -126,8 +127,12 @@ def render_report(
     refs = _references(ordered, base_url, ref_targets)
 
     if fmt == "html":
-        return _render_html(title, subtitle, header, meta, secs, numbering, refs, image_urls, trace)
-    return _render_markdown(title, subtitle, header, meta, secs, numbering, refs, image_urls, trace)
+        return _render_html(
+            title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images, trace
+        )
+    return _render_markdown(
+        title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images, trace
+    )
 
 
 def _trace_html(trace: Mapping[str, object] | None) -> str:
@@ -325,6 +330,7 @@ def _render_markdown(
     numbering: dict[tuple[int, int], int],
     refs: list[tuple[str, str]],
     image_urls: list[str],
+    embedded_images: Sequence[tuple[str, str]],
     trace: Mapping[str, object] | None,
 ) -> str:
     classification, request = header
@@ -344,8 +350,13 @@ def _render_markdown(
             out.append("")
         out.append(_cite_md(sec_body.strip(), numbering))
         out.append("")
-    if image_urls:
-        out += ["## Images", *[f"![image]({u})" for u in image_urls], ""]
+    if embedded_images or image_urls:
+        out += ["## Figures"]
+        # cited images are embedded inline (base64 data URI) so they render even if the
+        # original file disappears; server URLs (live-server case) follow.
+        out += [f"![{cap}]({src})" for src, cap in embedded_images]
+        out += [f"![image]({u})" for u in image_urls]
+        out += [""]
     ref_lines = [f"{i}. [{label}]({href})" for i, (href, label) in enumerate(refs, 1)]
     out += ["## References", *(ref_lines or ["(none)"]), ""]
     out += _trace_md(trace)
@@ -361,6 +372,7 @@ def _render_html(
     numbering: dict[tuple[int, int], int],
     refs: list[tuple[str, str]],
     image_urls: list[str],
+    embedded_images: Sequence[tuple[str, str]],
     trace: Mapping[str, object] | None,
 ) -> str:
     esc = _html.escape
@@ -378,12 +390,19 @@ def _render_html(
             f'<section class="card {cls}">{head}'
             f'<div class="card-body">{_blocks_html(sec_body, numbering)}</div></section>'
         )
-    if image_urls:
-        imgs = "".join(f'<img src="{esc(u)}" alt="figure">' for u in image_urls)
+    if embedded_images or image_urls:
+        # cited images are embedded inline as base64 data URIs, so the figure survives even if
+        # the original file is moved/deleted (self-contained HTML). Server URLs follow.
+        figs = "".join(
+            f'<figure><img src="{esc(src)}" alt="{esc(cap)}">'
+            f'<figcaption>{esc(cap)}</figcaption></figure>'
+            for src, cap in embedded_images
+        )
+        figs += "".join(f'<img src="{esc(u)}" alt="figure">' for u in image_urls)
         cards.append(
             '<section class="card kind-reference"><div class="card-head">'
             '<span class="ic">🖼️</span><h2>Figures</h2></div>'
-            f'<div class="card-body figures">{imgs}</div></section>'
+            f'<div class="card-body figures">{figs}</div></section>'
         )
     ref_items = (
         "".join(

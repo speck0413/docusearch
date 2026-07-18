@@ -165,3 +165,45 @@ def test_deterministic() -> None:
 def test_images_embedded_as_links() -> None:
     out = report.render_report(fmt="md", **_kwargs(images=["abc123"]))  # type: ignore[arg-type]
     assert "http://host:8321/v1/images/abc123" in out
+
+
+def test_embedded_images_render_as_data_uri_html_and_md() -> None:
+    # a cited diagram is embedded inline (base64 data URI) so the figure is self-contained.
+    data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+    imgs = [(data_uri, "UltraVS256-HP block diagram")]
+    html = report.render_report(fmt="html", embedded_images=imgs, **_kwargs())  # type: ignore[arg-type]
+    assert data_uri in html and "UltraVS256-HP block diagram" in html and "<figcaption>" in html
+    md = report.render_report(fmt="md", embedded_images=imgs, **_kwargs())  # type: ignore[arg-type]
+    assert f"![UltraVS256-HP block diagram]({data_uri})" in md
+
+
+def test_evidence_images_embeds_cited_diagram(tmp_path):  # type: ignore[no-untyped-def]
+    # end-to-end: a cited enrichment chunk -> its retained image -> a base64 data URI.
+    import hashlib
+    import io
+
+    from PIL import Image
+
+    from docusearch.cli import _evidence_images
+    from docusearch.store import Store
+
+    png = io.BytesIO()
+    Image.new("RGB", (8, 8), (200, 50, 50)).save(png, format="PNG")
+    data = png.getvalue()
+    sha = hashlib.sha256(data).hexdigest()
+    staging = tmp_path / "staging"
+    (staging / "images").mkdir(parents=True)
+    (staging / "images" / f"{sha}.png").write_bytes(data)
+    db = tmp_path / "c.db"
+    with Store.open(db) as store:
+        doc = store.add_document(path="/a.pdf")
+        store.add_image(sha256=sha, ext="png", doc_id=doc, locator="page 1",
+                        alt="block diagram", caption="", num_bytes=len(data))
+        cid = store.add_enrichment_chunk(doc, "Block diagram: a DAC drives the output.", "page 1")
+
+    imgs = _evidence_images(str(db), str(staging), {(doc, cid)})
+    assert imgs, "cited image chunk should yield an embedded figure"
+    assert imgs[0][0].startswith("data:image/png;base64,")
+    assert "block diagram" in imgs[0][1]
+    # a non-image (body) chunk yields nothing
+    assert _evidence_images(str(db), str(staging), {(doc, 999)}) == []

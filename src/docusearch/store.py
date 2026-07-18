@@ -501,6 +501,21 @@ class Store:
             ).fetchone()[0]
         )
 
+    def images_for_chunk(self, doc_id: int, chunk_id: int) -> list[sqlite3.Row]:
+        """Retained images associated with a cited chunk — for embedding a diagram directly in a
+        report. An ``enrichment``/``image_ref`` chunk shares its ``locator`` with its image (both
+        from the image's heading path), so map through ``(doc_id, locator)``. Returns
+        ``(sha256, ext, alt, caption)`` rows; empty for non-image chunks."""
+        row = self._conn.execute(
+            "SELECT kind, locator FROM chunks WHERE document_id=? AND id=?", (doc_id, chunk_id)
+        ).fetchone()
+        if row is None or row["kind"] not in ("enrichment", "image_ref"):
+            return []
+        return self._conn.execute(
+            "SELECT sha256, ext, alt, caption FROM images WHERE doc_id=? AND locator=?",
+            (doc_id, row["locator"]),
+        ).fetchall()
+
     def count_images(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])
 
