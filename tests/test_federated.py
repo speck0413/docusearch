@@ -5,9 +5,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from docusearch import config
 from docusearch.catalog import Catalog
-from docusearch.search import FederatedSearch
+from docusearch.search import FederatedMember, FederatedSearch
 from docusearch.store import Store
 
 
@@ -87,3 +89,32 @@ def test_federated_matches_single_combined_store(tmp_path: Path) -> None:
         single_top = bm25_search(ss, query, top_k=1)[0]
         fed_top = FederatedSearch([sa, sb, sc]).search(query, top_k=1)[0]
         assert fed_top.path.rsplit("/", 1)[-1] == single_top.path.rsplit("/", 1)[-1]
+
+
+def test_federated_subset_selection_by_name(tmp_path: Path) -> None:
+    # Named stores (Python, ACME, …); a query can be scoped to a subset so "only search ACME"
+    # never returns hits from the other stores.
+    py = _store_from_docs(tmp_path, "python", {"list.html": _doc("list", "COMMON13 append items to a python list")})
+    ig = _store_from_docs(tmp_path, "acme", {"match.html": _doc("match loop", "COMMON13 match loop single bit ATP in acme")})
+    with Store.open(py) as sp_, Store.open(ig) as si:
+        fed = FederatedSearch(
+            [FederatedMember(sp_, name="python"), FederatedMember(si, name="acme")]
+        )
+        assert set(fed.store_names()) == {"python", "acme"}
+
+        # COMMON13 is in BOTH stores; scoping to acme must return only the acme doc
+        acme_hits = fed.search("COMMON13", stores=["acme"])
+        assert acme_hits, "scoped search returned nothing"
+        assert all("acme-corpus" in h.path for h in acme_hits)
+        assert all("python-corpus" not in h.path for h in acme_hits)
+
+        # unscoped search sees both stores
+        all_hits = fed.search("COMMON13")
+        assert {"acme-corpus" in h.path for h in all_hits} == {True} or any(
+            "python-corpus" in h.path for h in all_hits
+        )
+        assert any("python-corpus" in h.path for h in all_hits)
+
+        # an unknown store name fails loudly rather than silently searching nothing
+        with pytest.raises(ValueError, match="unknown"):
+            fed.search("COMMON13", stores=["rust"])
