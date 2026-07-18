@@ -1,0 +1,91 @@
+# ============================================================
+# docusearch configuration
+# Generated 2026-07-17 by docusearch v0.1.0 — edit freely.
+# Every field is documented. Options are copy-paste ready.
+# ============================================================
+
+# Run mode.
+#   standalone : index + search + serve on this machine
+#   server     : ingestion/index/API host (does the heavy work)
+#   client     : thin client talking to server_url below
+mode: "standalone"
+
+# Only used when mode: client.
+server_url: "http://docs-server.local:8321"
+
+paths:
+  staging_dir: "./staging"  # mirrored sources + extracted images live here
+  db_path: "./catalog.db"  # SQLite database (one per index)
+  tmp_dir: "./tmp"  # ALL generated output (reports, logs, gates)
+
+# One entry per source folder. Copy the block to add more sources.
+sources:
+  - type: "fs"  # fs = filesystem folder (git/sharepoint later)
+    name: "vendor-html"  # a short label for this source
+    version: ""  # doc release/version, e.g. "2024.3" (blank = untracked)
+    location: "D:/docs/vendor-html"  # folder to ingest (Windows or POSIX)
+    include:  # glob whitelist
+      - "**/*.html"
+    exclude:  # glob blacklist (framework/nav noise)
+      - "**/nav/**"
+    # CSS selector for the real article body, e.g. "main.article".
+    # Empty = keep the whole page.
+    content_selector: ""
+    # CSS selectors removed before extraction,
+    # e.g. ["header", "footer", ".sidebar"].
+    strip_selectors: []
+    min_content_chars: 200  # below this after stripping => skipped and reported in the audit
+    # Who may see these docs (cooperative filter, not cryptographic).
+    # Documented values: company | engineering | test-eng | finance.
+    audience:
+      - "engineering"
+
+embed:
+  # Embedding model. Options:
+  #   none  -> BM25-only. Fastest, smallest, no model download. Good baseline.
+  #   auto  -> negotiate: ask the server what it uses; if that model fits
+  #            locally (see auto_max_mb) use it, else send plain text.
+  #   ...or a model id. Curated choices below (any Hugging Face
+  #   sentence-transformers id also works):
+  #     sentence-transformers/all-MiniLM-L6-v2   # 384d, ~90MB  - laptop default
+  #     BAAI/bge-small-en-v1.5                   # 384d, ~130MB - better quality
+  #     BAAI/bge-base-en-v1.5                    # 768d, ~440MB - server mid
+  #     BAAI/bge-large-en-v1.5                   # 1024d, ~1.3GB - server best
+  #     nomic-ai/nomic-embed-text-v1.5           # 768d, needs trust_remote_code
+  model: "sentence-transformers/all-MiniLM-L6-v2"
+  # Compute device for embedding:
+  #   auto -> best available (CUDA GPU, else Apple-Silicon Metal 'mps', else cpu)
+  #   cpu  -> most reproducible; cuda -> NVIDIA GPU; mps -> macOS GPU (Metal)
+  device: "auto"
+  batch_size: 128  # chunks embedded per batch
+  auto_max_mb: 200  # 'auto' loads the server's model locally only if smaller than this
+  trust_remote_code: false  # required true for some models (see list)
+
+index:
+  chunk_tokens: 350  # target chunk size (code blocks never split)
+  chunk_overlap: 40  # token overlap between adjacent chunks
+  ann: true  # build hnswlib ANN when embeddings exist
+  ann_m: 16  # hnswlib graph connectivity
+  ann_ef_construction: 200  # hnswlib build-time accuracy
+
+search:
+  top_k_default: 10  # results returned when not otherwise specified
+  rrf_k: 60  # RRF constant for hybrid fusion
+  bm25_only: false  # force-skip vectors at query time
+
+# Roles come from the DOCUSEARCH_ROLES env var on the client/agent process,
+# e.g. DOCUSEARCH_ROLES=engineering,test-eng
+serve:
+  host: "0.0.0.0"  # bind address
+  port: 8321  # HTTP port for REST + MCP
+  mcp_path: "/mcp"  # MCP over streamable HTTP mounts here
+
+# Phase 5+ enrichment — all off by default.
+enrich:
+  preflight_sample: 150  # docs sampled for rule proposal (temp 0)
+  ai_summaries: false  # Phase 5+ — off by default
+  vision_images: false  # Phase 5+ — off by default
+
+logging:
+  level: "info"  # debug | info | warning
+  jsonl: true  # tmp/logs/<date>.jsonl (async, non-blocking)

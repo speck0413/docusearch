@@ -12,7 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         # Windows 11 is first-class (R-ARCH-5): it runs the full suite, not a subset.
-        os: [windows-latest, ubuntu-latest]
+        # macOS covers the Apple-Silicon path (device: mps / auto -> Metal).
+        os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4

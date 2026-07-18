@@ -17,6 +17,11 @@ venv/
 .coverage
 coverage.xml
 htmlcov/
+test/
+
+# Operator config points at a private dataset — never commit it. The repo ships a generic
+# `docusearch.example.yaml`; the real config is passed with `--config` and stays untracked.
+/docusearch.yaml
 
 # docusearch generated output — ALL generated output lands under tmp/ (CLAUDE.md).
 # Exception: tmp/gates/ holds the gate files + evidence packs, which ARE the record
@@ -25,6 +30,7 @@ tmp/*
 !tmp/gates/
 staging/
 catalog.db
+*.db
 *.db-wal
 *.db-shm
 *.hnsw
