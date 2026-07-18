@@ -431,11 +431,33 @@ def _docx_heading_level(style_name: str) -> int:
     return int(tail) if tail.isdigit() else 1
 
 
-def _linearize_docx_table(table: object) -> str:
-    """Flatten a python-docx table to the same ``|``-separated form HTML tables use (§7.3)."""
+def _docx_cell_text(cell: object, links: list[LinkRef]) -> str:
+    """A cell's text = its own paragraphs **plus any nested tables** (recursed), while collecting
+    hyperlinks found inside the cell (R-ING-5). ``_Cell.text`` alone drops nested tables, so we
+    walk paragraphs and ``cell.tables`` explicitly — otherwise a table-in-a-cell is silent loss."""
+    parts: list[str] = []
+    for para in cell.paragraphs:  # type: ignore[attr-defined]
+        t = _clean(para.text)
+        if t:
+            parts.append(t)
+        for hl in para.hyperlinks:
+            if hl.address:
+                links.append(
+                    LinkRef(target=hl.address, anchor=_clean(hl.text), link_type="docx_hyperlink")
+                )
+    for nested in cell.tables:  # type: ignore[attr-defined]
+        nested_text = _linearize_docx_table(nested, links)
+        if nested_text:
+            parts.append(nested_text)
+    return " ".join(parts)
+
+
+def _linearize_docx_table(table: object, links: list[LinkRef]) -> str:
+    """Flatten a python-docx table to the same ``|``-separated form HTML tables use (§7.3),
+    recursing into nested tables and collecting in-cell hyperlinks (R-ING-5/6)."""
     rows: list[str] = []
     for row in table.rows:  # type: ignore[attr-defined]
-        cells = [_clean(cell.text) for cell in row.cells]
+        cells = [_docx_cell_text(cell, links) for cell in row.cells]
         if any(cells):
             rows.append(" | ".join(cells))
     return "\n".join(rows)
@@ -476,7 +498,7 @@ def extract_docx(data: bytes) -> ExtractedDoc:
                         LinkRef(target=hl.address, anchor=_clean(hl.text), link_type="docx_hyperlink")
                     )
         elif child.tag == qn("w:tbl"):
-            table_text = _linearize_docx_table(Table(child, doc_obj))
+            table_text = _linearize_docx_table(Table(child, doc_obj), links)
             if table_text:
                 segments.append(Segment("table", table_text, _heading_path(stack)))
     title = _clean(str(doc_obj.core_properties.title or ""))

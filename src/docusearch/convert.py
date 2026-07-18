@@ -76,6 +76,20 @@ def html_to_pdf_bytes(
     return buf.getvalue()
 
 
+def _add_docx_table(out: object, linearized: str) -> None:
+    """Rebuild a real DOCX table from a ``a | b`` / newline-per-row linearized segment, so rows
+    stay distinct (a flattened paragraph merges them) and ``extract_docx``'s table path is
+    exercised end-to-end by the derived corpus (§15.4)."""
+    grid = [row.split(" | ") for row in linearized.split("\n") if row.strip()]
+    if not grid:
+        return
+    ncols = max(len(cells) for cells in grid)
+    table = out.add_table(rows=len(grid), cols=ncols)  # type: ignore[attr-defined]
+    for ri, cells in enumerate(grid):
+        for ci, value in enumerate(cells):
+            table.rows[ri].cells[ci].text = value
+
+
 def html_to_docx_bytes(
     html: str, *, content_selector: str = "", strip_selectors: Sequence[str] = ()
 ) -> bytes:
@@ -99,8 +113,11 @@ def html_to_docx_bytes(
         if seg.heading_path and seg.heading_path != last_heading:
             out.add_heading(seg.heading_path, level=2)
             last_heading = seg.heading_path
-        # newlines -> spaces so code lines don't merge into an unbroken token run
-        out.add_paragraph(seg.text.replace("\n", " "))
+        if seg.kind == "table":
+            _add_docx_table(out, seg.text)  # a real DOCX table, so row boundaries survive
+        else:
+            # newlines -> spaces so code lines don't merge into an unbroken token run
+            out.add_paragraph(seg.text.replace("\n", " "))
     for img in doc.images:
         caption = " ".join(t for t in (img.alt, img.caption) if t).strip()
         if caption:

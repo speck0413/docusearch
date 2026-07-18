@@ -8,7 +8,7 @@ import io
 from pathlib import Path
 
 from docusearch.convert import convert_corpus, html_to_docx_bytes
-from docusearch.ingest import extract_docx, extract_document
+from docusearch.ingest import extract_document, extract_docx
 
 
 def _add_hyperlink(paragraph, url: str, text: str) -> None:  # type: ignore[no-untyped-def]
@@ -91,6 +91,55 @@ def test_html_to_docx_roundtrip_preserves_needles_all_placements() -> None:
     text = "\n".join(s.text for s in doc.segments)
     for nonce in ("PRO-1000-XX", "CODE-2000-YY", "TAB-3000-ZZ", "IMG-4000-WW"):
         assert nonce in text, f"{nonce} lost in HTML->DOCX->extract"
+
+
+def test_extract_docx_nested_table_not_dropped() -> None:
+    # red-team H1: a table nested inside another table's cell must NOT be silently lost.
+    from docx import Document
+
+    d = Document()
+    outer = d.add_table(rows=1, cols=1)
+    cell = outer.rows[0].cells[0]
+    cell.paragraphs[0].text = "outer OUT-1111-AA"
+    inner = cell.add_table(rows=1, cols=2)
+    inner.rows[0].cells[0].text = "NEST-2222-BB"
+    inner.rows[0].cells[1].text = "inner value"
+    buf = io.BytesIO()
+    d.save(buf)
+    text = "\n".join(s.text for s in extract_docx(buf.getvalue()).segments)
+    assert "OUT-1111-AA" in text  # outer cell text
+    assert "NEST-2222-BB" in text  # nested-table content survives (H1)
+
+
+def test_extract_docx_hyperlink_in_table_cell() -> None:
+    # red-team M1: a hyperlink whose only placement is inside a table cell must reach the graph.
+    from docx import Document
+
+    d = Document()
+    t = d.add_table(rows=1, cols=1)
+    _add_hyperlink(t.rows[0].cells[0].paragraphs[0], "https://example.com/incell", "in cell")
+    buf = io.BytesIO()
+    d.save(buf)
+    links = extract_docx(buf.getvalue()).links
+    assert any(lk.target == "https://example.com/incell" for lk in links)
+
+
+def test_html_to_docx_emits_real_table_rows_distinct() -> None:
+    # red-team M2: html_to_docx must emit a genuine DOCX table (not a flattened paragraph), so
+    # row boundaries survive and extract_docx's table path is exercised.
+    html = (
+        "<body><h1>T</h1>"
+        "<table><tr><td>R1C1-AAA</td><td>R1C2-BBB</td></tr>"
+        "<tr><td>R2C1-CCC</td><td>R2C2-DDD</td></tr></table></body>"
+    )
+    doc = extract_docx(html_to_docx_bytes(html))
+    tbl = [s for s in doc.segments if s.kind == "table"]
+    assert tbl, "table segment must round-trip as kind=table, not a paragraph"
+    # each source row is its own linearized row (not merged across the row boundary)
+    rows = tbl[0].text.splitlines()
+    assert any("R1C1-AAA | R1C2-BBB" in r for r in rows)
+    assert any("R2C1-CCC | R2C2-DDD" in r for r in rows)
+    assert not any("BBB R2C1" in r for r in rows)  # rows must not have flattened together
 
 
 def test_convert_corpus_docx(tmp_path: Path) -> None:
