@@ -253,15 +253,21 @@ def _add_link(node: Node, doc: ExtractedDoc) -> None:
 
 def _add_image(node: Node, heading_path: str, doc: ExtractedDoc, caption: str = "") -> None:
     src = node.attributes.get("src")
-    if src:
-        doc.images.append(
-            ImageRef(
-                src=src,
-                alt=node.attributes.get("alt") or "",
-                caption=caption,
-                heading_path=heading_path,
-            )
+    if not src:
+        return
+    # An inline data: URI carries the image bytes in the src itself — decode + retain it (R-ING-6),
+    # exactly as extract_md does; otherwise src is resolved from disk later.
+    data, ext = _decode_data_uri(src)
+    doc.images.append(
+        ImageRef(
+            src=src,
+            alt=node.attributes.get("alt") or "",
+            caption=caption,
+            heading_path=heading_path,
+            data=data,
+            ext=ext,
         )
+    )
 
 
 def _collect_links_images(node: Node, heading_path: str, doc: ExtractedDoc) -> None:
@@ -890,6 +896,7 @@ class IngestResult:
     chunks: int = 0
     embedded: int = 0
     images: int = 0
+    images_unresolved: int = 0  # referenced but not retained (missing on disk / remote)
     relations_total: int = 0
     relations_resolved: int = 0
     relations_unresolved: int = 0
@@ -932,6 +939,8 @@ def _stage_images(
                 ext = local.suffix.lstrip(".").lower() or "bin"
             else:
                 data = None
+                if local is not None:  # a LOCAL ref that didn't resolve to a file — actionable,
+                    result.images_unresolved += 1  # surfaced in the audit (not silently dropped)
         if data is not None:
             sha = hashlib.sha256(data).hexdigest()
             images_dir.mkdir(parents=True, exist_ok=True)
@@ -1330,6 +1339,8 @@ def render_ingest_audit(result: IngestResult, *, run_id: str = "") -> str:
         "",
         "## ⚠️ Skips & anomalies (review every non-zero line)",
         f"- stripped as too short (< min_content_chars): **{result.stripped_empty}**",
+        f"- image refs unresolved (local file missing — not retained/enrichable): "
+        f"**{result.images_unresolved}**",
         f"- content_selector matched nothing (fell back to body): **{result.content_selector_misses}**",
         f"- zero-chunk documents: **{result.zero_chunk_docs}**",
         f"- documents with no audience tag: **{result.untagged_audience_docs}**",

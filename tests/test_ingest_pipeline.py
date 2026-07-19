@@ -153,6 +153,39 @@ def test_ingest_images_retained(corpus: tuple[Path, cfg.Config]) -> None:
         assert len(staged) == 1  # pic.png copied, keyed by sha256
 
 
+def test_html_datauri_image_retained_and_missing_ref_surfaced(tmp_path: Path) -> None:
+    # An inline data: image in HTML must be RETAINED (decoded like Markdown does, R-ING-6) — not
+    # silently dropped — and a local image reference whose file is missing must be COUNTED
+    # (images_unresolved), surfaced in the audit rather than dropped in silence.
+    import base64
+
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMCAT/6JzFAAAAAAElFTkSuQmCC"
+    )
+    root = tmp_path / "docs"
+    root.mkdir()
+    b64 = base64.b64encode(png).decode()
+    (root / "p.html").write_text(
+        f'<body><h1>H</h1><img src="data:image/png;base64,{b64}" alt="inline">'
+        '<img src="missing.png" alt="missing"></body>',
+        encoding="utf-8",
+    )
+    path = tmp_path / "d.yaml"
+    path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 1\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(path)
+    with Store.open(config.paths.db_path) as store:
+        result = ingest.run_ingest(config, store)
+        assert result.images == 1  # the data: image retained (was silently dropped before)
+        assert result.images_unresolved == 1  # the missing local ref counted, not silent
+        assert store._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] == 1
+
+
 def test_ingest_incremental_skip(corpus: tuple[Path, cfg.Config]) -> None:
     root, config = corpus
     with Store.open(config.paths.db_path) as store:

@@ -125,10 +125,13 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     report_path.write_text(
         ingest.render_ingest_audit(result, run_id=runlog.RUN_ID), encoding="utf-8"
     )
+    unresolved = (
+        f", {result.images_unresolved} img refs unresolved" if result.images_unresolved else ""
+    )
     print(
         f"Ingested {result.documents} docs, {result.chunks} chunks, {result.images} images "
         f"({result.skipped_unchanged} unchanged, {result.stripped_empty} too short, "
-        f"{result.excluded_glob} excluded); embedded {result.embedded} chunks."
+        f"{result.excluded_glob} excluded{unresolved}); embedded {result.embedded} chunks."
     )
     print(f"Audit report: {report_path}")
     runlog.log("cli.ingest", documents=result.documents, chunks=result.chunks)
