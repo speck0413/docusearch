@@ -581,6 +581,11 @@ border-radius:20px;padding:5px 12px;cursor:pointer;font:inherit;font-size:12px;f
 .sortbtn{background:var(--code);border:1px solid var(--accent2);color:var(--accent);border-radius:20px;
 padding:5px 13px;cursor:pointer;font:inherit;font-size:12px;font-weight:700;}
 .sortbtn:hover{background:var(--accent2);color:#062033;}
+/* wafer map: a die grid coloured by pass/fail or soft bin */
+.wafermap{display:grid;grid-auto-rows:13px;gap:1px;justify-content:start;margin:12px 0;
+background:var(--code);padding:8px;border-radius:8px;overflow:auto;max-width:100%;}
+.die{width:13px;height:13px;border-radius:2px;background:var(--card2);}
+.die.pass{background:#3cb371;} .die.fail{background:#d64545;}
 td .tag,.tag{display:inline-block;background:var(--card2);border:1px solid var(--border);
 color:var(--accent2);border-radius:6px;padding:0 6px;margin:1px 2px;font-size:10.5px;font-weight:600;}
 /* fixed-size, self-scrolling table with a frozen header row; expand toggles a full-window overlay */
