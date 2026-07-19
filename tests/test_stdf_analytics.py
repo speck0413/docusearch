@@ -49,3 +49,23 @@ def test_audit_alignment_yield_and_conditions() -> None:
     assert rep.yield_a == (4, 4) and rep.yield_b == (3, 4)
     vmin = next(d for d in rep.matched if d.test_num == 1000)
     assert vmin.mean_delta is not None and vmin.mean_delta < 0  # B mean lower
+
+
+def test_report_builders_produce_self_contained_html() -> None:
+    run_a = _run([0.71, 0.72, 0.73, 0.74])
+    run_b = _run([0.69, 0.72, 0.73, 0.74], add_extra=True)
+    # single-test plot
+    plot = stdf_analytics.plot_test_html(run_a, 1000, kind="histogram", backend="matplotlib")
+    assert "VMIN" in plot and "data:image/png" in plot and "mean=" in plot
+    # site compare
+    sc = stdf_analytics.site_compare_html(_run([0.71, 0.9], sites=[1, 2]), 1000)
+    assert "site-to-site" in sc and "data:image/png" in sc
+    # trend
+    tr = stdf_analytics.trend_html([("r1", run_a), ("r2", run_b)], 1000, backend="matplotlib")
+    assert "trend" in tr and "data:image/png" in tr
+    # audit drill-down
+    rep = stdf_analytics.audit_report_html(run_a, run_b, label_a="lotA", label_b="lotB")
+    assert "STDF audit" in rep and "Yield" in rep
+    assert "<details>" in rep  # per-test drill-down
+    assert "2000" in rep  # the added IDDQ test noted
+    assert "data:image/png" in rep  # Q-Q plots embedded
