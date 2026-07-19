@@ -56,6 +56,19 @@ def test_related_documents_out_in_and_nhop() -> None:
         }
 
 
+def test_related_documents_ranks_by_link_strength() -> None:
+    # A references C three times and B once; C (the stronger link) must rank first even though its
+    # doc_id is higher — link strength beats id order.
+    with Store.open(":memory:") as store:
+        a, b, c = (_doc(store, x) for x in ("a", "b", "c"))
+        _link(store, a, b, "b")
+        for _ in range(3):
+            _link(store, a, c, "c")
+        ranked = store.related_documents(a, "out", depth=1)
+        assert [r["doc_id"] for r in ranked] == [c, b]  # C first: weight 3 > 1
+        assert ranked[0]["weight"] == 3 and ranked[1]["weight"] == 1
+
+
 def test_related_documents_is_cycle_safe_and_excludes_self() -> None:
     # A <-> B cycle must not spin, and A must never list itself.
     with Store.open(":memory:") as store:

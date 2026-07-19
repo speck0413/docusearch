@@ -789,8 +789,11 @@ class Store:
         """Documents reachable from ``doc_id`` over the resolved relations graph (R-ING-5, §17
         N-hop), walked up to ``depth`` hops via a recursive CTE. direction: ``out`` (docs this one
         links to), ``in`` (docs that link to this one), ``both``. Returns one row per reachable
-        doc — its SHORTEST hop count, path, title, and (for direct hops) link_type — ordered
-        (hops, doc_id). Self is excluded; the depth cap bounds the walk so cycles can't spin."""
+        doc — its SHORTEST hop count, path, title, link_type, and a ``weight`` (how many times the
+        source directly references it — the link-strength signal). Ranked by **(hops, −weight,
+        doc_id)**: the most-referenced direct neighbours first, so on a densely-linked corpus the
+        genuinely-related pages beat one-off nav links. Self excluded; the depth cap bounds the
+        walk so cycles can't spin."""
         depth = max(1, depth)
         wanted = ("out", "in") if direction == "both" else (direction,)
         reach: dict[int, tuple[int, str]] = {}  # doc -> (shortest hops, direction)
@@ -815,14 +818,20 @@ class Store:
                     reach[doc] = (hops, d)
         if not reach:
             return []
-        # link_type only for direct (1-hop) neighbours — ambiguous once you chain edges.
-        direct: dict[tuple[int, str], str] = {}
+        # Direct-edge occurrence counts (link strength) + link_type, per neighbour+direction. Only
+        # meaningful for 1-hop neighbours — multi-hop weight/link_type is ambiguous.
+        weight: dict[tuple[int, str], int] = {}
+        link_type: dict[tuple[int, str], str] = {}
         for row in self.relations_out(doc_id):
             if row["dst_doc"] is not None:
-                direct.setdefault((int(row["dst_doc"]), "out"), str(row["link_type"] or ""))
+                key = (int(row["dst_doc"]), "out")
+                weight[key] = weight.get(key, 0) + 1
+                link_type.setdefault(key, str(row["link_type"] or ""))
         for row in self.relations_in(doc_id):
             if row["src_doc"] is not None:
-                direct.setdefault((int(row["src_doc"]), "in"), str(row["link_type"] or ""))
+                key = (int(row["src_doc"]), "in")
+                weight[key] = weight.get(key, 0) + 1
+                link_type.setdefault(key, str(row["link_type"] or ""))
         meta = {
             int(m["id"]): m
             for m in self._conn.execute(
@@ -831,8 +840,13 @@ class Store:
                 tuple(reach),
             ).fetchall()
         }
+
+        def _weight(doc: int) -> int:
+            hops, dirn = reach[doc]
+            return weight.get((doc, dirn), 0) if hops == 1 else 0
+
         out: list[dict[str, object]] = []
-        for doc in sorted(reach, key=lambda d: (reach[d][0], d)):
+        for doc in sorted(reach, key=lambda d: (reach[d][0], -_weight(d), d)):
             hops, dirn = reach[doc]
             m = meta.get(doc)
             out.append(
@@ -842,7 +856,8 @@ class Store:
                     "title": str(m["title"]) if m else "",
                     "hops": hops,
                     "direction": dirn,
-                    "link_type": direct.get((doc, dirn), "") if hops == 1 else "",
+                    "link_type": link_type.get((doc, dirn), "") if hops == 1 else "",
+                    "weight": _weight(doc),
                 }
             )
         return out
