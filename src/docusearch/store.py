@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _MEMORY = ":memory:"
 
@@ -222,12 +222,32 @@ CREATE TABLE data_values (
 CREATE INDEX idx_data_values_col ON data_values(col_id);
 """
 
+# Migration 6 = feedback as first-class, ranking-eligible data (Phase 8 / R-FB). A user's feedback is
+# stored **per-user** (private to them) with an option to promote it to **global** (everyone). It
+# carries a rating and an optional (doc_id, chunk_id) target so it can adjust search ranking and be
+# reconciled against the source hierarchy (feedback > internal > vendor).
+_SCHEMA_V6 = """
+CREATE TABLE feedback (
+    id       INTEGER PRIMARY KEY,
+    ts       TEXT,
+    author   TEXT,
+    scope    TEXT,               -- 'user' (private to author) | 'global' (everyone)
+    doc_id   INTEGER,
+    chunk_id INTEGER,
+    rating   INTEGER,            -- -1 (wrong/down) | 0 (note) | +1 (right/up)
+    text     TEXT
+);
+CREATE INDEX idx_feedback_author ON feedback(author);
+CREATE INDEX idx_feedback_target ON feedback(doc_id, chunk_id);
+"""
+
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
     (5, _SCHEMA_V5),
+    (6, _SCHEMA_V6),
 )
 
 
@@ -618,6 +638,54 @@ class Store:
     def count_data_values(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM data_values").fetchone()[0])
 
+    # ---- feedback (Phase 8): per-user + global, ranking-eligible -----------------------------
+
+    def add_feedback(
+        self, *, author: str, scope: str, text: str, doc_id: int | None = None,
+        chunk_id: int | None = None, rating: int | None = None,
+    ) -> int:
+        """Record one piece of feedback and return its id. ``scope`` is ``user`` (private to
+        ``author``) or ``global`` (visible to everyone)."""
+        cur = self._conn.execute(
+            "INSERT INTO feedback(ts, author, scope, doc_id, chunk_id, rating, text) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (_utcnow_iso(), author, scope, doc_id, chunk_id, rating, text),
+        )
+        self._maybe_commit()
+        return int(cur.lastrowid or 0)
+
+    def feedback_entries(
+        self, *, author: str | None = None, include_global: bool = True
+    ) -> list[sqlite3.Row]:
+        """Feedback **visible to ``author``**: their own private entries plus every global entry.
+        With ``author=None`` and ``include_global`` False → nothing; None + global → global only."""
+        clauses, params = [], []
+        if author is not None:
+            clauses.append("(author = ? AND scope = 'user')")
+            params.append(author)
+        if include_global:
+            clauses.append("scope = 'global'")
+        if not clauses:
+            return []
+        return self._conn.execute(
+            "SELECT id, ts, author, scope, doc_id, chunk_id, rating, text FROM feedback "
+            "WHERE " + " OR ".join(clauses) + " ORDER BY id",
+            params,
+        ).fetchall()
+
+    def feedback_scores(self, *, author: str | None = None) -> dict[int, int]:
+        """Net rating per **document** visible to ``author`` (own private + global) — the signal that
+        nudges search ranking. ``{doc_id: sum(rating)}``, skipping entries with no doc target."""
+        scores: dict[int, int] = {}
+        for r in self.feedback_entries(author=author, include_global=True):
+            did, rating = r["doc_id"], r["rating"]
+            if did is not None and rating is not None:
+                scores[int(did)] = scores.get(int(did), 0) + int(rating)
+        return scores
+
+    def count_feedback(self) -> int:
+        return int(self._conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0])
+
     def stdf_documents(self) -> list[sqlite3.Row]:
         """Every STDF document with its SKU (the ``source`` label = part SKU/name it was filed under),
         lot, distinct insertions, and result/part counts — the file catalog behind ``stdf ls``.
@@ -709,6 +777,7 @@ class Store:
                 "DELETE FROM data_values WHERE col_id IN "
                 "(SELECT id FROM data_columns WHERE doc_id=?)", (doc_id,))
             c.execute("DELETE FROM data_columns WHERE doc_id=?", (doc_id,))
+            c.execute("DELETE FROM feedback WHERE doc_id=?", (doc_id,))
             c.execute("DELETE FROM documents WHERE id=?", (doc_id,))
 
     def document_ids_for_source(self, source: str) -> list[int]:

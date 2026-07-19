@@ -41,9 +41,10 @@ def test_delete_document_clears_data_tables(tmp_path: Path) -> None:
         assert store.count_data_values() == 0 and store.data_columns() == []
 
 
-def test_store_opens_at_schema_5(tmp_path: Path) -> None:
+def test_store_opens_at_current_schema(tmp_path: Path) -> None:
+    from docusearch.store import SCHEMA_VERSION
     with Store.open(str(tmp_path / "c.db")) as store:
-        assert store._read_version() == 5  # noqa: SLF001  (migration 5 applied)
+        assert store._read_version() == SCHEMA_VERSION  # noqa: SLF001
         names = {r[0] for r in store._conn.execute(  # noqa: SLF001
             "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert {"data_columns", "data_values"} <= names
+        assert {"data_columns", "data_values", "feedback"} <= names

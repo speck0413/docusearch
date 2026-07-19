@@ -216,22 +216,27 @@ class Service:
 
     def submit_feedback(
         self, *, user: str, text: str, doc_id: int | None = None,
-        chunk_id: int | None = None, rating: int | None = None,
+        chunk_id: int | None = None, rating: int | None = None, make_global: bool = False,
     ) -> dict[str, Any]:
-        """Record a user's feedback as an append-only JSONL line under the config's ``tmp_dir``
-        (``feedback/feedback.jsonl``) — lightweight, persistent, reviewable."""
+        """Record a user's feedback in the store (Phase 8). It is **private to ``user``** by default;
+        ``make_global`` promotes it to everyone. A ``rating`` (-1/0/+1) with a ``doc_id`` target makes
+        it ranking-eligible. Also mirrored to an append-only JSONL under ``tmp_dir`` for easy review."""
         import json
-        from datetime import UTC, datetime
 
+        scope = "global" if make_global else "user"
+        with Store.open(self.config.paths.db_path) as store:
+            fb_id = store.add_feedback(
+                author=user, scope=scope, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating,
+            )
         entry = {
-            "ts": datetime.now(UTC).isoformat(), "user": user, "text": text,
+            "id": fb_id, "user": user, "scope": scope, "text": text,
             "doc_id": doc_id, "chunk_id": chunk_id, "rating": rating,
         }
         fb_dir = Path(self.config.paths.tmp_dir) / "feedback"
         fb_dir.mkdir(parents=True, exist_ok=True)
         with (fb_dir / "feedback.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        runlog.log("api.feedback", user=user, rating=rating)
+        runlog.log("api.feedback", user=user, scope=scope, rating=rating)
         return {"recorded": True, **entry}
 
     def discrepancies(
@@ -829,7 +834,8 @@ class FeedbackRequest(BaseModel):
     text: str  # the user's feedback
     doc_id: int | None = None  # optional: which document/result it's about
     chunk_id: int | None = None
-    rating: int | None = None  # optional thumbs / 1-5
+    rating: int | None = None  # optional thumbs (-1/0/+1)
+    make_global: bool = False  # promote from private (default) to everyone
 
 
 class EmbedRequest(BaseModel):
@@ -1275,11 +1281,13 @@ def build_mcp(service: Service, config: Config) -> Any:
     @mcp.tool()
     def submit_feedback(
         text: str, user: str, doc_id: int | None = None, chunk_id: int | None = None,
-        rating: int | None = None,
+        rating: int | None = None, make_global: bool = False,
     ) -> dict[str, Any]:
-        """Record a user's feedback (attributed to `user`)."""
+        """Record a user's feedback (attributed to `user`). Private to that user by default; set
+        `make_global=true` to share with everyone. A `rating` (-1/0/+1) on a `doc_id` nudges ranking."""
         return service.submit_feedback(
-            user=user, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating
+            user=user, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating,
+            make_global=make_global,
         )
 
     @mcp.tool()
@@ -1566,7 +1574,8 @@ def create_app(config: Config) -> FastAPI:
         """Record user feedback (attributed to X-Docusearch-User)."""
         user = _require_user(request)
         return service.submit_feedback(
-            user=user, text=req.text, doc_id=req.doc_id, chunk_id=req.chunk_id, rating=req.rating
+            user=user, text=req.text, doc_id=req.doc_id, chunk_id=req.chunk_id, rating=req.rating,
+            make_global=req.make_global,
         )
 
     @app.post("/v1/ingest")
