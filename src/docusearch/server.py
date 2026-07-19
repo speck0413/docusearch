@@ -862,6 +862,43 @@ class Service:
             "capability": analytics.capability(vals, lo, hi),
         }
 
+    def list_code(
+        self, *, language: str | None = None, kind: str | None = None, name_like: str | None = None,
+        doc_id: int | None = None, limit: int = 100000,
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Symbols in a **code store** (functions/classes/methods/…), optionally filtered by language,
+        kind, name glob (SQL LIKE, e.g. ``open%``), or document — the catalog the ``code`` CLI/MCP
+        lists and an agent browses to find a snippet to code against. Gated for a private store."""
+        with Store.open(self._db_for_read(store, user, groups)) as db:
+            rows = db.code_symbols_query(language=language, kind=kind, name_like=name_like,
+                                         doc_id=doc_id, limit=limit)
+        symbols = [
+            {"qualname": str(r["qualname"]), "name": str(r["name"]), "kind": str(r["kind"]),
+             "language": str(r["language"]), "signature": str(r["signature"] or ""),
+             "docstring": str(r["docstring"] or ""), "parent": str(r["parent"] or ""),
+             "path": str(r["path"] or ""), "start_line": int(r["start_line"] or 0),
+             "end_line": int(r["end_line"] or 0)}
+            for r in rows
+        ]
+        return {"symbols": symbols, "count": len(symbols)}
+
+    def code_style_guide(
+        self, *, language: str | None = None, store: str | None = None,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Derive the house **style guide** from a code store's symbols (naming conventions, docstring
+        coverage, typing discipline, structure) and render a themed report. One language or all."""
+        from . import code_index, code_style
+
+        with Store.open(self._db_for_read(store, user, groups)) as db:
+            rows = db.code_symbols_query(language=language)
+        symbols = [code_index.symbol_from_row(r) for r in rows]
+        guides = ([code_style.derive_style(symbols, language)] if language
+                  else code_style.derive_all(symbols))
+        return {"html": code_style.style_guide_html(guides),
+                "languages": [g.language for g in guides if g.counts]}
+
     def relations(
         self, doc_id: int, direction: str = "both", *, depth: int = 1,
         store: str | None = None, user: str | None = None, groups: set[str] | None = None,
@@ -1327,6 +1364,37 @@ def build_mcp(service: Service, config: Config) -> Any:
                                      store=store, user=user, groups=_grp(groups))
         except (PermissionError, ValueError) as err:
             return {"error": "DATA", "message": str(err)}
+
+    @mcp.tool()
+    def list_code(
+        language: str | None = None, kind: str | None = None, name_like: str | None = None,
+        doc_id: int | None = None, store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """List symbols in a **code store** (functions/classes/methods/…) with their qualified name,
+        kind, language, signature, docstring, and line span. Filter by `language`, `kind`, a `name_like`
+        glob (SQL LIKE, e.g. `open%`), or `doc_id`. The catalog to browse for a snippet to code
+        against; pair with `search_docs` to find one by intent. Gated for a private store."""
+        try:
+            return service.list_code(language=language, kind=kind, name_like=name_like,
+                                     doc_id=doc_id, store=store, user=user, groups=_grp(groups))
+        except (PermissionError, ValueError) as err:
+            return {"error": "CODE", "message": str(err), "symbols": [], "count": 0}
+
+    @mcp.tool()
+    def code_styleguide(
+        language: str | None = None, store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Derive the house **style guide** from a code store: dominant naming convention per symbol
+        group, docstring coverage, typing discipline, and structure — the conventions to follow when
+        writing new code that fits the repo. One `language` or all. Returns a self-contained HTML
+        report + the languages covered."""
+        try:
+            return service.code_style_guide(language=language, store=store, user=user,
+                                            groups=_grp(groups))
+        except (PermissionError, ValueError) as err:
+            return {"error": "CODE", "message": str(err)}
 
     @mcp.tool()
     def wafer_map(

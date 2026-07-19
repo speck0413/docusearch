@@ -1224,6 +1224,42 @@ def _cmd_data_plot(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_code_ls(args: argparse.Namespace) -> int:
+    _cfg, client = _stdf_client(args)
+    res = client.call("list_code", language=args.language or None, kind=args.kind or None,
+                      name_like=args.name or None, store=args.store, user=args.user or None)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    syms = res.get("symbols", [])
+    if not syms:
+        print("No symbols matched.")
+        return 0
+    print(f"{'kind':<9} {'language':<11} {'qualname':<40} location")
+    for s in syms:
+        loc = f"{s['path']}:{s['start_line']}"
+        print(f"{s['kind'][:9]:<9} {s['language'][:11]:<11} {s['qualname'][:40]:<40} {loc}")
+    print(f"\n{len(syms)} symbol(s)")
+    return 0
+
+
+def _cmd_code_styleguide(args: argparse.Namespace) -> int:
+    cfg, client = _stdf_client(args)
+    res = client.call("code_styleguide", language=args.language or None,
+                      store=args.store, user=args.user or None)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    langs = "-".join(res.get("languages", [])) or "code"
+    out = _save_report(cfg, args.out, f"styleguide_{langs}", res["html"])
+    print(f"Wrote style guide {out}  ({', '.join(res.get('languages', [])) or 'no languages'})")
+    runlog.log("cli.code_styleguide", languages=res.get("languages", []), out=str(out))
+    runlog.flush()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="docusearch",
@@ -1485,6 +1521,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_dpl.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
     _add_stdf_common(p_dpl)
     p_dpl.set_defaults(func=_cmd_data_plot)
+
+    p_code = sub.add_parser("code", help="source-code store tools (symbols + style guide) over MCP")
+    p_code.set_defaults(func=None)
+    code_sub = p_code.add_subparsers(dest="code_command")
+
+    p_cls = code_sub.add_parser("ls", help="list code symbols (functions/classes/methods)")
+    p_cls.add_argument("--language", default="", help="filter by language (python/javascript/...)")
+    p_cls.add_argument("--kind", default="", help="filter by kind (function/method/class/...)")
+    p_cls.add_argument("--name", default="", help="filter by name/qualname (SQL LIKE, e.g. open%%)")
+    _add_stdf_common(p_cls)
+    p_cls.set_defaults(func=_cmd_code_ls)
+
+    p_csg = code_sub.add_parser("styleguide", help="derive the house style guide from the code store")
+    p_csg.add_argument("--language", default="", help="one language (default: all present)")
+    p_csg.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
+    _add_stdf_common(p_csg)
+    p_csg.set_defaults(func=_cmd_code_styleguide)
 
     return parser
 

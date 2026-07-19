@@ -94,6 +94,18 @@ def detect_language(path: str) -> str | None:
     return _EXT.get(PurePosixPath(path).suffix.lower())
 
 
+def symbol_from_row(row: object) -> Symbol:
+    """Rebuild a :class:`Symbol` from a ``code_symbols`` store row (for the style-guide deriver)."""
+    r = row  # a sqlite3.Row (mapping access)
+    return Symbol(
+        language=str(r["language"]), kind=str(r["kind"]), name=str(r["name"]),  # type: ignore[index]
+        qualname=str(r["qualname"]), signature=str(r["signature"] or ""),        # type: ignore[index]
+        docstring=str(r["docstring"] or ""), start_line=int(r["start_line"] or 0),  # type: ignore[index]
+        end_line=int(r["end_line"] or 0), parent=str(r["parent"] or ""),         # type: ignore[index]
+        path=str(r["path"] or ""),                                               # type: ignore[index]
+    )
+
+
 @cache
 def _parser(language: str) -> Parser:
     from tree_sitter import Language, Parser
