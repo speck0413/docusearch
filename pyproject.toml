@@ -85,6 +85,19 @@ stdf-analytics = [
   "matplotlib>=3.8",
   "plotly>=5.20",
 ]
+# Source-code repo analysis (Phase 9 / GATE 9). tree-sitter gives language-aware, error-tolerant
+# parsing; each grammar ships its compiled parser in its own wheel (no runtime download → offline-
+# capable). Individual grammar packages (not the runtime-downloading language-pack) so nothing hits
+# the network at parse time. Lazy-imported; adding a language = one pinned grammar + a LANG_SPECS row.
+code = [
+  "tree-sitter>=0.23",
+  "tree-sitter-python>=0.23",
+  "tree-sitter-javascript>=0.23",
+  "tree-sitter-typescript>=0.23",
+  "tree-sitter-go>=0.23",
+  "tree-sitter-rust>=0.23",
+  "tree-sitter-java>=0.23",
+]
 # Cloud image enrichment (enrich.vision_images). Off by default; lazy-imported so core
 # ingest/search never pull the SDK. The SDK owns the Messages-API request shape, typed
 # errors, retries, and credential resolution (env key or `ant auth login` profile).
@@ -161,7 +174,9 @@ no_implicit_reexport = false  # __init__.py re-exports the public API (R-ARCH-2)
 [[tool.mypy.overrides]]
 module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "reportlab.*",
           "docx", "docx.*", "markdown_it", "markdown_it.*", "pptx", "pptx.*", "openpyxl",
-          "openpyxl.*", "pystdf", "pystdf.*", "matplotlib", "matplotlib.*", "plotly", "plotly.*"]
+          "openpyxl.*", "pystdf", "pystdf.*", "matplotlib", "matplotlib.*", "plotly", "plotly.*",
+          "tree_sitter_python", "tree_sitter_javascript", "tree_sitter_typescript",
+          "tree_sitter_go", "tree_sitter_rust", "tree_sitter_java"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _MEMORY = ":memory:"
 
@@ -241,6 +241,31 @@ CREATE INDEX idx_feedback_author ON feedback(author);
 CREATE INDEX idx_feedback_target ON feedback(doc_id, chunk_id);
 """
 
+# Migration 7 = structured source-code symbols (Phase 9 / GATE 9). A `store_type: code` store parses
+# each file into functions/classes/methods; alongside the searchable per-symbol chunk, the symbol's
+# structured fields land here so non-AI tools (the `code` CLI/MCP, the style-guide deriver) can query
+# by language / kind / name without re-parsing.
+_SCHEMA_V7 = """
+CREATE TABLE code_symbols (
+    id         INTEGER PRIMARY KEY,
+    doc_id     INTEGER REFERENCES documents(id),
+    chunk_id   INTEGER REFERENCES chunks(id),
+    language   TEXT,
+    kind       TEXT,               -- function | method | class | struct | interface | trait | enum | type
+    name       TEXT,
+    qualname   TEXT,
+    signature  TEXT,
+    docstring  TEXT,
+    start_line INTEGER,
+    end_line   INTEGER,
+    parent     TEXT,
+    path       TEXT
+);
+CREATE INDEX idx_code_symbols_doc  ON code_symbols(doc_id);
+CREATE INDEX idx_code_symbols_kind ON code_symbols(language, kind);
+CREATE INDEX idx_code_symbols_name ON code_symbols(name);
+"""
+
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
@@ -248,6 +273,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (4, _SCHEMA_V4),
     (5, _SCHEMA_V5),
     (6, _SCHEMA_V6),
+    (7, _SCHEMA_V7),
 )
 
 
@@ -594,6 +620,46 @@ class Store:
 
     def count_stdf_results(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM stdf_results").fetchone()[0])
+
+    # ---- structured source-code symbols (Phase 9): queryable by non-AI tools + the style deriver ---
+
+    def add_code_symbols(self, rows: Sequence[tuple]) -> None:  # type: ignore[type-arg]
+        """Bulk-insert code symbols (doc_id, chunk_id, language, kind, name, qualname, signature,
+        docstring, start_line, end_line, parent, path)."""
+        if rows:
+            self._conn.executemany(
+                "INSERT INTO code_symbols(doc_id, chunk_id, language, kind, name, qualname, "
+                "signature, docstring, start_line, end_line, parent, path) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+            self._maybe_commit()
+
+    def code_symbols_query(
+        self, *, language: str | None = None, kind: str | None = None, name_like: str | None = None,
+        doc_id: int | None = None, limit: int = 100000,
+    ) -> list[sqlite3.Row]:
+        """Symbols with optional filters (language / kind / name glob / doc), in source order —
+        the data behind ``code ls`` and the style-guide deriver, queryable without AI."""
+        clauses, params = [], []
+        for col, val in (("language", language), ("kind", kind), ("doc_id", doc_id)):
+            if val is not None:
+                clauses.append(f"{col}=?")
+                params.append(val)
+        if name_like:
+            clauses.append("(name LIKE ? OR qualname LIKE ?)")
+            params += [name_like, name_like]
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        return self._conn.execute(
+            "SELECT doc_id, chunk_id, language, kind, name, qualname, signature, docstring, "
+            "start_line, end_line, parent, path FROM code_symbols" + where
+            + " ORDER BY doc_id, start_line LIMIT ?",
+            params,
+        ).fetchall()
+
+    def count_code_symbols(self) -> int:
+        return int(self._conn.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0])
 
     # ---- generic columnar data (Phase 10): any CSV/table, queryable + plottable by non-AI tools ---
 

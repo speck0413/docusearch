@@ -1026,6 +1026,7 @@ class IngestResult:
     gotchas: int = 0  # chunks dual-tagged [GOTCHA] + flags row (R-ING-8)
     stdf_tests: int = 0  # test chunks written from STDF files (R-STDF-1)
     data_columns: int = 0  # numeric columns written from CSV/table data files (Phase 10)
+    code_symbols: int = 0  # symbols (functions/classes/…) written from source-code files (Phase 9)
     relations_total: int = 0
     relations_resolved: int = 0
     relations_unresolved: int = 0
@@ -1261,6 +1262,64 @@ def _write_stdf(
                 locator=f"part {part.part_id} {part.insertion}",
             )
         result.chunks += len(run.parts)
+
+
+def _code_symbol_text(sym: object) -> str:
+    """A searchable rendering of one symbol: its language/kind/qualname, signature, and docstring."""
+    s = sym
+    return "\n".join(
+        p for p in (f"{s.language} {s.kind} {s.qualname}", s.signature, s.docstring) if p  # type: ignore[attr-defined]
+    )
+
+
+def _write_code(
+    path: Path, source: SourceConfig, config: Config, store: Store, result: IngestResult
+) -> None:
+    """Ingest one source-code file (Phase 9): parse it into symbols (functions/classes/methods/…) with
+    tree-sitter, then write a document plus one **searchable chunk per symbol** (signature + docstring),
+    and the symbol's structured fields to ``code_symbols`` for non-AI querying + style derivation. A
+    file with no top-level symbols still gets one locator chunk so it's findable by path."""
+    from . import code_index  # lazy: the [code] extra is only loaded for a code file
+
+    language = code_index.detect_language(path.name)
+    if language is None:  # routed here only when detect_language matched — defensive
+        return
+    old = store.document_id_for_path(str(path))
+    if old is not None:
+        store.delete_document(old)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            rel = path.relative_to(Path(source.location)).as_posix()
+        except ValueError:
+            rel = path.name
+        symbols = code_index.parse_symbols(text, language, path=rel)
+    except Exception as exc:  # noqa: BLE001 - a bad source file is reported, not fatal to the run
+        result.parse_errors += 1
+        result.errors.append((str(path), f"code parse failed: {type(exc).__name__}: {exc}"))
+        return
+    doc_id = store.add_document(
+        path=str(path), source=source.name, source_version=source.version, title=rel,
+        content_hash=content_hash(path), content_type="source-code", fmt=language,
+        audience=source.audience, mtime=path.stat().st_mtime, status="active",
+    )
+    result.documents += 1
+    rows: list[tuple[object, ...]] = []
+    for ordv, sym in enumerate(symbols):
+        chunk_id = store.add_chunk(
+            document_id=doc_id, ord=ordv, text=_code_symbol_text(sym), kind=sym.kind,
+            locator=f"{sym.qualname} @ {rel}:{sym.start_line}",
+        )
+        rows.append((
+            doc_id, chunk_id, sym.language, sym.kind, sym.name, sym.qualname, sym.signature,
+            sym.docstring, sym.start_line, sym.end_line, sym.parent, sym.path,
+        ))
+    store.add_code_symbols(rows)
+    if not symbols:  # a script with only top-level statements — keep it findable by path/language
+        store.add_chunk(document_id=doc_id, ord=0, text=f"{language} source {rel}", kind="file",
+                        locator=rel)
+    result.chunks += max(len(symbols), 1)
+    result.code_symbols += len(symbols)
 
 
 def _csv_summary(ds: object) -> str:
@@ -1530,12 +1589,20 @@ def run_ingest(
             s.csv_delimiter or s.csv_widths
         )
 
+    # In a `code` store, source files with a recognised language route to the code writer (a symbol is
+    # already a unit, like a test / a column); everything else in the store still chunks normally.
+    def _is_code(p: Path, s: SourceConfig) -> bool:
+        from . import code_index
+        return config.store_type == "code" and code_index.detect_language(p.name) is not None
+
     stdf_work = [(p, s) for p, s in worklist if p.suffix.lower() in (".stdf", ".std")]
     rest = [(p, s) for p, s in worklist if p.suffix.lower() not in (".stdf", ".std")]
+    code_work = [(p, s) for p, s in rest if _is_code(p, s)]
+    rest = [(p, s) for p, s in rest if not _is_code(p, s)]
     csv_work = [(p, s) for p, s in rest if _is_table(p, s)]
     worklist = [(p, s) for p, s in rest if not _is_table(p, s)]
 
-    total_files = len(worklist) + len(stdf_work) + len(csv_work)
+    total_files = len(worklist) + len(stdf_work) + len(csv_work) + len(code_work)
     # Build one picklable parse task per file (the DB's current hashes let workers decide
     # skip-vs-reparse without touching the DB).
     stored = store.document_hashes()
@@ -1560,6 +1627,17 @@ def run_ingest(
                 else:
                     _write_table(path, source, config, store, result)
                     ext = path.suffix.lstrip(".").lower() or "table"
+                    result.per_extension[ext] = result.per_extension.get(ext, 0) + 1
+                store.commit()
+    if code_work:
+        with store.deferred_commits():
+            for path, source in code_work:
+                key = path.resolve().as_posix()
+                if not force and stored.get(key) == content_hash(path):
+                    result.skipped_unchanged += 1
+                else:
+                    _write_code(path, source, config, store, result)
+                    ext = path.suffix.lstrip(".").lower() or "code"
                     result.per_extension[ext] = result.per_extension.get(ext, 0) + 1
                 store.commit()
     tasks = [

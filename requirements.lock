@@ -76,3 +76,12 @@ uvicorn==0.51.0
 python-docx==1.2.0
 lxml==6.1.1
 mdit-py-plugins==0.6.1
+# Phase 9 / GATE 9 — source-code repo analysis (the [code] extra). Individual grammar wheels ship
+# their compiled parser (offline; no runtime download).
+tree-sitter==0.26.0
+tree-sitter-python==0.25.0
+tree-sitter-javascript==0.25.0
+tree-sitter-typescript==0.23.2
+tree-sitter-go==0.25.0
+tree-sitter-rust==0.24.2
+tree-sitter-java==0.23.5
