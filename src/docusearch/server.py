@@ -686,6 +686,70 @@ class Service:
         pk = stdf_analytics.parse_part_key(part_key or self.config.stdf.part_key)
         return {"insertions": stdf_analytics.insertion_yield(parts, part_key=pk)}
 
+    # -- generic columnar data (Phase 10): any CSV/table, queried + plotted the same way -----
+
+    def data_columns(
+        self, *, store: str | None = None, user: str | None = None, groups: set[str] | None = None
+    ) -> dict[str, Any]:
+        """Every numeric column in a data store (id, dataset, name, kind, units, limits, n) — the
+        catalog a caller (agent, thin web UI, script) lists to pick something to query or plot."""
+        with Store.open(self._db_for_read(store, user, groups)) as db:
+            cols = [
+                {"id": int(r["id"]), "dataset": str(r["dataset"] or ""), "name": str(r["name"] or ""),
+                 "kind": str(r["kind"] or ""), "units": str(r["units"] or ""),
+                 "lo": r["lo"], "hi": r["hi"], "n": int(r["n"] or 0)}
+                for r in db.data_columns()
+            ]
+        return {"columns": cols}
+
+    def data_values(
+        self, column_id: int, *, store: str | None = None,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """One column's values (+ group per row) as plain JSON — the data behind a plot/query, no AI."""
+        with Store.open(self._db_for_read(store, user, groups)) as db:
+            rows = db.data_values(column_id=column_id)
+        return {"values": [{"row": int(r["row_idx"]), "value": r["value"], "group": r["grp"]}
+                           for r in rows]}
+
+    def data_plot(
+        self, column_id: int, *, kind: str = "histogram", backend: str = "", by_group: bool = False,
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Plot one stored data column with the general engine (histogram/whisker/quantile/…): red
+        limit lines for lo/hi, capability stats, and — with ``by_group`` — one series per group
+        (e.g. site). Works on ANY table's column, not just STDF."""
+        from . import analytics
+
+        with Store.open(self._db_for_read(store, user, groups)) as db:
+            meta = next((c for c in db.data_columns() if int(c["id"]) == column_id), None)
+            if meta is None:
+                raise ValueError(f"no data column with id {column_id}")
+            rows = db.data_values(column_id=column_id)
+        vals = [float(r["value"]) for r in rows]
+        name, lo, hi = str(meta["name"]), meta["lo"], meta["hi"]
+        vlines = [float(x) for x in (lo, hi) if x is not None]
+        be = self._backend(backend)
+        if by_group and any(r["grp"] for r in rows):
+            grouped: dict[str, list[float]] = {}
+            for r in rows:
+                grouped.setdefault(str(r["grp"]), []).append(float(r["value"]))
+            html = analytics.render_plot(
+                kind if kind != "histogram" else "whisker",
+                series=[(g, v) for g, v in sorted(grouped.items())],
+                title=f"{name} by group", ylabel=name, backend=be, vlines=vlines,
+            )
+        else:
+            html = analytics.render_plot(
+                kind, y=vals, series=None, title=f"{name} distribution", xlabel=name,
+                ylabel="count", backend=be, vlines=vlines,
+            )
+        return {
+            "html": html, "column": name, "n": len(vals),
+            "stats": analytics.summary_stats(vals),
+            "capability": analytics.capability(vals, lo, hi),
+        }
+
     def relations(
         self, doc_id: int, direction: str = "both", *, depth: int = 1,
         store: str | None = None, user: str | None = None, groups: set[str] | None = None,
@@ -1081,6 +1145,44 @@ def build_mcp(service: Service, config: Config) -> Any:
             return {"error": "UPLOAD", "message": str(err)}
 
     @mcp.tool()
+    def list_data(
+        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """List the numeric columns in a **data store** (any ingested CSV/table, not just STDF): each
+        column's id, dataset, name, units, spec limits, and count. Pick a column id to query
+        (`data_values`) or plot (`data_plot`). Gated for a private store."""
+        try:
+            return service.data_columns(store=store, user=user, groups=_grp(groups))
+        except (PermissionError, ValueError) as err:
+            return {"error": "DATA", "message": str(err), "columns": []}
+
+    @mcp.tool()
+    def data_values(
+        column_id: int, store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Pull one data column's values (+ per-row group) as plain JSON — the raw data behind a plot
+        or your own analysis, from any ingested table."""
+        try:
+            return service.data_values(column_id, store=store, user=user, groups=_grp(groups))
+        except (PermissionError, ValueError) as err:
+            return {"error": "DATA", "message": str(err), "values": []}
+
+    @mcp.tool()
+    def data_plot(
+        column_id: int, kind: str = "histogram", backend: str = "", by_group: bool = False,
+        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Plot one stored data column (any CSV/table) with the general engine. kind: histogram |
+        whisker | quantile | qq | xy | linear. `by_group` draws one series per group (e.g. site).
+        Red lines mark the column's lo/hi limits; returns a self-contained HTML fragment + stats."""
+        try:
+            return service.data_plot(column_id, kind=kind, backend=backend, by_group=by_group,
+                                     store=store, user=user, groups=_grp(groups))
+        except (PermissionError, ValueError) as err:
+            return {"error": "DATA", "message": str(err)}
+
+    @mcp.tool()
     def stdf_plot(
         doc_id: int, test_num: int, kind: str = "histogram", backend: str = "",
         store: str | None = None, user: str | None = None, groups: list[str] | None = None,
@@ -1362,6 +1464,41 @@ def create_app(config: Config) -> FastAPI:
             return service.stdf_data_yield(part_key=part_key, store=store, user=user, groups=groups)
         except PermissionError as err:
             raise HTTPException(status_code=403, detail=str(err)) from err
+
+    @app.get("/v1/data/columns")
+    def data_columns(request: Request, store: str | None = None) -> dict[str, Any]:
+        """Numeric columns in a data store (any CSV/table) — a thin web UI's column picker, no AI."""
+        user, groups = _read_identity(request)
+        try:
+            return service.data_columns(store=store, user=user, groups=groups)
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+
+    @app.get("/v1/data/columns/{column_id}/values")
+    def data_column_values(
+        column_id: int, request: Request, store: str | None = None
+    ) -> dict[str, Any]:
+        user, groups = _read_identity(request)
+        try:
+            return service.data_values(column_id, store=store, user=user, groups=groups)
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+        except ValueError as err:
+            raise HTTPException(status_code=404, detail=str(err)) from err
+
+    @app.get("/v1/data/columns/{column_id}/plot")
+    def data_column_plot(
+        column_id: int, request: Request, kind: str = "histogram", backend: str = "",
+        by_group: bool = False, store: str | None = None,
+    ) -> dict[str, Any]:
+        user, groups = _read_identity(request)
+        try:
+            return service.data_plot(column_id, kind=kind, backend=backend, by_group=by_group,
+                                     store=store, user=user, groups=groups)
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+        except ValueError as err:
+            raise HTTPException(status_code=404, detail=str(err)) from err
 
     @app.post("/v1/data/plot")
     def data_plot(req: dict[str, Any]) -> dict[str, Any]:
