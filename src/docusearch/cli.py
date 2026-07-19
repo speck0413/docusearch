@@ -20,7 +20,6 @@ The console entry point is ``main`` (see pyproject ``[project.scripts]``).
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import sys
@@ -76,6 +75,29 @@ class _ProgressBar:
             self._last_decile[phase] = decile
             self._stream.write(f"  {phase}: {done}/{total} ({pct}%)\n")
             self._stream.flush()
+
+
+def _cmd_bootstrap(args: argparse.Namespace) -> int:
+    """Scan a repo/folder and emit a starter docusearch.yaml matched to its content (task #35)."""
+    from . import bootstrap
+
+    root = Path(args.directory)
+    if not root.is_dir():
+        print(f"error: {args.directory!r} is not a directory", file=sys.stderr)
+        return 2
+    text = bootstrap.bootstrap_config(root, name=args.name or None)
+    if args.out:
+        out = Path(args.out)
+        if out.exists() and not args.force:
+            print(f"error: {out} exists (use --force to overwrite)", file=sys.stderr)
+            return 1
+        out.write_text(text, encoding="utf-8")
+        print(f"Wrote starter config to {out}\nReview it, then: docusearch ingest --config {out}")
+    else:
+        print(text)
+    runlog.log("cli.bootstrap", directory=str(root), out=args.out or "(stdout)")
+    runlog.flush()
+    return 0
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -414,10 +436,28 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
     sample_n = args.sample if args.sample is not None else cfg.enrich.preflight_sample
     random.seed(0)  # deterministic sample
     picked = random.sample(files, min(sample_n, len(files)))
-    docs = []
-    for f in picked:
-        with contextlib.suppress(OSError):
-            docs.append(f.read_text("utf-8", errors="replace"))
+
+    # PDFs: font pre-analysis (task #34) — report how headings will be inferred at ingest.
+    pdf_bytes = [f.read_bytes() for f in picked if f.suffix.lower() == ".pdf"]
+    if pdf_bytes:
+        prof = ingest.pdf_font_profile(pdf_bytes)
+        print(f"PDF font profile ({prof.sampled} sampled, {prof.pages} pages):")
+        print(f"  body text ≈ {prof.body_size:g} pt")
+        if prof.detected:
+            mapping = ", ".join(f"{size:g}pt → H{lvl}" for size, lvl in sorted(prof.levels.items(),
+                                                                                key=lambda kv: kv[1]))
+            print(f"  headings inferred from font size: {mapping}  ({len(prof.levels)} levels)")
+            print("  → sections will be named by this heading path (not a flat 'page N').")
+        else:
+            print("  no heading-sized fonts — body located by 'page N' (uniform font document).")
+        print()
+
+    docs = [f.read_text("utf-8", errors="replace") for f in picked
+            if f.suffix.lower() in (".html", ".htm")]
+    if not docs:
+        runlog.log("cli.inspect", source=src.name, sampled=len(picked), pdfs=len(pdf_bytes))
+        runlog.flush()
+        return 0
     result = inspector.inspect_html(docs)
 
     print(f"Inspected {result.sampled} of {len(files)} files in source {src.name!r}\n")
@@ -1280,6 +1320,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--config", default="docusearch.yaml", help="config path to write")
     p_init.add_argument("--force", action="store_true", help="overwrite an existing config")
     p_init.set_defaults(func=_cmd_init)
+
+    p_boot = sub.add_parser("bootstrap",
+                            help="scan a repo/folder and emit a starter config matched to its content")
+    p_boot.add_argument("directory", help="the repo/folder to scan")
+    p_boot.add_argument("--name", default="", help="source name (default: the folder name)")
+    p_boot.add_argument("--out", default=None, help="write here (default: print to stdout)")
+    p_boot.add_argument("--force", action="store_true", help="overwrite an existing --out file")
+    p_boot.set_defaults(func=_cmd_bootstrap)
 
     p_ingest = sub.add_parser("ingest", help="ingest sources into the index")
     p_ingest.add_argument("--config", default="docusearch.yaml", help="config path")

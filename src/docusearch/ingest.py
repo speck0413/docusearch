@@ -28,7 +28,8 @@ import os
 import re
 import time
 import warnings
-from collections.abc import Callable, Iterator, Sequence
+from collections import Counter
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -432,21 +433,68 @@ def _pdf_page_lines(page: object) -> list[tuple[float, bool, str]]:
     return out
 
 
-def _pdf_heading_levels(pages: list[tuple[int, list[tuple[float, bool, str]]]]) -> dict[float, int]:
-    """Map each heading-sized font to a level (1 = largest). The body size is the most common
-    size (by character count); sizes clearly larger than it are headings, ranked descending.
-    Returns {} when the document has no size variation (fall back to page locators)."""
-    from collections import Counter
+def _heading_levels_from_weight(weight: Mapping[float, int]) -> dict[float, int]:
+    """Map each heading-sized font to a level (1 = largest) from a size→char-weight histogram. The
+    body size is the most common size; sizes clearly larger than it are headings, ranked descending.
+    Returns {} when there is no size variation (fall back to page locators)."""
+    if not weight:
+        return {}
+    body_size = max(weight.items(), key=lambda kv: kv[1])[0]
+    heading_sizes = sorted((s for s in weight if s > body_size * 1.12), reverse=True)
+    return {size: min(idx + 1, 6) for idx, size in enumerate(heading_sizes)}
 
+
+def _pdf_heading_levels(pages: list[tuple[int, list[tuple[float, bool, str]]]]) -> dict[float, int]:
+    """Heading font → level for one PDF's extracted lines (see :func:`_heading_levels_from_weight`)."""
     weight: Counter[float] = Counter()
     for _, plines in pages:
         for size, _bold, text in plines:
             weight[size] += len(text)
-    if not weight:
-        return {}
-    body_size = weight.most_common(1)[0][0]
-    heading_sizes = sorted((s for s in weight if s > body_size * 1.12), reverse=True)
-    return {size: min(idx + 1, 6) for idx, size in enumerate(heading_sizes)}
+    return _heading_levels_from_weight(weight)
+
+
+@dataclass
+class PdfFontProfile:
+    """The font-size fingerprint of one or more PDFs — a **config hint** for how headings will be
+    inferred at ingest (R-ING-4). ``levels`` maps a heading font size to its level (1 = largest);
+    ``body_size`` is the dominant body font; ``coverage`` is the size→char-count histogram."""
+
+    sampled: int
+    pages: int
+    body_size: float
+    levels: dict[float, int]
+    coverage: dict[float, int]
+
+    @property
+    def detected(self) -> bool:
+        return bool(self.levels)
+
+
+def pdf_font_profile(datas: Sequence[bytes]) -> PdfFontProfile:
+    """Analyse the font sizes across a sample of PDFs and report how their headings will be inferred
+    — the pre-analysis behind ``docusearch inspect``/``bootstrap`` (R-ING-7, task #34). Lazy-imports
+    the ``[pdf]`` extra; a PDF that fails to open is skipped, not fatal."""
+    import fitz  # lazy: the [pdf] extra
+
+    weight: Counter[float] = Counter()
+    sampled = 0
+    total_pages = 0
+    for data in datas:
+        try:
+            doc_obj = fitz.open(stream=data, filetype="pdf")
+        except Exception:  # noqa: BLE001 - a bad PDF is skipped, the sample still profiles
+            continue
+        try:
+            sampled += 1
+            total_pages += doc_obj.page_count
+            for i in range(doc_obj.page_count):
+                for size, _bold, text in _pdf_page_lines(doc_obj.load_page(i)):
+                    weight[size] += len(text)
+        finally:
+            doc_obj.close()
+    body = max(weight.items(), key=lambda kv: kv[1])[0] if weight else 0.0
+    return PdfFontProfile(sampled=sampled, pages=total_pages, body_size=body,
+                          levels=_heading_levels_from_weight(weight), coverage=dict(weight))
 
 
 def extract_pdf(data: bytes) -> ExtractedDoc:
