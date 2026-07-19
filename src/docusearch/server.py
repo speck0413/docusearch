@@ -15,18 +15,19 @@ Public surface:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import citations, embed, report, runlog, search
 from ._version import __version__
-from .catalog import open_federation
-from .config import Config, load
+from .catalog import Catalog, open_federation
+from .config import Config, SourceConfig, load
 from .search import SearchHit
 from .store import Store
 
@@ -196,6 +197,53 @@ class Service:
         return {
             "federated": bool(self.config.federation),
             "stores": [m.name for m in self.config.federation],
+        }
+
+    def _target_config(self, store: str | None) -> Config:
+        """Resolve which store to ingest into: a named federation member (vendor / internal / user
+        / acme …) or, with no name, this config's own single store."""
+        if store and self.config.federation:
+            for member in self.config.federation:
+                if member.name == store:
+                    return load(Path(member.config))
+            raise ValueError(
+                f"unknown store {store!r}; available: {[m.name for m in self.config.federation]}"
+            )
+        return self.config
+
+    def ingest_from_path(
+        self,
+        path: str | Path,
+        *,
+        store: str | None = None,
+        label: str = "upload",
+        uploaded_by: str = "",
+        min_content_chars: int = 1,
+    ) -> dict[str, Any]:
+        """Ingest a **folder** or an uploaded **.zip/.tar.gz** (uncompressed into the target store's
+        staging) as a labelled source, into the chosen store (R-ING write path). ``label`` tags the
+        collection; ``uploaded_by`` records who added it. Returns the ingest counts."""
+        target = self._target_config(store)
+        src_path = Path(path)
+        if src_path.is_dir():
+            location = src_path
+        elif _is_archive(src_path):
+            location = Path(target.paths.staging_dir) / "uploads" / label
+            location.mkdir(parents=True, exist_ok=True)
+            _safe_extract(src_path, location)
+        else:
+            raise ValueError("provide a folder or a .zip / .tar.gz archive")
+        source = SourceConfig(
+            type="fs", name=label, version=uploaded_by, location=str(location),
+            include=[], exclude=[], content_selector="", strip_selectors=[],
+            min_content_chars=min_content_chars, audience=[],
+        )
+        result = Catalog(replace(target, sources=[source])).ingest()
+        runlog.log("api.ingest", store=store or "default", label=label, docs=result.documents,
+                   by=uploaded_by)
+        return {
+            "store": store or "default", "label": label, "uploaded_by": uploaded_by,
+            "documents": result.documents, "chunks": result.chunks, "images": result.images,
         }
 
     def build_report(self, spec: dict[str, Any], *, base_url: str, fmt: str = "md") -> str:
@@ -392,6 +440,13 @@ class SearchRequest(BaseModel):
     stores: list[str] | None = None  # federation: scope to named member stores
 
 
+class IngestRequest(BaseModel):
+    path: str  # a server-side folder OR a .zip/.tar.gz archive to uncompress + ingest
+    store: str | None = None  # target federation member (vendor/internal/user/…); default single
+    label: str = "upload"  # collection tag for the added docs
+    min_content_chars: int = 1
+
+
 class EmbedRequest(BaseModel):
     texts: list[str] = []
 
@@ -435,6 +490,34 @@ def _request_identity(request: Request) -> tuple[str | None, set[str]]:
     raw = request.headers.get("X-Docusearch-Groups") or ""
     groups = {g.strip() for g in raw.split(",") if g.strip()}
     return user, groups
+
+
+def _is_archive(path: Path) -> bool:
+    return path.suffix.lower() == ".zip" or path.name.lower().endswith((".tar.gz", ".tgz", ".tar"))
+
+
+def _safe_extract(archive: Path, dest: Path) -> None:
+    """Extract a ``.zip`` / ``.tar.gz`` into ``dest``, refusing any member whose path escapes
+    ``dest`` (zip-slip / tar traversal). Windows-first (pathlib), stdlib only."""
+    import tarfile
+    import zipfile
+
+    dest = dest.resolve()
+
+    def _guard(name: str) -> None:
+        if not (dest / name).resolve().is_relative_to(dest):
+            raise ValueError(f"unsafe path in archive: {name!r}")
+
+    if archive.suffix.lower() == ".zip":
+        with zipfile.ZipFile(archive) as zf:
+            for name in zf.namelist():
+                _guard(name)
+            zf.extractall(dest)
+    else:  # tar / tar.gz
+        with tarfile.open(archive) as tf:
+            for member in tf.getmembers():
+                _guard(member.name)
+            tf.extractall(dest, filter="data")  # py3.12+: refuse special files / abs paths
 
 
 _MCP_HELP = """# docusearch — research + cited report (MCP)
@@ -549,6 +632,16 @@ def build_mcp(service: Service, config: Config) -> Any:
     def catalog_stats() -> dict[str, Any]:
         """Counts + embedding model for the catalog."""
         return service.health()
+
+    @mcp.tool()
+    def ingest_docs(
+        path: str, user: str, store: str | None = None, label: str = "upload"
+    ) -> dict[str, Any]:
+        """Ingest a server-side folder or .zip/.tar.gz into `store`, labelled + attributed to `user`."""
+        try:
+            return service.ingest_from_path(path, store=store, label=label, uploaded_by=user)
+        except (ValueError, FileNotFoundError) as err:
+            return {"error": "INGEST", "message": str(err)}
 
     @mcp.tool()
     def build_report(spec: dict[str, Any], fmt: str = "md") -> dict[str, Any]:
@@ -682,6 +775,47 @@ def create_app(config: Config) -> FastAPI:
             ) from err
         runlog.log("api.report", fmt=req.fmt, evidence=len(req.evidence))
         return {"fmt": req.fmt, "report": rendered}
+
+    def _require_user(request: Request) -> str:
+        # A write always records who did it — the username must be supplied (R write-auth).
+        user, _ = _request_identity(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="X-Docusearch-User header required to ingest")
+        return user
+
+    @app.post("/v1/ingest")
+    def ingest_route(req: IngestRequest, request: Request) -> dict[str, Any]:
+        """Ingest a server-side folder or .zip/.tar.gz path into a store, labelled + attributed."""
+        user = _require_user(request)
+        try:
+            return service.ingest_from_path(
+                req.path, store=req.store, label=req.label, uploaded_by=user,
+                min_content_chars=req.min_content_chars,
+            )
+        except (ValueError, FileNotFoundError) as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+
+    @app.post("/v1/ingest/upload")
+    async def ingest_upload_route(
+        request: Request,
+        file: UploadFile = File(...),  # noqa: B008 - FastAPI dependency default
+        store: str | None = Form(None),  # noqa: B008
+        label: str = Form("upload"),  # noqa: B008
+    ) -> dict[str, Any]:
+        """Upload a .zip/.tar.gz (multipart), uncompress it server-side, and ingest it labelled."""
+        user = _require_user(request)
+        import tempfile
+
+        suffix = Path(file.filename or "upload.zip").suffix or ".zip"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(await file.read())
+            archive = Path(tmp.name)
+        try:
+            return service.ingest_from_path(archive, store=store, label=label, uploaded_by=user)
+        except (ValueError, FileNotFoundError) as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+        finally:
+            archive.unlink(missing_ok=True)
 
     # MCP over streamable HTTP, same service layer, at serve.mcp_path (R-API-1)
     app.mount(config.serve.mcp_path, mcp_app)
