@@ -321,9 +321,11 @@ def _render_matplotlib(
         ax.plot(list(x or []), list(y or []), marker="o")
     for xv in vlines:  # red spec-limit lines (LLM/HLM on a histogram)
         ax.axvline(xv, color="#d64545", linestyle="--", linewidth=1.4)
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
+    # parse_math=False: treat titles/labels as literal text so a `$` in file-derived content (e.g. a
+    # lot id) can't trip matplotlib's mathtext parser (red-team #M4).
+    ax.set_title(title, parse_math=False)
+    ax.set_xlabel(xlabel, parse_math=False)
+    ax.set_ylabel(ylabel, parse_math=False)
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=80)

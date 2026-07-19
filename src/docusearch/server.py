@@ -56,6 +56,16 @@ def _fits_i64(value: int) -> bool:
     return -(2**63) <= value < 2**63
 
 
+def _wafer_result(html: str) -> dict[str, Any]:
+    """Wrap a wafer/mother-lot/trend page. Empty-state pages (:func:`wafer.empty_note`) also carry an
+    ``empty``/``note`` so the CLI can fail with a one-line reason instead of writing a blank report;
+    MCP/REST callers still get the graceful HTML either way."""
+    from . import wafer
+
+    note = wafer.empty_note(html)
+    return {"html": html} if note is None else {"html": html, "empty": True, "note": note}
+
+
 class ModelMismatchError(Exception):
     """A query's embedding model doesn't match the index's — never mix (R-EMB-3, 409)."""
 
@@ -692,7 +702,7 @@ class Service:
             html = wafer.param_wafer_map_html(run.tests, run.parts, test_num, wafer_id=wafer_id)
         else:
             html = wafer.wafer_map_html(run.parts, wafer_id=wafer_id, color_by=color_by)
-        return {"html": html}
+        return _wafer_result(html)
 
     def mother_lot(
         self, doc_id: int, *, backend: str = "", store: str | None = None,
@@ -702,7 +712,7 @@ class Service:
         from . import wafer
 
         run = self._stdf_run(doc_id, store=store, user=user, groups=groups)
-        return {"html": wafer.mother_lot_html(run.parts, backend=self._backend(backend))}
+        return _wafer_result(wafer.mother_lot_html(run.parts, backend=self._backend(backend)))
 
     def production_trend(
         self, doc_ids: list[int], *, backend: str = "", store: str | None = None,
@@ -717,7 +727,7 @@ class Service:
         for d in doc_ids:
             run = self._stdf_run(d, store=store, user=user, groups=groups)
             lots.append((run.lot_id or f"doc {d}", run.parts))
-        return {"html": wafer.production_trend_html(lots, backend=self._backend(backend))}
+        return _wafer_result(wafer.production_trend_html(lots, backend=self._backend(backend)))
 
     def plot_data(
         self, *, kind: str, series: Any = None, x: Any = None, y: Any = None,

@@ -121,6 +121,10 @@ def test_wafer_service_over_ingested_stdf(tmp_path) -> None:  # type: ignore[no-
     svc = Service(config)
     wm = svc.wafer_map(ids[0], wafer_id="W01")["html"]
     assert "Wafer W01" in wm and 'class="die' in wm
+    # a parametric map for a test number with no data → service flags empty + a one-line note
+    absent = svc.wafer_map(ids[0], wafer_id="W01", test_num=999999)
+    assert absent.get("empty") is True and "finite" in absent["note"]
+    assert "empty" not in svc.wafer_map(ids[0], wafer_id="W01")  # a real map has no flag
     ml = svc.mother_lot(ids[0])["html"]
     assert "Lot LOTW" in ml
     tr = svc.production_trend(ids)["html"]
@@ -141,3 +145,37 @@ def test_parametric_wafer_map() -> None:
     assert "background:#" in html  # heat-coloured dies
     missing = wafer.param_wafer_map_html(tests, parts, 9999)  # a test number with no data
     assert "no parametric map" in missing
+
+
+def test_phase7_redteam_regressions() -> None:
+    import re
+    p3 = [StdfPart("L", "", "W1", x, 1, f"p{x}", 1, 1, 1, 1, True, "FT") for x in (1, 2, 3)]
+    # H1: every result non-finite → clean message, no KeyError
+    allnan = [StdfTest(1000, "V", float("nan"), 1, 1, True, f"p{x}", {}, units="V") for x in (1, 2, 3)]
+    assert "no finite" in wafer.param_wafer_map_html(allnan, p3, 1000, wafer_id="W1")
+    # M1: a NaN FIRST must not corrupt the rest of the heatmap gradient
+    mixed = [StdfTest(1000, "V", float("nan"), 1, 1, True, "p1", {}),
+             StdfTest(1000, "V", 1.0, 1, 1, True, "p2", {}),
+             StdfTest(1000, "V", 3.0, 1, 1, True, "p3", {})]
+    m1 = wafer.param_wafer_map_html(mixed, p3, 1000, wafer_id="W1")
+    bgs = re.findall(r"background:(#[0-9a-f]{6})", m1)
+    assert len(set(bgs)) > 1  # two finite values → two different colours
+    # M3: a spec-legal but absurd coordinate span is refused, not turned into a giant CSS grid
+    big = [StdfPart("L", "", "W1", 0, 0, "a", 1, 1, 1, 1, True, "FT"),
+           StdfPart("L", "", "W1", 40000, 0, "b", 1, 1, 1, 1, True, "FT")]
+    assert "span exceeds" in wafer.wafer_map_html(big, wafer_id="W1")
+    assert "repeat(40001" not in wafer.wafer_map_html(big, wafer_id="W1")
+    # M4: a `$` in lot_id must not crash the matplotlib title
+    assert "data:image/png" in wafer.mother_lot_html(
+        [StdfPart("LOT$$$$", "", "W1", 1, 1, "p", 1, 1, 1, 1, True, "FT")], backend="matplotlib")
+    # L1: subtitle is single-escaped (no &amp;amp;)
+    named = [StdfTest(1000, 'V&"x"', 1.0, 1, 1, True, "p1", {})]
+    assert "&amp;amp;" not in wafer.param_wafer_map_html(named, p3[:1], 1000, wafer_id="W1")
+    # attack9: an empty-state page carries a machine-readable note; a real report does not
+    allnan_html = wafer.param_wafer_map_html(allnan, p3, 1000, wafer_id="W1")
+    note = wafer.empty_note(allnan_html)
+    assert note is not None and "finite" in note and "-->" not in note  # comment-safe
+    good = [StdfTest(1000, "V", 1.0, 1, 1, True, "p1", {}),
+            StdfTest(1000, "V", 2.0, 1, 1, True, "p2", {}),
+            StdfTest(1000, "V", 3.0, 1, 1, True, "p3", {})]
+    assert wafer.empty_note(wafer.param_wafer_map_html(good, p3, 1000, wafer_id="W1")) is None

@@ -1103,6 +1103,9 @@ def _cmd_stdf_wafermap(args: argparse.Namespace) -> int:
     if err:
         print(f"error: {err}", file=sys.stderr)
         return 1
+    if res.get("empty"):
+        print(f"error: {res['note']}", file=sys.stderr)
+        return 1
     tag = f"test{args.test}" if args.test else args.color_by
     out = _save_report(cfg, args.out, f"wafermap_doc{doc['doc_id']}_{args.wafer or 'first'}_{tag}",
                        res["html"])
@@ -1120,6 +1123,9 @@ def _cmd_stdf_motherlot(args: argparse.Namespace) -> int:
     err = _tool_error(res)
     if err:
         print(f"error: {err}", file=sys.stderr)
+        return 1
+    if res.get("empty"):
+        print(f"error: {res['note']}", file=sys.stderr)
         return 1
     out = _save_report(cfg, args.out, f"motherlot_doc{doc['doc_id']}", res["html"])
     print(f"Wrote mother-lot view {out}")
@@ -1142,6 +1148,9 @@ def _cmd_stdf_yieldtrend(args: argparse.Namespace) -> int:
     err = _tool_error(res)
     if err:
         print(f"error: {err}", file=sys.stderr)
+        return 1
+    if res.get("empty"):
+        print(f"error: {res['note']}", file=sys.stderr)
         return 1
     out = _save_report(cfg, args.out, f"yieldtrend_{len(ids)}lots", res["html"])
     print(f"Wrote yield trend {out}  ({len(ids)} lots)")
