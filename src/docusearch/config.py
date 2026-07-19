@@ -32,7 +32,7 @@ from ._version import __version__
 
 DEFAULT_CONFIG_PATH = Path("docusearch.yaml")
 
-_Value = str | int | float | bool | list[str]
+_Value = str | int | float | bool | list[str] | dict[str, Any]
 
 
 class ConfigError(Exception):
@@ -159,6 +159,19 @@ SCHEMA: tuple[_Node, ...] = (
                     "STDF only: the test insertion/step these files belong to (WS1, WS1-RT, FT …).\n"
                     "STDF may not record this reliably, so SET IT per source; blank falls back to\n"
                     "MIR TEST_COD then the filename (a warning flags the guess)."
+                ),
+            ),
+            _Field(
+                "csv",
+                {},
+                comment=(
+                    "Data stores only: how to read a delimited/fixed-width table (CSV/TSV/…).\n"
+                    "  delimiter : override the by-extension default (csv->comma, tsv->tab);\n"
+                    "              or a name: tab | pipe | semicolon | comma\n"
+                    "  widths    : [8, 10, 12]  # read a FIXED-WIDTH file by these column widths\n"
+                    "  label/value        : for a long/tidy table (a metric-name column + a value column)\n"
+                    "  group/lo/hi/units  : optional column names for site / spec limits / units\n"
+                    "Leave empty ({}) for a wide table (every numeric column is a metric) or a doc store."
                 ),
             ),
         ),
@@ -379,6 +392,8 @@ def _fmt(value: _Value) -> str:
         return str(value)
     if isinstance(value, list):
         return "[" + ", ".join(_fmt(item) for item in value) + "]"
+    if isinstance(value, dict):  # only empty defaults are used (an inline flow mapping)
+        return "{" + ", ".join(f"{k}: {_fmt(v)}" for k, v in value.items()) + "}"
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -542,6 +557,18 @@ class SourceConfig:
     min_content_chars: int
     audience: list[str]
     insertion: str = ""
+    # Delimited/fixed-width data (Phase 10). `delimiter` overrides the by-extension default
+    # (csv→comma, tsv→tab); `widths` (a tuple of column widths) reads a fixed-width file instead.
+    # The role-map is empty = wide mode (every numeric column is a metric); set label+value for a
+    # long/tidy table (a metric column + a reading column), with optional group/lo/hi/units.
+    csv_delimiter: str = ""
+    csv_widths: tuple[int, ...] = ()
+    csv_label: str = ""
+    csv_value: str = ""
+    csv_group: str = ""
+    csv_lo: str = ""
+    csv_hi: str = ""
+    csv_units: str = ""
 
 
 @dataclass(frozen=True)
@@ -632,6 +659,12 @@ def _strs(value: Any) -> list[str]:
     return [str(item) for item in value]
 
 
+def _csv_map(source: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The optional ``csv:`` role-map block on a source (Phase 10); empty mapping if absent."""
+    raw = source.get("csv", {})
+    return raw if isinstance(raw, Mapping) else {}
+
+
 @dataclass(frozen=True)
 class Config:
     """The fully-resolved, validated configuration (R-CFG-1). Immutable after load."""
@@ -678,6 +711,14 @@ class Config:
                     min_content_chars=int(s["min_content_chars"]),
                     audience=_strs(s["audience"]),
                     insertion=str(s.get("insertion", "")),
+                    csv_delimiter=str(_csv_map(s).get("delimiter", "")),
+                    csv_widths=tuple(int(w) for w in _csv_map(s).get("widths", []) or []),
+                    csv_label=str(_csv_map(s).get("label", "")),
+                    csv_value=str(_csv_map(s).get("value", "")),
+                    csv_group=str(_csv_map(s).get("group", "")),
+                    csv_lo=str(_csv_map(s).get("lo", "")),
+                    csv_hi=str(_csv_map(s).get("hi", "")),
+                    csv_units=str(_csv_map(s).get("units", "")),
                 )
                 for s in m["sources"]
             ],

@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _MEMORY = ":memory:"
 
@@ -197,11 +197,37 @@ CREATE INDEX idx_stdf_parts_doc   ON stdf_parts(doc_id);
 CREATE INDEX idx_stdf_parts_wafer ON stdf_parts(wafer);
 """
 
+# Migration 5 = generic columnar data tables (Phase 10). STDF is just one thing a data store can
+# hold; a CSV (or any table) lands here as named numeric columns + values so the SAME non-AI query
+# and plot tools work on arbitrary data, not just STDF.
+_SCHEMA_V5 = """
+CREATE TABLE data_columns (
+    id       INTEGER PRIMARY KEY,
+    doc_id   INTEGER REFERENCES documents(id),
+    dataset  TEXT,
+    name     TEXT,
+    kind     TEXT,               -- numeric | categorical | text
+    units    TEXT,
+    lo       REAL,
+    hi       REAL,
+    n        INTEGER
+);
+CREATE INDEX idx_data_columns_doc ON data_columns(doc_id);
+CREATE TABLE data_values (
+    col_id   INTEGER REFERENCES data_columns(id),
+    row_idx  INTEGER,
+    value    REAL,
+    grp      TEXT
+);
+CREATE INDEX idx_data_values_col ON data_values(col_id);
+"""
+
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
+    (5, _SCHEMA_V5),
 )
 
 
@@ -549,6 +575,49 @@ class Store:
     def count_stdf_results(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM stdf_results").fetchone()[0])
 
+    # ---- generic columnar data (Phase 10): any CSV/table, queryable + plottable by non-AI tools ---
+
+    def add_data_column(
+        self, *, doc_id: int, dataset: str, name: str, kind: str, units: str,
+        lo: float | None, hi: float | None, values: Sequence[float], groups: Sequence[str] = (),
+    ) -> int:
+        """Persist one column (metadata + its values) and return the new ``data_columns`` id.
+        ``values``/``groups`` are stored row-per-value so plain SQL (or a thin web UI) can query them."""
+        cur = self._conn.execute(
+            "INSERT INTO data_columns(doc_id, dataset, name, kind, units, lo, hi, n) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (doc_id, dataset, name, kind, units, lo, hi, len(values)),
+        )
+        col_id = int(cur.lastrowid or 0)
+        if values:
+            grp = list(groups) if groups else [None] * len(values)
+            self._conn.executemany(
+                "INSERT INTO data_values(col_id, row_idx, value, grp) VALUES (?,?,?,?)",
+                [(col_id, i, float(v), grp[i]) for i, v in enumerate(values)],
+            )
+        self._maybe_commit()
+        return col_id
+
+    def data_columns(self, *, doc_id: int | None = None) -> list[sqlite3.Row]:
+        """Column catalog (id, doc_id, dataset, name, kind, units, lo, hi, n) — a data store's
+        columns a non-AI tool / web UI lists to pick something to query or plot."""
+        where = " WHERE doc_id = ?" if doc_id is not None else ""
+        params = (doc_id,) if doc_id is not None else ()
+        return self._conn.execute(
+            "SELECT id, doc_id, dataset, name, kind, units, lo, hi, n FROM data_columns"
+            + where + " ORDER BY id", params,
+        ).fetchall()
+
+    def data_values(self, *, column_id: int) -> list[sqlite3.Row]:
+        """One column's ``(row_idx, value, grp)`` in order — the data behind a plot/query, no AI."""
+        return self._conn.execute(
+            "SELECT row_idx, value, grp FROM data_values WHERE col_id = ? ORDER BY row_idx",
+            (column_id,),
+        ).fetchall()
+
+    def count_data_values(self) -> int:
+        return int(self._conn.execute("SELECT COUNT(*) FROM data_values").fetchone()[0])
+
     def stdf_documents(self) -> list[sqlite3.Row]:
         """Every STDF document with its SKU (the ``source`` label = part SKU/name it was filed under),
         lot, distinct insertions, and result/part counts — the file catalog behind ``stdf ls``.
@@ -636,6 +705,10 @@ class Store:
             c.execute("DELETE FROM images WHERE doc_id=?", (doc_id,))
             c.execute("DELETE FROM stdf_results WHERE doc_id=?", (doc_id,))
             c.execute("DELETE FROM stdf_parts WHERE doc_id=?", (doc_id,))
+            c.execute(
+                "DELETE FROM data_values WHERE col_id IN "
+                "(SELECT id FROM data_columns WHERE doc_id=?)", (doc_id,))
+            c.execute("DELETE FROM data_columns WHERE doc_id=?", (doc_id,))
             c.execute("DELETE FROM documents WHERE id=?", (doc_id,))
 
     def document_ids_for_source(self, source: str) -> list[int]:

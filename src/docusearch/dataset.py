@@ -90,10 +90,43 @@ def _infer_kind(cells: Sequence[str]) -> str:
     return "categorical" if distinct <= max(20, len(nonmissing) // 20) else "text"
 
 
-def _read_rows(path: Path | str) -> tuple[list[str], list[list[str]]]:
-    with Path(path).open(newline="", encoding="utf-8-sig") as fh:
-        reader = csv.reader(fh)
-        rows = [row for row in reader if any(cell.strip() for cell in row)]
+# standard delimiter by file extension; anything else needs an explicit delimiter (or fixed widths)
+_DELIM_BY_EXT = {".csv": ",", ".tsv": "\t", ".tab": "\t", ".psv": "|", ".pipe": "|"}
+# friendly spellings a user can put in config for hard-to-type delimiters
+_DELIM_ALIASES = {"tab": "\t", r"\t": "\t", "space": " ", r"\s": " ", "pipe": "|",
+                  "semicolon": ";", "comma": ","}
+
+
+def _resolve_delimiter(path: Path | str, delimiter: str | None) -> str:
+    if delimiter:
+        return _DELIM_ALIASES.get(delimiter.strip().lower(), delimiter)
+    return _DELIM_BY_EXT.get(Path(path).suffix.lower(), ",")
+
+
+def _split_fixed(line: str, widths: Sequence[int]) -> list[str]:
+    out, i = [], 0
+    for w in widths:
+        out.append(line[i:i + w].strip())
+        i += w
+    if i < len(line):  # trailing content beyond the declared widths → its own field
+        out.append(line[i:].strip())
+    return out
+
+
+def _read_rows(
+    path: Path | str, *, delimiter: str | None = None, fixed_widths: Sequence[int] | None = None,
+) -> tuple[list[str], list[list[str]]]:
+    """Parse a delimited **or** fixed-width table into (header, body). Delimiter defaults by extension
+    (``.csv``→``,``, ``.tsv``→tab, ``.psv``→``|``) unless given; ``fixed_widths`` parses columns at
+    fixed character positions instead (no delimiter)."""
+    if fixed_widths:
+        with Path(path).open(encoding="utf-8-sig") as fh:
+            lines = [ln.rstrip("\r\n") for ln in fh if ln.strip()]
+        rows = [_split_fixed(ln, fixed_widths) for ln in lines]
+    else:
+        with Path(path).open(newline="", encoding="utf-8-sig") as fh:
+            reader = csv.reader(fh, delimiter=_resolve_delimiter(path, delimiter))
+            rows = [row for row in reader if any(cell.strip() for cell in row)]
     if not rows:
         return [], []
     header = [h.strip() for h in rows[0]]
@@ -101,9 +134,11 @@ def _read_rows(path: Path | str) -> tuple[list[str], list[list[str]]]:
     return header, body
 
 
-def read_csv(
+def read_table(
     path: Path | str,
     *,
+    delimiter: str | None = None,
+    fixed_widths: Sequence[int] | None = None,
     name: str = "",
     label_column: str = "",
     value_column: str = "",
@@ -113,11 +148,13 @@ def read_csv(
     units_column: str = "",
     key_columns: Iterable[str] = (),
 ) -> Dataset:
-    """Read a CSV into a :class:`Dataset`. **Long/tidy** when ``label_column`` + ``value_column`` are
+    """Read **any delimited or fixed-width table** into a :class:`Dataset`. ``delimiter`` defaults by
+    extension (csv/tsv/psv) or takes an explicit char / alias (``tab``, ``pipe``, …); ``fixed_widths``
+    parses fixed-column-width files instead. **Long/tidy** when ``label_column`` + ``value_column`` are
     given (each distinct label → a Column; optional ``group``/``lo``/``hi``/``units`` columns fill the
-    roles) — the shape test-like data takes in a CSV. **Wide** otherwise: every numeric column becomes
-    a metric, and ``group_column`` (if given) tags each numeric observation by that column's value."""
-    header, body = _read_rows(path)
+    roles) — the shape test-like data takes in a table. **Wide** otherwise: every numeric column
+    becomes a metric, and ``group_column`` (if given) tags each numeric observation by that value."""
+    header, body = _read_rows(path, delimiter=delimiter, fixed_widths=fixed_widths)
     ds_name = name or Path(path).stem
     if not header:
         return Dataset(ds_name)

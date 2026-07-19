@@ -1025,6 +1025,7 @@ class IngestResult:
     images_unresolved: int = 0  # referenced but not retained (missing on disk / remote)
     gotchas: int = 0  # chunks dual-tagged [GOTCHA] + flags row (R-ING-8)
     stdf_tests: int = 0  # test chunks written from STDF files (R-STDF-1)
+    data_columns: int = 0  # numeric columns written from CSV/table data files (Phase 10)
     relations_total: int = 0
     relations_resolved: int = 0
     relations_unresolved: int = 0
@@ -1262,6 +1263,63 @@ def _write_stdf(
         result.chunks += len(run.parts)
 
 
+def _csv_summary(ds: object) -> str:
+    """A searchable one-chunk summary of a data file so a CSV data store is findable by name/columns."""
+    cols = getattr(ds, "columns", [])
+    parts = [f"dataset {getattr(ds, 'name', '')}", f"{len(cols)} columns"]
+    for c in cols:
+        n = len(getattr(c, "values", []))
+        lim = ""
+        if getattr(c, "lo", None) is not None or getattr(c, "hi", None) is not None:
+            lim = f" limits {c.lo}..{c.hi}"
+        parts.append(f"{c.name} ({c.kind}{f', n={n}' if n else ''}{lim})")
+    return " · ".join(parts)
+
+
+def _write_table(
+    path: Path, source: SourceConfig, config: Config, store: Store, result: IngestResult
+) -> None:
+    """Ingest one delimited / fixed-width **data table** into the generic data store (Phase 10): parse
+    columns via ``dataset.read_table`` (delimiter by extension or the source's ``csv:`` block; optional
+    role-map), write a document + one searchable summary chunk, and persist each numeric column's
+    values so non-AI tools can query and plot them. STDF is not special — this is the general path for
+    any tabular data (CSV, TSV, pipe/semicolon-delimited, fixed-width …)."""
+    from . import dataset as ds_mod  # lazy: only when a CSV is ingested
+
+    old = store.document_id_for_path(str(path))
+    if old is not None:
+        store.delete_document(old)
+    try:
+        ds = ds_mod.read_table(
+            path, name=path.stem, delimiter=source.csv_delimiter or None,
+            fixed_widths=source.csv_widths or None,
+            label_column=source.csv_label, value_column=source.csv_value,
+            group_column=source.csv_group, lo_column=source.csv_lo, hi_column=source.csv_hi,
+            units_column=source.csv_units,
+        )
+    except Exception as exc:  # noqa: BLE001 - a malformed table is reported, not fatal to the run
+        result.parse_errors += 1
+        result.errors.append((str(path), f"table parse failed: {type(exc).__name__}: {exc}"))
+        return
+    doc_id = store.add_document(
+        path=str(path), source=source.name, source_version=source.version, title=ds.name,
+        content_hash=content_hash(path), content_type="data",
+        fmt=path.suffix.lstrip(".").lower() or "table",
+        audience=source.audience, mtime=path.stat().st_mtime, status="active",
+    )
+    result.documents += 1
+    store.add_chunk(document_id=doc_id, ord=0, text=_csv_summary(ds), kind="data",
+                    locator=f"dataset {ds.name}")
+    result.chunks += 1
+    numeric = ds.numeric()
+    for col in numeric:
+        store.add_data_column(
+            doc_id=doc_id, dataset=ds.name, name=col.name, kind=col.kind, units=col.units,
+            lo=col.lo, hi=col.hi, values=col.values, groups=col.groups,
+        )
+    result.data_columns += len(numeric)
+
+
 def _write_parsed(
     res: _ParseResult,
     source: SourceConfig,
@@ -1463,12 +1521,21 @@ def run_ingest(
         result.other_files += other
         worklist += [(path, source) for path in included]
 
-    # STDF test-data files take a dedicated writer (a test is already a chunk-sized unit, not a
-    # document to parse+chunk); the rest go through the format extractors + chunker.
-    stdf_work = [(p, s) for p, s in worklist if p.suffix.lower() in (".stdf", ".std")]
-    worklist = [(p, s) for p, s in worklist if p.suffix.lower() not in (".stdf", ".std")]
+    # STDF test-data files and delimited/fixed-width **data tables** take dedicated writers (a test /
+    # a column is already a unit, not a document to parse+chunk); the rest go through the chunker.
+    # A file is a data table if its extension is a known tabular one, OR its source declared a
+    # delimiter / fixed widths (so a .txt/.dat fixed-width file is handled too).
+    def _is_table(p: Path, s: SourceConfig) -> bool:
+        return p.suffix.lower() in (".csv", ".tsv", ".tab", ".psv") or bool(
+            s.csv_delimiter or s.csv_widths
+        )
 
-    total_files = len(worklist) + len(stdf_work)
+    stdf_work = [(p, s) for p, s in worklist if p.suffix.lower() in (".stdf", ".std")]
+    rest = [(p, s) for p, s in worklist if p.suffix.lower() not in (".stdf", ".std")]
+    csv_work = [(p, s) for p, s in rest if _is_table(p, s)]
+    worklist = [(p, s) for p, s in rest if not _is_table(p, s)]
+
+    total_files = len(worklist) + len(stdf_work) + len(csv_work)
     # Build one picklable parse task per file (the DB's current hashes let workers decide
     # skip-vs-reparse without touching the DB).
     stored = store.document_hashes()
@@ -1483,6 +1550,17 @@ def run_ingest(
                     result.per_extension[path.suffix.lstrip(".").lower()] = (
                         result.per_extension.get(path.suffix.lstrip(".").lower(), 0) + 1
                     )
+                store.commit()
+    if csv_work:
+        with store.deferred_commits():
+            for path, source in csv_work:
+                key = path.resolve().as_posix()
+                if not force and stored.get(key) == content_hash(path):
+                    result.skipped_unchanged += 1
+                else:
+                    _write_table(path, source, config, store, result)
+                    ext = path.suffix.lstrip(".").lower() or "table"
+                    result.per_extension[ext] = result.per_extension.get(ext, 0) + 1
                 store.commit()
     tasks = [
         _ParseTask(
