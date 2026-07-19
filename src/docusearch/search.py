@@ -409,7 +409,7 @@ def search(
 @dataclass
 class FederatedMember:
     """One store in a federation plus the optional machinery to search it hybrid. A bare ``Store``
-    is treated as a BM25-only member. ``name`` labels the store (e.g. ``"python"``, ``"acme"``) so a
+    is treated as a BM25-only member. ``name`` labels the store (e.g. ``"python"``, ``"internal"``) so a
     caller can scope a query to a subset of the federation."""
 
     store: Store
@@ -445,7 +445,7 @@ class FederatedSearch:
     def _select(self, stores: Sequence[str] | None) -> list[tuple[int, FederatedMember]]:
         """Members to search, keeping each member's ORIGINAL index (dedup keys depend on it). With
         ``stores=None`` every member is searched; otherwise only the named ones — an unknown name is
-        an error so "search acme" against a federation without it fails loudly, not silently empty."""
+        an error so "search internal" against a federation without it fails loudly, not silently empty."""
         indexed = list(enumerate(self.members))
         if stores is None:
             return indexed

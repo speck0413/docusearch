@@ -79,11 +79,13 @@ class MCPClient:
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool, arguments)
+            # unwrap INSIDE the try so a malformed/non-compliant tool result also collapses to an
+            # MCPError instead of a raw exception escaping the public call() (red-team phase6b H2).
+            return _unwrap(result, tool)
         except MCPError:
             raise
         except BaseException as exc:  # noqa: BLE001 - collapse any transport failure to one line
             raise MCPError(_friendly(self.url, exc)) from exc
-        return _unwrap(result, tool)
 
 
 def _unwrap(result: Any, tool: str) -> Any:
@@ -109,5 +111,5 @@ def _result_text(result: Any) -> str:
     parts = []
     for block in getattr(result, "content", None) or []:
         if getattr(block, "type", None) == "text":
-            parts.append(block.text)
+            parts.append(getattr(block, "text", ""))  # a non-compliant block may lack .text (H2)
     return "\n".join(parts)

@@ -58,7 +58,7 @@ MEDIA_TYPES: dict[str, str] = {
 }
 
 # One shared, frozen prompt — kept byte-stable so the request is reproducible. It targets the
-# vendor-doc image kinds Stephen flagged (block diagrams, instrument test/debug displays) but
+# vendor-doc image kinds the operator flagged (block diagrams, instrument test/debug displays) but
 # hardcodes no corpus tokens (R-PROC-6).
 _PROMPT = (
     "You are extracting searchable text from a single technical-documentation image — "

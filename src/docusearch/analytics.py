@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import io
+import math
 import statistics
 from collections.abc import Mapping, Sequence
 from html import escape
@@ -28,9 +29,16 @@ Series = Sequence[tuple[str, Sequence[float]]]  # named series for whisker/qq
 PLOT_KINDS = ("histogram", "whisker", "quantile", "qq", "xy", "linear")
 
 
+def _finite(values: Sequence[float | None]) -> list[float]:
+    """The finite numeric values — drops None **and** NaN/±inf, which are spec-legal R4 bit patterns
+    a real ATE run can emit (sensor fault, timeout) and would otherwise crash or mislabel the stats
+    (red-team phase6b #3/#7)."""
+    return [float(v) for v in values if v is not None and math.isfinite(float(v))]
+
+
 def summary_stats(values: Sequence[float | None]) -> dict[str, float]:
-    """n / mean / median / std (population) / min / max over the non-null values (empty ⇒ {n:0})."""
-    xs = [float(v) for v in values if v is not None]
+    """n / mean / median / std (population) / min / max over the finite values (empty ⇒ {n:0})."""
+    xs = _finite(values)
     if not xs:
         return {"n": 0}
     return {
@@ -74,7 +82,7 @@ DISTRIBUTION_SHAPES = (
 
 
 def _clean(values: Sequence[float | None]) -> list[float]:
-    return [float(v) for v in values if v is not None]
+    return _finite(values)  # drop None + NaN/inf (red-team phase6b #3/#7)
 
 
 def classify_distribution(values: Sequence[float | None]) -> dict[str, Any]:
@@ -132,7 +140,8 @@ def site_dispersion(groups: Mapping[int, Sequence[float]]) -> dict[str, Any]:
     (a site-to-site mismatch) — the site analog of an uncorrelated run-to-run pair. The threshold is
     **sample-size aware** (a real ≥0.5σ effect plus a per-site-mean noise allowance), so 4 sites of
     small samples don't false-flag just from sampling scatter. None when there aren't ≥2 sites."""
-    valid = {s: [float(x) for x in v] for s, v in groups.items() if len(v) >= 2}
+    cleaned = {s: _finite(v) for s, v in groups.items()}
+    valid = {s: v for s, v in cleaned.items() if len(v) >= 2}
     means = [statistics.fmean(v) for v in valid.values()]
     allv = [x for v in valid.values() for x in v]
     if len(means) < 2 or len(allv) < 8:
@@ -252,19 +261,20 @@ _HIST_COLORS = ("#4c8dff", "#3cb371", "#e6a020", "#c060d0")
 
 def _primary(series: Series | None, y: Sequence[float] | None) -> list[float]:
     if y is not None:
-        return [float(v) for v in y]
+        return _finite(y)
     if series:
-        return [float(v) for v in series[0][1]]
+        return _finite(series[0][1])
     return []
 
 
 def _hist_series(series: Series | None, y: Sequence[float] | None) -> list[tuple[str, list[float]]]:
     """The datasets to draw on a histogram: every named ``series`` (overlaid, translucent) or, for a
-    single distribution, ``y`` alone."""
+    single distribution, ``y`` alone. Non-finite values are dropped so a NaN result can't break
+    binning (red-team phase6b #3)."""
     if series:
-        return [(str(lbl), [float(v) for v in data]) for lbl, data in series]
+        return [(str(lbl), _finite(data)) for lbl, data in series]
     if y is not None:
-        return [("", [float(v) for v in y])]
+        return [("", _finite(y))]
     return []
 
 
@@ -290,7 +300,7 @@ def _render_matplotlib(
         if len(hs) > 1:
             ax.legend()
     elif kind == "whisker":
-        data = [list(map(float, s[1])) for s in (series or [])]
+        data = [_finite(s[1]) for s in (series or [])]
         ax.boxplot(data, tick_labels=[s[0] for s in (series or [])])
     elif kind == "quantile":
         vals = sorted(_primary(series, y))
@@ -298,8 +308,9 @@ def _render_matplotlib(
         ax.plot(qs, vals, marker="o")
     elif kind == "qq":
         s = series or []
-        n = min(len(s[0][1]), len(s[1][1])) if len(s) >= 2 else 0
-        qa, qb = _quantile_points(s[0][1], n), _quantile_points(s[1][1], n)
+        sa, sb = (_finite(s[0][1]), _finite(s[1][1])) if len(s) >= 2 else ([], [])
+        n = min(len(sa), len(sb))
+        qa, qb = _quantile_points(sa, n), _quantile_points(sb, n)
         ax.scatter(qa, qb)
         if qa and qb:
             lo, hi = min(qa + qb), max(qa + qb)
@@ -347,15 +358,16 @@ def _render_plotly(
             fig.update_layout(barmode="overlay")
     elif kind == "whisker":
         for label, data in series or []:
-            fig.add_box(y=list(map(float, data)), name=label)
+            fig.add_box(y=_finite(data), name=label)
     elif kind == "quantile":
         vals = sorted(_primary(series, y))
         qs = [i / (len(vals) - 1) for i in range(len(vals))] if len(vals) > 1 else [0.0]
         fig.add_scatter(x=qs, y=vals, mode="lines+markers")
     elif kind == "qq":
         s = series or []
-        n = min(len(s[0][1]), len(s[1][1])) if len(s) >= 2 else 0
-        qa, qb = _quantile_points(s[0][1], n), _quantile_points(s[1][1], n)
+        sa, sb = (_finite(s[0][1]), _finite(s[1][1])) if len(s) >= 2 else ([], [])
+        n = min(len(sa), len(sb))
+        qa, qb = _quantile_points(sa, n), _quantile_points(sb, n)
         fig.add_scatter(x=qa, y=qb, mode="markers")
         if qa and qb:
             lo, hi = min(qa + qb), max(qa + qb)

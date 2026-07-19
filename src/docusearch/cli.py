@@ -482,7 +482,7 @@ def _print_hits(query: str, hits: list[SearchHit], as_json: bool, banner: str) -
 
 def _run_federated_search(cfg: Config, args: argparse.Namespace, stores: list[str]) -> int:
     """Fan the query across the config's federation members (R-TEST-3), optionally scoped to the
-    named subset in ``--stores`` (e.g. only ACME)."""
+    named subset in ``--stores`` (e.g. only internal)."""
     if args.batch_file:
         print("error: --batch-file is not supported with a federation; query one at a time.")
         return 2
@@ -834,8 +834,8 @@ def _cmd_gate(args: argparse.Namespace) -> int:
 def _render_gate(n: str, name: str) -> str:
     """A two-part sign-off checklist skeleton (§15.4, R-PROC-4).
 
-    Part A: Stephen audits the agent's public-corpus evidence (recomputing samples).
-    Part B: Stephen's independent investigation on his private dataset via the runbook.
+    Part A: the operator audits the agent's public-corpus evidence (recomputing samples).
+    Part B: the operator's independent investigation on his private dataset via the runbook.
     """
     return f"""# GATE {n} — {name}
 
@@ -1193,7 +1193,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument(
         "--stores",
         default="",
-        help="federation only: comma-separated member names to search (e.g. acme). "
+        help="federation only: comma-separated member names to search (e.g. internal). "
         "Omit to search all members.",
     )
     p_search.add_argument("--config", default="docusearch.yaml", help="config path")

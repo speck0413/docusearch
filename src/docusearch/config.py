@@ -353,7 +353,7 @@ SCHEMA: tuple[_Node, ...] = (
     _ListSection(
         "federation",
         (
-            _Field("name", "", inline="label for this member store, e.g. python | rust | acme"),
+            _Field("name", "", inline="label for this member store, e.g. python | rust | internal"),
             _Field("config", "", inline="path to that store's docusearch.yaml"),
         ),
         comment=(
@@ -361,7 +361,7 @@ SCHEMA: tuple[_Node, ...] = (
             "List each member's name + its own config file. `serve` and `search` then fan out\n"
             "across all members (signal-level RRF merge, deduped by content hash) and rank as if\n"
             "it were one store. Scope a query to a subset with --stores (CLI) or the search_docs\n"
-            "`stores` argument (MCP/AI), e.g. --stores acme to search ONLY the ACME store.\n"
+            "`stores` argument (MCP/AI), e.g. --stores internal to search ONLY that member.\n"
             "Leave this out entirely for a normal single-store setup."
         ),
     ),

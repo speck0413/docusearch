@@ -138,7 +138,7 @@ class Service:
         pre-computed vectors + the 409 mismatch path arrive with the client (Phase 3b).
 
         When the config declares a ``federation:``, the query fans out across its member stores
-        (R-TEST-3); ``stores`` scopes it to a named subset (e.g. ``["acme"]``). ``user`` + ``groups``
+        (R-TEST-3); ``stores`` scopes it to a named subset (e.g. ``["internal"]``). ``user`` + ``groups``
         (from the request's ``X-Docusearch-User`` / ``X-Docusearch-Groups`` headers) enforce store
         **access control**: a private store the requester isn't whitelisted for is invisible — in a
         federation it silently drops out; a private single store raises ``PermissionError``."""
@@ -275,7 +275,7 @@ class Service:
 
     def _target_config(self, store: str | None) -> Config:
         """Resolve which store to ingest into: a named federation member (vendor / internal / user
-        / acme …) or, with no name, this config's own single store. A named store errors if there is
+        / internal …) or, with no name, this config's own single store. A named store errors if there is
         no federation or the name is unknown — never a silent misroute to the default (red-team M4)."""
         if not store:
             return self.config
@@ -308,6 +308,12 @@ class Service:
         target = self._target_config(store)
         if not target.access.permits(user=uploaded_by or None, groups=groups or set()):
             raise PermissionError(f"access denied: cannot write to store {store or 'default'!r}")
+        # `label` (the upload SKU) is untrusted and is used as a path component below — a SKU with a
+        # path separator or `..` would let the extract escape the staging tree (red-team phase6b H1).
+        if "/" in label or "\\" in label or ".." in Path(label).parts:
+            raise ValueError(
+                f"invalid SKU/label {label!r}: must not contain path separators or '..'"
+            )
         inbound = (Path(target.paths.staging_dir) / "inbound").resolve()
         src_path = Path(path)
         if src_path.is_dir():
@@ -318,7 +324,10 @@ class Service:
                 )
             location = src_path
         elif _is_archive(src_path):
-            location = Path(target.paths.staging_dir) / "uploads" / label
+            uploads = (Path(target.paths.staging_dir) / "uploads").resolve()
+            location = uploads / label
+            if not location.resolve().is_relative_to(uploads):  # defence in depth beyond the check above
+                raise ValueError(f"invalid SKU/label {label!r}: escapes the store's uploads dir")
             location.mkdir(parents=True, exist_ok=True)
             _safe_extract(src_path, location)
         else:
@@ -533,7 +542,7 @@ class Service:
         the part **SKU** (``sku`` becomes the ``source`` label — the STDF equivalent of a document
         category). ``sku`` is required so a file is never filed into an unnamed bucket. ``insertion``
         (WS1 / WS1-RT / FT …) is the operator's insertion label for these files — passed through so
-        the yield engine separates first-pass from retest correctly instead of guessing (Stephen).
+        the yield engine separates first-pass from retest correctly instead of guessing (the operator).
         Bytes are written to the store's own ``uploads`` staging and extracted through the same
         traversal-safe path as a server-side archive (red-team H4). Refuses an over-cap payload."""
         if not sku.strip():
@@ -600,6 +609,8 @@ class Service:
         """Long-run trend of a test's ``stat`` across an ordered list of STDF documents."""
         from . import stdf_analytics
 
+        if not doc_ids:  # empty list would IndexError in trend_html (red-team phase6b #4)
+            raise ValueError("stdf_trend needs at least one document id")
         runs = [
             (f"doc {d}", self._stdf_run(d, store=store, user=user, groups=groups)) for d in doc_ids
         ]
@@ -813,9 +824,11 @@ def _match_glob(path: str, pattern: str) -> bool:
     import fnmatch
     from pathlib import PurePosixPath
 
-    norm = path.replace("\\", "/")
+    # lower-case both sides so the match is case-insensitive on every OS (fnmatch is only
+    # case-insensitive on Windows otherwise — red-team phase6b #6)
+    norm = path.replace("\\", "/").lower()
     name = PurePosixPath(norm).name
-    pat = pattern.replace("\\", "/")
+    pat = pattern.replace("\\", "/").lower()
     return fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(norm, pat)
 
 
@@ -875,10 +888,10 @@ knowledge of the domain.
 
 ## Tools
 - `list_stores()` -> the document stores you can search. In a FEDERATION (e.g. python / rust /
-  acme) you may scope any search to a subset by name. Call this first if the user names a store.
+  internal) you may scope any search to a subset by name. Call this first if the user names a store.
 - `search_docs(queries, top_k=10, prefix=False, stores=None, bm25_only=False, roles=None)` ->
   per-query hits {doc_id, chunk_id, citation, title, path, locator, kind, snippet, score}. ALWAYS
-  pass a LIST of query phrasings (batched). `stores=["acme"]` searches only those members; omit for
+  pass a LIST of query phrasings (batched). `stores=["internal"]` searches only those members; omit for
   all. `prefix` = partial-term matching; `bm25_only` = skip vectors; `roles` = cooperative filter.
 - `get_document(doc_id, chunk=None)` -> full chunk text — use it to fill a card with real code / a
   full procedure, not just a snippet.

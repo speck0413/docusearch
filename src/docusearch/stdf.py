@@ -215,8 +215,11 @@ def _resolve_static(
     invalid→inherit; ``0x80`` = no high limit, ``0x20`` = HI_LIMIT invalid→inherit. A missing
     ``OPT_FLAG`` (trailing field omitted) means inherit any absent limit."""
     d = defaults.get(tnum)
-    txt = str(f.get("TEST_TXT") or "").strip() or (d.test_txt if d else "")
-    units = str(f.get("UNITS") or "").strip() or (d.units if d else "")
+    # The FIRST record for a test number is authoritative for its name/units — prefer the cached
+    # value so a later record carrying a *different* name doesn't split one test into two in the
+    # name-keyed audit/diff join downstream (red-team phase6b #5).
+    txt = (d.test_txt if (d and d.test_txt) else str(f.get("TEST_TXT") or "").strip())
+    units = (d.units if (d and d.units) else str(f.get("UNITS") or "").strip())
     lo_rec, hi_rec = _as_float(f.get("LO_LIMIT")), _as_float(f.get("HI_LIMIT"))
     opt = _as_int(f.get("OPT_FLAG"), -1)  # -1 ⇒ OPT_FLAG absent (limits omitted → inherit)
     if opt < 0:

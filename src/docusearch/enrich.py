@@ -1,7 +1,7 @@
 """Phase 5 — enrichment: pre-flight classification, gotchas, summaries, discrepancies (§17).
 
 Pre-flight classification (R-ING-7): sample the corpus stratified by folder, ask Claude (temperature
-0) to propose chunk rules + gotcha regexes, write them to ``preflight_rules.yaml`` for Stephen to
+0) to propose chunk rules + gotcha regexes, write them to ``preflight_rules.yaml`` for the operator to
 **approve before they run**. This module holds the deterministic machinery; the model call reuses
 the temperature-0 Claude backend from ``vision.py``.
 """
@@ -43,7 +43,7 @@ class GotchaPattern:
 @dataclass
 class PreflightRules:
     """The pre-flight proposal (R-ING-7): gotcha regexes + free-text chunking notes. ``approved``
-    starts False — the rules do NOT run until Stephen sets it true in the file."""
+    starts False — the rules do NOT run until the operator sets it true in the file."""
 
     approved: bool
     gotcha_patterns: list[GotchaPattern] = field(default_factory=list)
@@ -153,7 +153,7 @@ def _pattern_is_safe(pattern: str, *, timeout: float = 2.0) -> bool:
 
 def active_gotcha_patterns(path: Path | str) -> list[GotchaPattern]:
     """The gotcha patterns to apply at ingest — **empty** unless the rules file exists AND is
-    approved (R-ING-7: proposed rules never run until Stephen approves the file). A malformed file
+    approved (R-ING-7: proposed rules never run until the operator approves the file). A malformed file
     fails **safe**: warn loudly and apply no rules rather than abort the whole ingest (red-team M1).
     Patterns that are invalid or ReDoS-risky are dropped with a warning, never applied (H2)."""
     p = Path(path)
@@ -230,7 +230,7 @@ def propose_rules(
     excerpt_chars: int = 2000,
 ) -> PreflightRules:
     """Ask Claude to propose gotcha regexes + chunking notes from the sampled document text
-    (R-ING-7). Returns an **unapproved** ``PreflightRules`` (Stephen reviews + approves the file
+    (R-ING-7). Returns an **unapproved** ``PreflightRules`` (the operator reviews + approves the file
     before it runs). ``runner`` is injectable for tests; by default it shells out to the ``claude``
     CLI headless (``-p … --output-format json``) — the operator's Claude Code login, no API key."""
     excerpts = "\n\n---\n\n".join(t[:excerpt_chars] for t in doc_texts)
@@ -430,7 +430,7 @@ def run_preflight(
 ) -> PreflightRules:
     """Pre-flight classification end to end (R-ING-7): sample the configured sources stratified by
     folder (``enrich.preflight_sample`` docs), extract their text, ask Claude to propose rules, and
-    write an **unapproved** ``preflight_rules.yaml`` — nothing takes effect until Stephen reviews the
+    write an **unapproved** ``preflight_rules.yaml`` — nothing takes effect until the operator reviews the
     file and sets ``approved: true``."""
     from .ingest import extract_document, iter_files  # lazy: keeps enrich import light
 

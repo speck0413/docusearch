@@ -50,7 +50,7 @@ _HASH_BLOCK = 1 << 20
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 # Never indexed and never mined for relations: scripting/markup noise plus semantic navigation
 # chrome (nav/aside/footer). A cross-reference counts only when it lives in the BODY text we index —
-# a link in the navigation pane does not (Stephen, 2026-07-18). Div/class-based nav (e.g. a Sphinx
+# a link in the navigation pane does not (the operator, 2026-07-18). Div/class-based nav (e.g. a Sphinx
 # sidebar) is still handled by `content_selector` / `strip_selectors`, since it carries no semantic tag.
 _SKIP = {"script", "style", "template", "svg", "math", "noscript", "nav", "aside", "footer"}
 # Block-level tags: an element with NO block-level element child is a "leaf block" whose
@@ -1205,7 +1205,7 @@ def _write_stdf(
         run.insertion = path.stem
         for prt in run.parts:
             prt.insertion = path.stem
-    if not source.insertion:  # not operator-verified — the WS1/WS1-RT split may be wrong (Stephen)
+    if not source.insertion:  # not operator-verified — the WS1/WS1-RT split may be wrong (the operator)
         warnings.warn(
             f"STDF {path.name}: insertion {run.insertion!r} was not operator-provided — set "
             "`insertion:` on the source to reliably separate WS1 / WS1-RT / FT.",
