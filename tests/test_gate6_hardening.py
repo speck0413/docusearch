@@ -93,6 +93,21 @@ def test_m2_granularity_part_emits_part_chunks(tmp_path: Path) -> None:
     assert parts == 2  # two parts in the sample -> two rollup chunks
 
 
+# M3 — store_type is actually consumed: health() surfaces it so a client can route.
+def test_m3_store_type_consumed_in_health(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        f'store_type: "data"\npaths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{(tmp_path / "d").as_posix()}"\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "d").mkdir()
+    health = Service(cfg.load(p)).health()
+    assert health["store_type"] == "data" and "stdf_results" in health
+
+
 # M4 — the plotly backend renders byte-identical for identical inputs (deterministic div id).
 def test_m4_plotly_is_deterministic() -> None:
     a = analytics.render_plot("linear", x=[1, 2, 3], y=[1, 4, 9], title="t", backend="plotly")
