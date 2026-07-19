@@ -642,6 +642,33 @@ class Store:
         )
         self._maybe_commit()
 
+    def documents_needing_summary(self, limit: int = 0) -> list[tuple[int, str]]:
+        """``(doc_id, title)`` for ACTIVE documents that have no AI summary yet — the summary
+        worklist (§17). A summary is an ``enrichment`` chunk with locator ``summary``; its absence
+        is the marker, so a re-run only summarizes new docs (idempotent, no double spend). Ordered
+        by doc id for determinism."""
+        sql = (
+            "SELECT d.id, d.title FROM documents d WHERE d.status='active' AND NOT EXISTS ("
+            "  SELECT 1 FROM chunks c WHERE c.document_id=d.id AND c.kind='enrichment' "
+            "  AND c.locator='summary'"
+            ") ORDER BY d.id"
+        )
+        if limit > 0:
+            rows = self._conn.execute(sql + " LIMIT ?", (limit,)).fetchall()
+        else:
+            rows = self._conn.execute(sql).fetchall()
+        return [(int(r[0]), str(r[1])) for r in rows]
+
+    def document_ingest_text(self, doc_id: int) -> str:
+        """A document's ingest-time text (body/code/table chunks, not prior enrichment), joined —
+        the input to summarization. Ordered by ord so the text reads in document order."""
+        rows = self._conn.execute(
+            "SELECT text FROM chunks WHERE document_id=? AND kind NOT IN "
+            "('enrichment', 'image_ref') ORDER BY ord",
+            (doc_id,),
+        ).fetchall()
+        return "\n".join(str(r[0]) for r in rows)
+
     def add_enrichment_chunk(
         self, document_id: int, text: str, locator: str, *, kind: str = "enrichment"
     ) -> int:

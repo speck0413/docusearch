@@ -15,15 +15,27 @@ from __future__ import annotations
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import overload
 
 from . import embed, enrich, ingest, search, vision
 from .config import DEFAULT_CONFIG_PATH, Config, ConfigError, load
 from .embed import EmbedProvider
-from .ingest import IngestResult
+from .ingest import IngestResult, ProgressFn
 from .search import FederatedMember, FederatedSearch, SearchHit
 from .store import Store
+
+
+@dataclass
+class SummaryResult:
+    """Counts for one AI-summary enrichment run (§17)."""
+
+    pending: int = 0
+    summarized: int = 0
+    skipped: int = 0  # empty document text — nothing to summarize
+    failed: int = 0
+    errors: list[tuple[int, str]] = field(default_factory=list)  # (doc_id, message)
 
 
 class Catalog:
@@ -111,6 +123,51 @@ class Catalog:
             )
             embed_provider = self._provider()
             if embed_provider is not None and store.chunks_without_embeddings():
+                ingest._embed_chunks(store, embed_provider, self.config.embed.batch_size)
+                self._refresh_sidecar(store)
+        return result
+
+    def enrich_summaries(
+        self,
+        *,
+        model: str = "claude-opus-4-8",
+        runner: enrich.Runner | None = None,
+        limit: int | None = None,
+        progress: ProgressFn | None = None,
+    ) -> SummaryResult:
+        """Generate a searchable AI summary per document (§17 optional AI summaries; off by
+        default). Summarizes each not-yet-summarized document once, persists it as an
+        ``enrichment`` chunk (locator ``summary``), then embeds the new chunks and refreshes the
+        ANN — determinism by persistence (R-SRCH-5). Idempotent: a re-run skips summarized docs.
+        Refuses with actionable guidance when ``enrich.ai_summaries`` is off."""
+        if not self.config.enrich.ai_summaries:
+            raise ConfigError(
+                "enrich.ai_summaries is off — set `enrich.ai_summaries: true` in your config to "
+                "generate AI summaries (each doc is sent once to the `claude` CLI)."
+            )
+        result = SummaryResult()
+        with Store.open(self.db_path) as store:
+            pending = store.documents_needing_summary(limit or 0)
+            result.pending = len(pending)
+            made_chunk = False
+            for done, (doc_id, _title) in enumerate(pending, 1):
+                text = store.document_ingest_text(doc_id)
+                if not text.strip():
+                    result.skipped += 1
+                else:
+                    try:
+                        summary = enrich.summarize_document(text, model=model, runner=runner)
+                    except enrich.EnrichError as exc:
+                        result.failed += 1
+                        result.errors.append((doc_id, str(exc)))
+                    else:
+                        store.add_enrichment_chunk(doc_id, summary, "summary")
+                        result.summarized += 1
+                        made_chunk = True
+                if progress is not None:
+                    progress("summaries", done, len(pending))
+            embed_provider = self._provider()
+            if made_chunk and embed_provider is not None and store.chunks_without_embeddings():
                 ingest._embed_chunks(store, embed_provider, self.config.embed.batch_size)
                 self._refresh_sidecar(store)
         return result

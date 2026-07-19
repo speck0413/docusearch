@@ -145,7 +145,33 @@ def propose_rules(
     before it runs). ``runner`` is injectable for tests; by default it shells out to the ``claude``
     CLI headless (``-p … --output-format json``) — the operator's Claude Code login, no API key."""
     excerpts = "\n\n---\n\n".join(t[:excerpt_chars] for t in doc_texts)
-    argv = [cli, "-p", _PROPOSE_PROMPT % excerpts, "--model", model, "--output-format", "json"]
+    text = _claude_text(
+        _PROPOSE_PROMPT % excerpts, model=model, runner=runner, cli=cli, timeout=timeout
+    )
+    try:
+        payload = json.loads(_strip_code_fence(text))
+    except json.JSONDecodeError as exc:
+        raise EnrichError(f"could not parse rule proposal as JSON: {text[:200]}") from exc
+    patterns = [
+        GotchaPattern(str(g["pattern"]), str(g.get("label", "")))
+        for g in (payload.get("gotcha_patterns") or [])
+        if isinstance(g, dict) and g.get("pattern")
+    ]
+    return PreflightRules(
+        approved=False, gotcha_patterns=patterns,
+        notes=str(payload.get("notes", "")), sampled=len(doc_texts),
+    )
+
+
+def _claude_text(
+    prompt: str, *, model: str, runner: Runner | None, cli: str, timeout: float
+) -> str:
+    """Run a headless ``claude -p … --output-format json`` call and return the model's result text.
+    ``runner`` is injectable for tests; the default shells out to the ``claude`` CLI — the
+    operator's Claude Code login, no API key. Raises ``EnrichError`` on any failure."""
+    import contextlib
+
+    argv = [cli, "-p", prompt, "--model", model, "--output-format", "json"]
 
     def _default_runner(a: list[str]) -> tuple[int, str, str]:
         import subprocess  # lazy: only when actually calling Claude
@@ -160,9 +186,6 @@ def propose_rules(
         raise EnrichError(f"claude CLI invocation failed: {type(exc).__name__}: {exc}") from exc
     if code != 0:
         raise EnrichError(f"claude CLI failed (exit {code}): {(err or out).strip()[:200]}")
-
-    import contextlib
-
     text = out.strip()
     env = None
     with contextlib.suppress(json.JSONDecodeError):  # `--output-format json` -> result envelope
@@ -171,19 +194,37 @@ def propose_rules(
         if env.get("is_error"):
             raise EnrichError(f"claude CLI returned an error: {str(env['result'])[:200]}")
         text = str(env["result"])
-    try:
-        payload = json.loads(_strip_code_fence(text))
-    except json.JSONDecodeError as exc:
-        raise EnrichError(f"could not parse rule proposal as JSON: {text[:200]}") from exc
-    patterns = [
-        GotchaPattern(str(g["pattern"]), str(g.get("label", "")))
-        for g in (payload.get("gotcha_patterns") or [])
-        if isinstance(g, dict) and g.get("pattern")
-    ]
-    return PreflightRules(
-        approved=False, gotcha_patterns=patterns,
-        notes=str(payload.get("notes", "")), sampled=len(doc_texts),
-    )
+    return text
+
+
+_SUMMARIZE_PROMPT = """Summarize this documentation page for search and quick reference. Write 2-4
+plain-text sentences, no preamble or markdown — capture what the page covers and any key specifics
+(part numbers, procedures, cautions). Reply with ONLY the summary.
+
+--- DOCUMENT ---
+%s
+"""
+
+
+def summarize_document(
+    text: str,
+    *,
+    model: str = "claude-opus-4-8",
+    runner: Runner | None = None,
+    cli: str = "claude",
+    timeout: float = 300.0,
+    excerpt_chars: int = 6000,
+) -> str:
+    """A concise, searchable AI summary of one document (§17 optional AI summaries). Called only at
+    enrichment time and persisted (determinism by persistence, R-SRCH-5). Raises ``EnrichError`` on
+    failure so the caller can skip that doc and continue."""
+    summary = _claude_text(
+        _SUMMARIZE_PROMPT % text[:excerpt_chars],
+        model=model, runner=runner, cli=cli, timeout=timeout,
+    ).strip()
+    if not summary:
+        raise EnrichError("claude returned an empty summary")
+    return summary
 
 
 def _strip_code_fence(text: str) -> str:

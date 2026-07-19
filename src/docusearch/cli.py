@@ -182,6 +182,39 @@ def _cmd_vision(args: argparse.Namespace) -> int:
     return 1 if result.enriched == 0 and result.failed > 0 else 0
 
 
+def _cmd_summarize(args: argparse.Namespace) -> int:
+    """Generate a searchable AI summary per document (enrich.ai_summaries; off by default)."""
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    if not cfg.enrich.ai_summaries:
+        raise config.ConfigError(
+            "enrich.ai_summaries is off — set `enrich.ai_summaries: true` in your config to "
+            "generate AI summaries (each doc is sent once to the `claude` CLI)."
+        )
+    with Store.open(cfg.paths.db_path) as store:
+        pending = len(store.documents_needing_summary(args.limit or 0))
+    if pending == 0:
+        print("No documents need summaries (all active docs already summarized).")
+        return 0
+    print(
+        f"{pending} documents will be summarized by {args.model!r} via the `claude` CLI "
+        "(your Claude Code login, no API key).",
+        file=sys.stderr,
+    )
+    result = Catalog(cfg).enrich_summaries(
+        model=args.model, limit=args.limit, progress=_ProgressBar()
+    )
+    print(
+        f"Summarized {result.summarized} documents "
+        f"({result.skipped} empty, {result.failed} failed)."
+    )
+    for doc_id, msg in result.errors[:10]:
+        print(f"  ! doc {doc_id}: {msg}", file=sys.stderr)
+    runlog.log("cli.summarize", summarized=result.summarized, failed=result.failed)
+    runlog.flush()
+    return 1 if result.summarized == 0 and result.failed > 0 else 0
+
+
 def _cmd_preflight(args: argparse.Namespace) -> int:
     """Pre-flight classification (R-ING-7): sample the corpus, ask Claude (temp 0) to propose
     gotcha rules, write an UNAPPROVED preflight_rules.yaml for review."""
@@ -868,6 +901,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_vision.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     p_vision.add_argument("--config", default="docusearch.yaml", help="config path")
     p_vision.set_defaults(func=_cmd_vision)
+
+    p_summarize = sub.add_parser(
+        "summarize",
+        help="generate a searchable AI summary per document (enrich.ai_summaries; off by default)",
+    )
+    p_summarize.add_argument(
+        "--model", default="claude-opus-4-8", help="Claude model for summaries"
+    )
+    p_summarize.add_argument(
+        "--limit", type=int, default=None, help="only summarize the first N pending docs"
+    )
+    p_summarize.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_summarize.set_defaults(func=_cmd_summarize)
 
     p_preflight = sub.add_parser(
         "preflight",

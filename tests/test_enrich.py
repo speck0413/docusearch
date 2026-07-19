@@ -116,6 +116,31 @@ def test_propose_rules_raises_on_cli_failure() -> None:
         enrich.propose_rules(["doc"], model="m", runner=failing)
 
 
+def test_summarize_document_returns_result_text() -> None:
+    import json
+
+    def fake_runner(argv: list[str]) -> tuple[int, str, str]:
+        assert "-p" in argv and "--output-format" in argv
+        prompt = argv[argv.index("-p") + 1]
+        assert "the reset procedure" in prompt  # the doc text reached the model
+        return 0, json.dumps({"result": "A page covering the reset procedure.", "is_error": False}), ""
+
+    out = enrich.summarize_document("This documents the reset procedure.", model="m", runner=fake_runner)
+    assert out == "A page covering the reset procedure."
+
+
+def test_summarize_document_raises_on_empty() -> None:
+    import json
+
+    import pytest
+
+    def empty(argv: list[str]) -> tuple[int, str, str]:
+        return 0, json.dumps({"result": "   ", "is_error": False}), ""
+
+    with pytest.raises(enrich.EnrichError):
+        enrich.summarize_document("text", model="m", runner=empty)
+
+
 def test_run_preflight_writes_unapproved_rules_from_sampled_source(tmp_path: Path) -> None:
     import json
 
