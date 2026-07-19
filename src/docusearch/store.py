@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _MEMORY = ":memory:"
 
@@ -157,10 +157,51 @@ _SCHEMA_V3 = (
     "ALTER TABLE images ADD COLUMN vision_model TEXT;"
 )
 
+# Migration 4 = structured STDF test-data tables (GATE 6, R-STDF-2). Alongside the searchable test
+# chunks, numeric results + part touchdowns land in real columns so **non-AI tools** (plain SQL, a
+# thin web UI) can query the data and drive the plot engine directly, unaided.
+_SCHEMA_V4 = """
+CREATE TABLE stdf_results (
+    id         INTEGER PRIMARY KEY,
+    doc_id     INTEGER REFERENCES documents(id),
+    chunk_id   INTEGER REFERENCES chunks(id),
+    test_num   INTEGER,
+    test_txt   TEXT,
+    result     REAL,
+    units      TEXT,
+    head       INTEGER,
+    site       INTEGER,
+    part_id    TEXT,
+    insertion  TEXT,
+    passed     INTEGER
+);
+CREATE INDEX idx_stdf_results_doc  ON stdf_results(doc_id);
+CREATE INDEX idx_stdf_results_test ON stdf_results(test_num);
+CREATE TABLE stdf_parts (
+    id         INTEGER PRIMARY KEY,
+    doc_id     INTEGER REFERENCES documents(id),
+    part_id    TEXT,
+    insertion  TEXT,
+    lot        TEXT,
+    sublot     TEXT,
+    wafer      TEXT,
+    x          INTEGER,
+    y          INTEGER,
+    head       INTEGER,
+    site       INTEGER,
+    hard_bin   INTEGER,
+    soft_bin   INTEGER,
+    passed     INTEGER
+);
+CREATE INDEX idx_stdf_parts_doc   ON stdf_parts(doc_id);
+CREATE INDEX idx_stdf_parts_wafer ON stdf_parts(wafer);
+"""
+
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
+    (4, _SCHEMA_V4),
 )
 
 
@@ -448,6 +489,66 @@ class Store:
             return self._conn.execute(sql, (kind, limit)).fetchall()
         return self._conn.execute(sql, (kind,)).fetchall()
 
+    # -- structured STDF data (GATE 6, R-STDF-2) — non-AI-queryable ----------------
+
+    def add_stdf_results(self, rows: Sequence[tuple]) -> None:  # type: ignore[type-arg]
+        """Bulk-insert numeric test results (doc_id, chunk_id, test_num, test_txt, result, units,
+        head, site, part_id, insertion, passed) — the columns a non-AI tool / web UI queries."""
+        if rows:
+            self._conn.executemany(
+                "INSERT INTO stdf_results(doc_id, chunk_id, test_num, test_txt, result, units, "
+                "head, site, part_id, insertion, passed) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+            self._maybe_commit()
+
+    def add_stdf_parts(self, rows: Sequence[tuple]) -> None:  # type: ignore[type-arg]
+        """Bulk-insert part touchdowns (doc_id, part_id, insertion, lot, sublot, wafer, x, y, head,
+        site, hard_bin, soft_bin, passed)."""
+        if rows:
+            self._conn.executemany(
+                "INSERT INTO stdf_parts(doc_id, part_id, insertion, lot, sublot, wafer, x, y, "
+                "head, site, hard_bin, soft_bin, passed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+            self._maybe_commit()
+
+    def stdf_test_list(self) -> list[sqlite3.Row]:
+        """Distinct (test_num, test_txt, n) across the store — a web UI's test picker."""
+        return self._conn.execute(
+            "SELECT test_num, MAX(test_txt) AS test_txt, COUNT(*) AS n FROM stdf_results "
+            "GROUP BY test_num ORDER BY test_num"
+        ).fetchall()
+
+    def stdf_results_query(
+        self, *, test_num: int | None = None, insertion: str | None = None,
+        doc_id: int | None = None, limit: int = 100000,
+    ) -> list[sqlite3.Row]:
+        """Numeric results with optional filters — the data behind a plot, queryable without AI."""
+        clauses, params = [], []
+        for col, val in (("r.test_num", test_num), ("r.insertion", insertion), ("r.doc_id", doc_id)):
+            if val is not None:
+                clauses.append(f"{col}=?")
+                params.append(val)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        return self._conn.execute(
+            "SELECT r.test_num, r.test_txt, r.result, r.units, r.head, r.site, r.part_id, "
+            "r.insertion, r.passed FROM stdf_results r" + where + " ORDER BY r.id LIMIT ?",
+            params,
+        ).fetchall()
+
+    def stdf_parts_all(self, *, doc_id: int | None = None) -> list[sqlite3.Row]:
+        """All part touchdowns (optionally one doc) for yield/traceability, ordered by ingest order."""
+        if doc_id is None:
+            return self._conn.execute("SELECT * FROM stdf_parts ORDER BY id").fetchall()
+        return self._conn.execute(
+            "SELECT * FROM stdf_parts WHERE doc_id=? ORDER BY id", (doc_id,)
+        ).fetchall()
+
+    def count_stdf_results(self) -> int:
+        return int(self._conn.execute("SELECT COUNT(*) FROM stdf_results").fetchone()[0])
+
     def chunk_ids_matching(self, query: str) -> list[int]:
         """Raw FTS5 rowid match for ``query`` (unranked). Ranking lands in search.py.
 
@@ -518,6 +619,8 @@ class Store:
             c.execute("DELETE FROM relations WHERE src_doc=?", (doc_id,))
             c.execute("UPDATE relations SET dst_doc=NULL WHERE dst_doc=?", (doc_id,))
             c.execute("DELETE FROM images WHERE doc_id=?", (doc_id,))
+            c.execute("DELETE FROM stdf_results WHERE doc_id=?", (doc_id,))
+            c.execute("DELETE FROM stdf_parts WHERE doc_id=?", (doc_id,))
             c.execute("DELETE FROM documents WHERE id=?", (doc_id,))
 
     def document_ids_for_source(self, source: str) -> list[int]:

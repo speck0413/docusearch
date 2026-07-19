@@ -1217,6 +1217,7 @@ def _write_stdf(
         audience=source.audience, mtime=path.stat().st_mtime, status="active",
     )
     result.documents += 1
+    result_rows: list[tuple[object, ...]] = []  # structured results — non-AI-queryable (R-STDF-2)
     for ordv, test in enumerate(run.tests):
         chunk_id = store.add_chunk(
             document_id=doc_id, ord=ordv, text=stdf_mod.stdf_test_text(test), kind="test",
@@ -1227,6 +1228,16 @@ def _write_stdf(
                 doc_id=doc_id, chunk_id=chunk_id, kind="condition", source="stdf",
                 rule_id=key, note=value,
             )
+        result_rows.append((
+            doc_id, chunk_id, test.test_num, test.test_txt, test.result, "",
+            test.head, test.site, test.part_id, run.insertion, int(test.passed),
+        ))
+    store.add_stdf_results(result_rows)
+    store.add_stdf_parts([
+        (doc_id, p.part_id, p.insertion, p.lot_id, p.sublot_id, p.wafer_id, p.x, p.y,
+         p.head, p.site, p.hard_bin, p.soft_bin, int(p.passed))
+        for p in run.parts
+    ])
     result.chunks += len(run.tests)
     result.stdf_tests += len(run.tests)
 

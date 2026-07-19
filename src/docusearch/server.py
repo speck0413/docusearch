@@ -551,6 +551,61 @@ class Service:
         )
         return {"html": html, "backend": self._backend(backend)}
 
+    # -- structured STDF data (non-AI: a thin web UI queries these directly) -------
+
+    def stdf_data_tests(
+        self, *, store: str | None = None, user: str | None = None, groups: set[str] | None = None
+    ) -> dict[str, Any]:
+        """The distinct tests in a data store — a web UI's test picker, no AI involved."""
+        with Store.open(self._db_for_read(store, user, groups)) as db:
+            tests = [
+                {"test_num": r["test_num"], "test_txt": r["test_txt"], "n": r["n"]}
+                for r in db.stdf_test_list()
+            ]
+        return {"tests": tests}
+
+    def stdf_data_results(
+        self, *, test_num: int | None = None, insertion: str | None = None,
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Numeric results (optionally filtered) as plain JSON — the data behind a plot, queryable
+        without AI so a thin web UI can chart it directly."""
+        with Store.open(self._db_for_read(store, user, groups)) as db:
+            rows = db.stdf_results_query(test_num=test_num, insertion=insertion)
+        return {
+            "results": [
+                {
+                    "test_num": r["test_num"], "test_txt": r["test_txt"], "result": r["result"],
+                    "units": r["units"], "head": r["head"], "site": r["site"],
+                    "part_id": r["part_id"], "insertion": r["insertion"], "passed": bool(r["passed"]),
+                }
+                for r in rows
+            ]
+        }
+
+    def stdf_data_yield(
+        self, *, part_key: str = "", store: str | None = None,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """First-pass + final yield per insertion, computed from the structured parts table."""
+        from . import stdf as stdf_mod
+        from . import stdf_analytics
+
+        with Store.open(self._db_for_read(store, user, groups)) as db:
+            rows = db.stdf_parts_all()
+        parts = [
+            stdf_mod.StdfPart(
+                lot_id=str(r["lot"] or ""), sublot_id=str(r["sublot"] or ""),
+                wafer_id=str(r["wafer"] or ""), x=r["x"], y=r["y"], part_id=str(r["part_id"] or ""),
+                head=int(r["head"] or 0), site=int(r["site"] or 0), hard_bin=int(r["hard_bin"] or 0),
+                soft_bin=int(r["soft_bin"] or 0), passed=bool(r["passed"]),
+                insertion=str(r["insertion"] or ""),
+            )
+            for r in rows
+        ]
+        pk = stdf_analytics.parse_part_key(part_key or self.config.stdf.part_key)
+        return {"insertions": stdf_analytics.insertion_yield(parts, part_key=pk)}
+
     def relations(
         self, doc_id: int, direction: str = "both", *, depth: int = 1,
         store: str | None = None, user: str | None = None, groups: set[str] | None = None,
@@ -1141,6 +1196,49 @@ def create_app(config: Config) -> FastAPI:
         except PermissionError as err:
             raise HTTPException(status_code=403, detail=str(err)) from err
         except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+
+    @app.get("/v1/data/stdf/tests")
+    def data_tests(request: Request, store: str | None = None) -> dict[str, Any]:
+        user, groups = _read_identity(request)
+        try:
+            return service.stdf_data_tests(store=store, user=user, groups=groups)
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+
+    @app.get("/v1/data/stdf/results")
+    def data_results(
+        request: Request, test_num: int | None = None, insertion: str | None = None,
+        store: str | None = None,
+    ) -> dict[str, Any]:
+        user, groups = _read_identity(request)
+        try:
+            return service.stdf_data_results(
+                test_num=test_num, insertion=insertion, store=store, user=user, groups=groups
+            )
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+
+    @app.get("/v1/data/stdf/yield")
+    def data_yield(request: Request, part_key: str = "", store: str | None = None) -> dict[str, Any]:
+        user, groups = _read_identity(request)
+        try:
+            return service.stdf_data_yield(part_key=part_key, store=store, user=user, groups=groups)
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+
+    @app.post("/v1/data/plot")
+    def data_plot(req: dict[str, Any]) -> dict[str, Any]:
+        """Render a plot from posted data — a thin web UI calls this directly, no AI. Body:
+        {kind, y|series|x+y, title, backend}."""
+        try:
+            series = req.get("series")
+            tuples = [(str(s[0]), list(s[1])) for s in series] if series else None
+            return service.plot_data(
+                kind=str(req.get("kind", "histogram")), series=tuples, x=req.get("x"),
+                y=req.get("y"), title=str(req.get("title", "")), backend=str(req.get("backend", "")),
+            )
+        except (ValueError, TypeError, IndexError, KeyError) as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
 
     @app.get("/v1/discrepancies")
