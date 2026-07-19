@@ -519,14 +519,44 @@ _evidence_images = report.evidence_images
 def _cmd_report(args: argparse.Namespace) -> int:
     """Render a cited answer spec (YAML) to an md/html report, verifying every citation
     against the evidence the agent actually retrieved (refuses hallucinated references)."""
-    from . import citations, report
+    from . import citations, report, report_export
 
     cfg = config.load(Path(args.config))
     _configure_logging(cfg)
     spec = yaml.safe_load(Path(args.spec).read_text(encoding="utf-8")) or {}
     evidence = {(int(d), int(c)) for d, c in spec.get("evidence", [])}
-    fmt = args.format or ("html" if str(args.out or "").endswith(".html") else "md")
+    out_str = str(args.out or "")
+    _ext = out_str.rsplit(".", 1)[-1].lower() if "." in out_str else ""
+    fmt = args.format or (_ext if _ext in ("html", "pdf", "docx", "pptx", "xlsx") else "md")
     base_url = f"http://localhost:{cfg.serve.port}"
+
+    # Binary export formats (PDF/DOCX/PPTX/XLSX) — same citation guard, written as bytes (R-CIT-1).
+    if fmt in report_export.EXPORT_FORMATS:
+        if not args.out:
+            print("error: --out is required for binary formats (pdf/docx/pptx/xlsx).", file=sys.stderr)
+            return 1
+        ref_targets = _reference_targets(cfg.paths.db_path, evidence)
+        try:
+            data = report_export.export_report(
+                title=str(spec.get("title", "Report")), subtitle=str(spec.get("subtitle", "")),
+                body=str(spec.get("body", "")), sections=spec.get("sections"), evidence=evidence,
+                fmt=fmt, request=args.request or str(spec.get("request", "")),
+                requested_by=args.requested_by or str(spec.get("requested_by", "")),
+                model=args.model or str(spec.get("model", "")),
+                classification=(args.classification if args.classification is not None
+                                else str(spec.get("classification", "Confidential"))),
+                ref_targets=ref_targets,
+            )
+        except citations.CitationError as err:
+            print(f"error: {err}", file=sys.stderr)
+            return 1
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        print(f"Wrote {fmt} report to {out}")
+        runlog.log("cli.report", spec=str(args.spec), out=str(args.out), fmt=fmt)
+        runlog.flush()
+        return 0
     # header provenance: CLI flags win over spec fields (agents can pass either)
     sources = list(spec.get("sources", [])) or [s.name for s in cfg.sources]
     # References link to the ORIGINAL vendor document (file://), labelled "store — title —
@@ -958,7 +988,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument(
         "--spec", required=True, help="YAML: title, body (with [D:] cites), evidence"
     )
-    p_report.add_argument("--format", choices=("md", "html"), default=None, help="output format")
+    p_report.add_argument(
+        "--format", choices=("md", "html", "pdf", "docx", "pptx", "xlsx"), default=None,
+        help="output format (pdf/docx/pptx/xlsx need --out)",
+    )
     p_report.add_argument("--out", help="write here (default: stdout); format inferred from .html")
     p_report.add_argument("--request", default="", help="the exact request this report answers")
     p_report.add_argument("--requested-by", default="", help="user the report is for")
