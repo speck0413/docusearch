@@ -57,6 +57,7 @@ class SearchHit:
     images: list[str] = field(default_factory=list)
     embed_model_used: str = "none"
     search_mode: str = "bm25"
+    store: str = ""  # federation member this hit came from (empty for a single store)
 
 
 def sanitize_query(text: str, *, prefix: bool = False) -> str:
@@ -487,7 +488,7 @@ class FederatedSearch:
             for hit in bm25_hits:
                 key = self._key(idx, hit, keys)
                 bm25_best[key] = max(bm25_best.get(key, hit.score), hit.score)
-                rep.setdefault(key, hit)
+                rep.setdefault(key, replace(hit, store=member.name))  # tag origin store (H6)
             if member.provider is not None and member.vector_index is not None:
                 query_vec = member.provider.embed([query])[0]
                 vec_hits = vector_search(
@@ -497,7 +498,7 @@ class FederatedSearch:
                 for hit in vec_hits:
                     key = self._key(idx, hit, vkeys)
                     vec_best[key] = max(vec_best.get(key, hit.score), hit.score)
-                    rep.setdefault(key, hit)
+                    rep.setdefault(key, replace(hit, store=member.name))
 
         def _order(scored: dict[Hashable, float]) -> list[Hashable]:
             ranked = sorted(scored.items(), key=lambda kv: (-kv[1], str(kv[0])))

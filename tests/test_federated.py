@@ -156,3 +156,31 @@ def test_federated_subset_selection_by_name(tmp_path: Path) -> None:
         # an unknown store name fails loudly rather than silently searching nothing
         with pytest.raises(ValueError, match="unknown"):
             fed.search("COMMON13", stores=["rust"])
+
+
+def test_federated_hits_carry_store_and_citation_resolves(tmp_path: Path) -> None:
+    # Red-team H6: a federated search hit carries its origin member store, and get_document(store=)
+    # resolves the citation to that member — without the store, the federation's own (empty) db can't.
+    from docusearch import config
+    from docusearch.server import Service
+
+    _store_from_docs(tmp_path, "a", {"a.html": _doc("Alpha", "GADGET91 lives in store A.")})
+    _store_from_docs(tmp_path, "b", {"b.html": _doc("Bravo", "WIDGET92 lives in store B.")})
+    fed_cfg = tmp_path / "federation.yaml"
+    fed_cfg.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "fs").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "fed.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "ft").as_posix()}"\n'
+        'sources: []\nembed:\n  model: "none"\n'
+        f'federation:\n  - name: a\n    config: "{(tmp_path / "a.yaml").as_posix()}"\n'
+        f'  - name: b\n    config: "{(tmp_path / "b.yaml").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    svc = Service(config.load(fed_cfg))
+    results, _model, mode = svc.search(["WIDGET92"], top_k=3)
+    assert mode == "federated"
+    hit = results[0][0]
+    assert hit.store == "b"  # tagged with the member it came from
+    doc = svc.get_document(hit.doc_id, store=hit.store)  # resolves against store b
+    assert doc is not None and "WIDGET92" in doc["chunks"][0]["text"]
+    # without the store, the federation's own (empty) db has no such doc
+    assert svc.get_document(hit.doc_id, store=None) is None

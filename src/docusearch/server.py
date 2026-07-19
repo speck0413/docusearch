@@ -191,13 +191,26 @@ class Service:
         mode = "hybrid" if (provider is not None and vector_index is not None) else "bm25"
         return result_lists, model_used, mode
 
-    def list_stores(self) -> dict[str, Any]:
-        """The document stores a query can target. In a federation, ``stores`` lists the member
-        names a search can be scoped to (pass a subset as ``stores=[...]``); empty for single-store."""
-        return {
-            "federated": bool(self.config.federation),
-            "stores": [m.name for m in self.config.federation],
-        }
+    def check_read_access(self, user: str | None, groups: set[str] | None) -> None:
+        """Raise ``PermissionError`` if a SINGLE private store may not be read by this requester —
+        the gate every read endpoint (get_document, images, relations, health, …) calls so a private
+        store's content/metadata is never reachable by a caller who couldn't search it (red-team H1).
+        A federation's own store is empty; its members are gated per-member at search/list time."""
+        if not self.config.federation and not self.config.access.permits(
+            user=user, groups=groups or set()
+        ):
+            raise PermissionError("access denied: this store is private")
+
+    def list_stores(self, *, user: str | None = None, groups: set[str] | None = None) -> dict[str, Any]:
+        """The document stores a query can target. In a federation, lists only the member names the
+        requester may access (a private member the caller isn't whitelisted for is omitted — its
+        existence isn't leaked, red-team H2). Empty for a single store."""
+        grp = groups or set()
+        names = [
+            m.name for m in self.config.federation
+            if load(Path(m.config)).access.permits(user=user, groups=grp)
+        ]
+        return {"federated": bool(self.config.federation), "stores": names}
 
     def submit_feedback(
         self, *, user: str, text: str, doc_id: int | None = None,
@@ -221,15 +234,18 @@ class Service:
 
     def _target_config(self, store: str | None) -> Config:
         """Resolve which store to ingest into: a named federation member (vendor / internal / user
-        / acme …) or, with no name, this config's own single store."""
-        if store and self.config.federation:
-            for member in self.config.federation:
-                if member.name == store:
-                    return load(Path(member.config))
-            raise ValueError(
-                f"unknown store {store!r}; available: {[m.name for m in self.config.federation]}"
-            )
-        return self.config
+        / acme …) or, with no name, this config's own single store. A named store errors if there is
+        no federation or the name is unknown — never a silent misroute to the default (red-team M4)."""
+        if not store:
+            return self.config
+        if not self.config.federation:
+            raise ValueError(f"no 'federation:' configured; cannot target store {store!r}")
+        for member in self.config.federation:
+            if member.name == store:
+                return load(Path(member.config))
+        raise ValueError(
+            f"unknown store {store!r}; available: {[m.name for m in self.config.federation]}"
+        )
 
     def ingest_from_path(
         self,
@@ -238,14 +254,26 @@ class Service:
         store: str | None = None,
         label: str = "upload",
         uploaded_by: str = "",
+        groups: set[str] | None = None,
         min_content_chars: int = 1,
     ) -> dict[str, Any]:
         """Ingest a **folder** or an uploaded **.zip/.tar.gz** (uncompressed into the target store's
         staging) as a labelled source, into the chosen store (R-ING write path). ``label`` tags the
-        collection; ``uploaded_by`` records who added it. Returns the ingest counts."""
+        collection; ``uploaded_by`` records who added it. Writing to a **private** store requires the
+        uploader be whitelisted for it (red-team H3). A server-side folder path must sit under the
+        target store's ``inbound`` staging area — no arbitrary-filesystem read (red-team H4).
+        Returns the ingest counts."""
         target = self._target_config(store)
+        if not target.access.permits(user=uploaded_by or None, groups=groups or set()):
+            raise PermissionError(f"access denied: cannot write to store {store or 'default'!r}")
+        inbound = (Path(target.paths.staging_dir) / "inbound").resolve()
         src_path = Path(path)
         if src_path.is_dir():
+            if not src_path.resolve().is_relative_to(inbound):
+                raise ValueError(
+                    f"folder ingest is confined to the store's inbound dir ({inbound}); "
+                    "place files there or use the upload endpoint"
+                )
             location = src_path
         elif _is_archive(src_path):
             location = Path(target.paths.staging_dir) / "uploads" / label
@@ -351,11 +379,26 @@ class Service:
         vectors = provider.embed(texts)
         return {"model": provider.model_id, "dim": provider.dim, "vectors": vectors.tolist()}
 
-    def get_document(self, doc_id: int, *, chunk: int | None = None) -> dict[str, Any] | None:
+    def _db_for_read(
+        self, store: str | None, user: str | None, groups: set[str] | None
+    ) -> str:
+        """The db_path to read from, with an access gate: route to a named federation member (or
+        this single store) and deny a private store the requester isn't whitelisted for. Raises
+        ValueError (unknown store) / PermissionError (denied). Used by every by-id read so a
+        federated citation resolves to the RIGHT member (red-team H6) and never leaks (H1)."""
+        cfg = self._target_config(store)
+        if not cfg.access.permits(user=user, groups=groups or set()):
+            raise PermissionError("access denied: this store is private")
+        return cfg.paths.db_path
+
+    def get_document(
+        self, doc_id: int, *, chunk: int | None = None, store: str | None = None,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any] | None:
         if not _fits_i64(doc_id):  # absurd id -> 404, not a sqlite OverflowError (500)
             return None
-        with Store.open(self.config.paths.db_path) as store:
-            doc = store.get_document(doc_id)
+        with Store.open(self._db_for_read(store, user, groups)) as store_db:
+            doc = store_db.get_document(doc_id)
             if doc is None:
                 return None
             chunks = [
@@ -367,7 +410,7 @@ class Service:
                     "text": str(c["text"]),
                     "highlight": chunk is not None and int(c["id"]) == chunk,
                 }
-                for c in store.chunks_for_document(doc_id)
+                for c in store_db.chunks_for_document(doc_id)
             ]
         return {
             "id": int(doc["id"]),
@@ -380,22 +423,28 @@ class Service:
             "chunks": chunks,
         }
 
-    def document_path(self, doc_id: int) -> Path | None:
+    def document_path(
+        self, doc_id: int, *, store: str | None = None, user: str | None = None,
+        groups: set[str] | None = None,
+    ) -> Path | None:
         if not _fits_i64(doc_id):
             return None
-        with Store.open(self.config.paths.db_path) as store:
-            doc = store.get_document(doc_id)
+        with Store.open(self._db_for_read(store, user, groups)) as store_db:
+            doc = store_db.get_document(doc_id)
         if doc is None:
             return None
         path = Path(str(doc["path"]))
         return path if path.is_file() else None
 
-    def relations(self, doc_id: int, direction: str = "out") -> list[dict[str, Any]]:
+    def relations(
+        self, doc_id: int, direction: str = "out", *, store: str | None = None,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Linked / linking documents (R-ING-5 graph). direction: out | in | both."""
         out: list[dict[str, Any]] = []
-        with Store.open(self.config.paths.db_path) as store:
+        with Store.open(self._db_for_read(store, user, groups)) as store_db:
             if direction in ("out", "both"):
-                for r in store.relations_out(doc_id):
+                for r in store_db.relations_out(doc_id):
                     out.append(
                         {
                             "neighbor": r["dst_doc"],
@@ -405,7 +454,7 @@ class Service:
                         }
                     )
             if direction in ("in", "both"):
-                for r in store.relations_in(doc_id):
+                for r in store_db.relations_in(doc_id):
                     out.append(
                         {
                             "neighbor": r["src_doc"],
@@ -416,13 +465,19 @@ class Service:
                     )
         return out
 
-    def image(self, sha256: str) -> tuple[Path, str] | None:
-        with Store.open(self.config.paths.db_path) as store:
-            row = store.get_image(sha256)
+    def image(
+        self, sha256: str, *, store: str | None = None, user: str | None = None,
+        groups: set[str] | None = None,
+    ) -> tuple[Path, str] | None:
+        cfg = self._target_config(store)
+        if not cfg.access.permits(user=user, groups=groups or set()):
+            raise PermissionError("access denied: this store is private")
+        with Store.open(cfg.paths.db_path) as store_db:
+            row = store_db.get_image(sha256)
         if row is None:
             return None
         ext = str(row["ext"] or "bin").lower()
-        images_dir = (Path(self.config.paths.staging_dir) / "images").resolve()
+        images_dir = (Path(cfg.paths.staging_dir) / "images").resolve()
         path = (images_dir / f"{sha256}.{ext}").resolve()
         # defence in depth: never serve a file resolved outside the images dir
         if not path.is_relative_to(images_dir) or not path.is_file():
@@ -431,6 +486,7 @@ class Service:
 
 
 def _hit_dict(hit: SearchHit, base_url: str) -> dict[str, Any]:
+    store_q = f"&store={hit.store}" if hit.store else ""
     return {
         "doc_id": hit.doc_id,
         "chunk_id": hit.chunk_id,
@@ -443,7 +499,8 @@ def _hit_dict(hit: SearchHit, base_url: str) -> dict[str, Any]:
         "kind": hit.kind,
         "images": hit.images,
         "citation": hit.citation,
-        "url": f"{base_url}/v1/documents/{hit.doc_id}?chunk={hit.chunk_id}",
+        "store": hit.store,
+        "url": f"{base_url}/v1/documents/{hit.doc_id}?chunk={hit.chunk_id}{store_q}",
         "embed_model_used": hit.embed_model_used,
         "search_mode": hit.search_mode,
     }
@@ -519,13 +576,29 @@ def _request_identity(request: Request) -> tuple[str | None, set[str]]:
     return user, groups
 
 
+_ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar")
+_MAX_EXTRACT_BYTES = 2 * 1024**3  # 2 GB decompressed cap — zip-bomb guard (red-team M5)
+
+
 def _is_archive(path: Path) -> bool:
-    return path.suffix.lower() == ".zip" or path.name.lower().endswith((".tar.gz", ".tgz", ".tar"))
+    return path.suffix.lower() == ".zip" or path.name.lower().endswith(_ARCHIVE_SUFFIXES)
+
+
+def _archive_suffix(filename: str) -> str:
+    """The full archive extension of a filename, so a ``.tar.gz`` upload keeps both parts (a bare
+    ``Path.suffix`` would give ``.gz`` and later fail the archive check — red-team M3)."""
+    low = filename.lower()
+    for suf in _ARCHIVE_SUFFIXES:
+        if low.endswith(suf):
+            return suf
+    return Path(filename).suffix or ".zip"
 
 
 def _safe_extract(archive: Path, dest: Path) -> None:
     """Extract a ``.zip`` / ``.tar.gz`` into ``dest``, refusing any member whose path escapes
-    ``dest`` (zip-slip / tar traversal). Windows-first (pathlib), stdlib only."""
+    ``dest`` (zip-slip / tar traversal) and any archive that decompresses past the size cap. ANY
+    archive problem (malformed, oversize, unsafe member) raises ``ValueError`` so callers return a
+    clean 400, never a 500 (red-team M2). Windows-first (pathlib), stdlib only."""
     import tarfile
     import zipfile
 
@@ -535,16 +608,24 @@ def _safe_extract(archive: Path, dest: Path) -> None:
         if not (dest / name).resolve().is_relative_to(dest):
             raise ValueError(f"unsafe path in archive: {name!r}")
 
-    if archive.suffix.lower() == ".zip":
-        with zipfile.ZipFile(archive) as zf:
-            for name in zf.namelist():
-                _guard(name)
-            zf.extractall(dest)
-    else:  # tar / tar.gz
-        with tarfile.open(archive) as tf:
-            for member in tf.getmembers():
-                _guard(member.name)
-            tf.extractall(dest, filter="data")  # py3.12+: refuse special files / abs paths
+    try:
+        if archive.suffix.lower() == ".zip":
+            with zipfile.ZipFile(archive) as zf:
+                if sum(i.file_size for i in zf.infolist()) > _MAX_EXTRACT_BYTES:
+                    raise ValueError("archive too large decompressed")
+                for name in zf.namelist():
+                    _guard(name)
+                zf.extractall(dest)
+        else:  # tar / tar.gz
+            with tarfile.open(archive) as tf:
+                members = tf.getmembers()
+                if sum(m.size for m in members) > _MAX_EXTRACT_BYTES:
+                    raise ValueError("archive too large decompressed")
+                for member in members:
+                    _guard(member.name)
+                tf.extractall(dest, filter="data")  # py3.12+: refuse special files / abs paths
+    except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError) as err:
+        raise ValueError(f"could not read archive: {err}") from err
 
 
 _MCP_HELP = """# docusearch — research + cited report (MCP)
@@ -614,9 +695,10 @@ def build_mcp(service: Service, config: Config) -> Any:
         return _MCP_HELP
 
     @mcp.tool()
-    def list_stores() -> dict[str, Any]:
-        """The document stores you can search; in a federation, the member names to scope to."""
-        return service.list_stores()
+    def list_stores(user: str | None = None, groups: list[str] | None = None) -> dict[str, Any]:
+        """The document stores you can search; in a federation, only the member names YOU may access
+        (pass user/groups). A private member you're not whitelisted for is omitted."""
+        return service.list_stores(user=user, groups=set(groups) if groups else None)
 
     @mcp.tool()
     def search_docs(
@@ -646,28 +728,56 @@ def build_mcp(service: Service, config: Config) -> Any:
         }
 
     @mcp.tool()
-    def get_document(doc_id: int, chunk: int | None = None) -> dict[str, Any] | None:
-        """Fetch a document's metadata + full chunk text by id."""
-        return service.get_document(doc_id, chunk=chunk)
+    def get_document(
+        doc_id: int, chunk: int | None = None, store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch a document's metadata + full chunk text by id (pass `store` for a federated
+        citation). `user`/`groups` gate a private store."""
+        try:
+            return service.get_document(
+                doc_id, chunk=chunk, store=store, user=user,
+                groups=set(groups) if groups else None,
+            )
+        except (PermissionError, ValueError) as err:
+            return {"error": "ACCESS", "message": str(err)}
 
     @mcp.tool()
-    def related_documents(doc_id: int, direction: str = "both") -> list[dict[str, Any]]:
-        """Documents linked from / to this one (direction: out | in | both)."""
-        return service.relations(doc_id, direction)
+    def related_documents(
+        doc_id: int, direction: str = "both", store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Documents linked from / to this one (direction: out | in | both). Gated for a private store."""
+        try:
+            return service.relations(
+                doc_id, direction, store=store, user=user,
+                groups=set(groups) if groups else None,
+            )
+        except (PermissionError, ValueError):
+            return []
 
     @mcp.tool()
-    def catalog_stats() -> dict[str, Any]:
-        """Counts + embedding model for the catalog."""
+    def catalog_stats(user: str | None = None, groups: list[str] | None = None) -> dict[str, Any]:
+        """Counts + embedding model for the catalog (gated for a private store)."""
+        try:
+            service.check_read_access(user, set(groups) if groups else None)
+        except PermissionError as err:
+            return {"error": "ACCESS", "message": str(err)}
         return service.health()
 
     @mcp.tool()
     def ingest_docs(
-        path: str, user: str, store: str | None = None, label: str = "upload"
+        path: str, user: str, store: str | None = None, label: str = "upload",
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Ingest a server-side folder or .zip/.tar.gz into `store`, labelled + attributed to `user`."""
+        """Ingest a server-side folder or .zip/.tar.gz into `store`, labelled + attributed to `user`.
+        Writing a private store requires `user`/`groups` be whitelisted for it."""
         try:
-            return service.ingest_from_path(path, store=store, label=label, uploaded_by=user)
-        except (ValueError, FileNotFoundError) as err:
+            return service.ingest_from_path(
+                path, store=store, label=label, uploaded_by=user,
+                groups=set(groups) if groups else None,
+            )
+        except (ValueError, FileNotFoundError, PermissionError) as err:
             return {"error": "INGEST", "message": str(err)}
 
     @mcp.tool()
@@ -708,12 +818,25 @@ def create_app(config: Config) -> FastAPI:
 
     app = FastAPI(title="docusearch", version=__version__, lifespan=lifespan)
 
+    def _gate_read(request: Request) -> tuple[str | None, set[str]]:
+        """Extract the requester + enforce read access to a private single store (403 if denied) —
+        the guard every read route runs so private content/metadata never leaks to a non-whitelisted
+        caller (red-team H1/M1)."""
+        user, groups = _request_identity(request)
+        try:
+            service.check_read_access(user, groups)
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+        return user, groups
+
     @app.get("/v1/health")
-    def health() -> dict[str, Any]:
+    def health(request: Request) -> dict[str, Any]:
+        _gate_read(request)
         return service.health()
 
     @app.get("/v1/embed-info")
-    def embed_info() -> dict[str, Any]:
+    def embed_info(request: Request) -> dict[str, Any]:
+        _gate_read(request)
         return service.embed_info()
 
     @app.post("/v1/search")
@@ -721,6 +844,10 @@ def create_app(config: Config) -> FastAPI:
         roles = set(req.roles) if req.roles else None
         user, groups = _request_identity(request)
         if req.query_vectors is not None:
+            try:
+                service.check_read_access(user, groups)  # private single store -> 403 (H1)
+            except PermissionError as err:
+                raise HTTPException(status_code=403, detail=str(err)) from err
             if not req.embed_model:
                 raise HTTPException(status_code=400, detail="query_vectors require embed_model")
             try:
@@ -763,29 +890,56 @@ def create_app(config: Config) -> FastAPI:
         except ModelMismatchError as err:
             raise HTTPException(status_code=409, detail={"error": "NO_EMBED_MODEL"}) from err
 
+    def _read_identity(request: Request) -> tuple[str | None, set[str]]:
+        return _request_identity(request)  # the by-id read methods gate per-store themselves
+
     @app.get("/v1/documents/{doc_id}")
-    def get_document(doc_id: int, chunk: int | None = None, download: int = 0) -> Any:
-        if download:
-            path = service.document_path(doc_id)
-            if path is None:
-                raise HTTPException(status_code=404, detail="document file not found")
-            return FileResponse(path)
-        doc = service.get_document(doc_id, chunk=chunk)
+    def get_document(
+        doc_id: int, request: Request, chunk: int | None = None, download: int = 0,
+        store: str | None = None,
+    ) -> Any:
+        # A federated citation carries ?store=<member>; the method routes there and gates access.
+        user, groups = _read_identity(request)
+        try:
+            if download:
+                path = service.document_path(doc_id, store=store, user=user, groups=groups)
+                if path is None:
+                    raise HTTPException(status_code=404, detail="document file not found")
+                return FileResponse(path)
+            doc = service.get_document(doc_id, chunk=chunk, store=store, user=user, groups=groups)
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
         if doc is None:
             raise HTTPException(status_code=404, detail="document not found")
         return doc
 
     @app.get("/v1/images/{sha256}")
-    def get_image(sha256: str) -> FileResponse:
-        img = service.image(sha256)
+    def get_image(sha256: str, request: Request, store: str | None = None) -> FileResponse:
+        user, groups = _read_identity(request)
+        try:
+            img = service.image(sha256, store=store, user=user, groups=groups)
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
         if img is None:
             raise HTTPException(status_code=404, detail="image not found")
         path, media = img
         return FileResponse(path, media_type=media)
 
     @app.get("/v1/relations/{doc_id}")
-    def relations(doc_id: int, direction: str = "both") -> list[dict[str, Any]]:
-        return service.relations(doc_id, direction)
+    def relations(
+        doc_id: int, request: Request, direction: str = "both", store: str | None = None
+    ) -> list[dict[str, Any]]:
+        user, groups = _read_identity(request)
+        try:
+            return service.relations(doc_id, direction, store=store, user=user, groups=groups)
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
 
     @app.post("/v1/reports")
     def reports_route(req: ReportRequest, request: Request) -> dict[str, Any]:
@@ -830,13 +984,18 @@ def create_app(config: Config) -> FastAPI:
 
     @app.post("/v1/ingest")
     def ingest_route(req: IngestRequest, request: Request) -> dict[str, Any]:
-        """Ingest a server-side folder or .zip/.tar.gz path into a store, labelled + attributed."""
-        user = _require_user(request)
+        """Ingest a server-side folder (confined to the store's inbound dir) or a .zip/.tar.gz path
+        into a store, labelled + attributed. Writing a private store requires being whitelisted."""
+        user, groups = _request_identity(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="X-Docusearch-User header required to ingest")
         try:
             return service.ingest_from_path(
-                req.path, store=req.store, label=req.label, uploaded_by=user,
+                req.path, store=req.store, label=req.label, uploaded_by=user, groups=groups,
                 min_content_chars=req.min_content_chars,
             )
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
         except (ValueError, FileNotFoundError) as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
 
@@ -848,15 +1007,21 @@ def create_app(config: Config) -> FastAPI:
         label: str = Form("upload"),  # noqa: B008
     ) -> dict[str, Any]:
         """Upload a .zip/.tar.gz (multipart), uncompress it server-side, and ingest it labelled."""
-        user = _require_user(request)
+        user, groups = _request_identity(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="X-Docusearch-User header required to ingest")
         import tempfile
 
-        suffix = Path(file.filename or "upload.zip").suffix or ".zip"
+        suffix = _archive_suffix(file.filename or "upload.zip")  # keep .tar.gz whole (M3)
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(await file.read())
             archive = Path(tmp.name)
         try:
-            return service.ingest_from_path(archive, store=store, label=label, uploaded_by=user)
+            return service.ingest_from_path(
+                archive, store=store, label=label, uploaded_by=user, groups=groups
+            )
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
         except (ValueError, FileNotFoundError) as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
         finally:

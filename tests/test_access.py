@@ -153,3 +153,65 @@ def test_federation_hides_private_member_from_non_whitelisted_user(tmp_path: Pat
     # anonymous explicitly scoping to the private store -> 'unknown' (existence not leaked)
     scoped = client.post("/v1/search", json={"query_texts": ["SHARED88"], "stores": ["acme"]})
     assert scoped.status_code == 400 and "unknown" in scoped.json()["detail"].lower()
+
+
+def test_private_store_gates_all_read_paths(tmp_path: Path) -> None:
+    # Red-team H1/M1: EVERY read path (not just search) must 403 for a non-whitelisted caller on a
+    # private store — get_document/images/relations/health/embed-info, and ?download.
+    client = _serve(tmp_path, 'access:\n  visibility: private\n  allowed_users: ["alice"]\n')
+    for path in ("/v1/health", "/v1/embed-info", "/v1/documents/1", "/v1/documents/1?download=1",
+                 "/v1/relations/1", "/v1/images/deadbeef"):
+        assert client.get(path).status_code == 403, f"{path} leaked to anonymous"
+    # a whitelisted user gets through (200/404, never 403)
+    assert client.get("/v1/health", headers={"X-Docusearch-User": "alice"}).status_code == 200
+
+
+def test_list_stores_omits_private_members_for_outsider(tmp_path: Path) -> None:
+    # Red-team H2: list_stores must not leak a private member's name to a non-whitelisted caller.
+    from docusearch.server import Service
+
+    for name, priv in (("pub", ""), ("sec", 'access:\n  visibility: private\n  allowed_users: ["alice"]\n')):
+        root = tmp_path / f"{name}-docs"
+        root.mkdir(parents=True)
+        (root / "d.html").write_text("<body><p>x here</p></body>", "utf-8")
+        (tmp_path / f"{name}.yaml").write_text(
+            f'paths:\n  staging_dir: "{(tmp_path/name/"s").as_posix()}"\n  db_path: "{(tmp_path/name/"c.db").as_posix()}"\n'
+            f'  tmp_dir: "{(tmp_path/name/"t").as_posix()}"\nsources:\n  - name: {name}\n    location: "{root.as_posix()}"\n'
+            '    min_content_chars: 3\nembed:\n  model: "none"\n' + priv, encoding="utf-8")
+    fed = tmp_path / "fed.yaml"
+    fed.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path/"f/s").as_posix()}"\n  db_path: "{(tmp_path/"f/c.db").as_posix()}"\n'
+        f'  tmp_dir: "{(tmp_path/"f/t").as_posix()}"\nsources: []\nembed:\n  model: "none"\n'
+        f'federation:\n  - name: pub\n    config: "{(tmp_path/"pub.yaml").as_posix()}"\n'
+        f'  - name: sec\n    config: "{(tmp_path/"sec.yaml").as_posix()}"\n', encoding="utf-8")
+    svc = Service(config.load(fed))
+    assert svc.list_stores(user=None, groups=set())["stores"] == ["pub"]  # outsider: no 'sec'
+    assert set(svc.list_stores(user="alice", groups=set())["stores"]) == {"pub", "sec"}  # insider
+
+
+def test_write_to_private_store_requires_whitelist(tmp_path: Path) -> None:
+    # Red-team H3: writing a private store requires the uploader be whitelisted.
+    from docusearch.server import Service
+
+    root = tmp_path / "sec-docs"
+    root.mkdir()
+    (root / "d.html").write_text("<body><p>x</p></body>", "utf-8")
+    (tmp_path / "sec.yaml").write_text(
+        f'paths:\n  staging_dir: "{(tmp_path/"sec/s").as_posix()}"\n  db_path: "{(tmp_path/"sec/c.db").as_posix()}"\n'
+        f'  tmp_dir: "{(tmp_path/"sec/t").as_posix()}"\nsources: []\nembed:\n  model: "none"\n'
+        'access:\n  visibility: private\n  allowed_users: ["alice"]\n', encoding="utf-8")
+    fed = tmp_path / "fed.yaml"
+    fed.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path/"f/s").as_posix()}"\n  db_path: "{(tmp_path/"f/c.db").as_posix()}"\n'
+        f'  tmp_dir: "{(tmp_path/"f/t").as_posix()}"\nsources: []\nembed:\n  model: "none"\n'
+        f'federation:\n  - name: sec\n    config: "{(tmp_path/"sec.yaml").as_posix()}"\n', encoding="utf-8")
+    svc = Service(config.load(fed))
+    inbound = tmp_path / "sec/s/inbound/drop"
+    inbound.mkdir(parents=True)
+    (inbound / "n.html").write_text("<body><p>NEWSEC content here</p></body>", "utf-8")
+    import pytest
+    with pytest.raises(PermissionError):
+        svc.ingest_from_path(inbound, store="sec", uploaded_by="mallory", groups=set(), min_content_chars=3)
+    # whitelisted user can write
+    res = svc.ingest_from_path(inbound, store="sec", uploaded_by="alice", groups=set(), min_content_chars=3)
+    assert res["documents"] == 1
