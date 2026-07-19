@@ -40,3 +40,32 @@ def test_stdf_test_text_is_searchable(tmp_path: Path) -> None:
     run = stdf.parse_stdf_tests(data)
     text = stdf.stdf_test_text(run.tests[0])
     assert "VMIN_core" in text and "COND corner=slow" in text and "PASS" in text
+
+
+def test_parse_mpr_expands_pins_and_ftr_functional() -> None:
+    from harness.stdf_synth import StdfBuilder
+
+    b = StdfBuilder().far().mir(lot_id="L", test_cod="WS1")
+    b.pir()
+    b.ptr(1000, "VMIN", 0.72, lo=0.70, hi=0.85, units="V")
+    b.mpr(2000, "IDDQ_pins", [1e-6, 2e-6, 1.5e-6, 3e-6], lo=0.0, hi=5e-6, units="A")
+    b.ftr(3000, "SCAN_pass")
+    b.ftr(3001, "SCAN_fail", fail=True)
+    b.prr(part_id="1", hard_bin=1)
+    b.mrr()
+    run = stdf.parse_stdf_tests(b.to_bytes())
+
+    by_rec: dict[str, list[stdf.StdfTest]] = {}
+    for t in run.tests:
+        by_rec.setdefault(t.rec_type, []).append(t)
+
+    assert len(by_rec["PTR"]) == 1 and by_rec["PTR"][0].test_txt == "VMIN"
+    # MPR → one analyzable sub-test per pin, each carrying the scalar limits
+    mpr = by_rec["MPR"]
+    assert len(mpr) == 4 and [t.pin for t in mpr] == [0, 1, 2, 3]
+    assert mpr[0].test_txt == "IDDQ_pins[0]" and mpr[0].hi_limit is not None
+    assert mpr[3].result is not None
+    # FTR → functional, no numeric result, pass/fail from the flag
+    ftr = {t.test_txt: t for t in by_rec["FTR"]}
+    assert ftr["SCAN_pass"].result is None and ftr["SCAN_pass"].passed
+    assert not ftr["SCAN_fail"].passed

@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from html import escape
+from typing import Any
 
 from . import analytics
 from .stdf import StdfPart, StdfRun, StdfTest
@@ -340,10 +341,6 @@ def _num(v: float | None) -> str:
     return "—" if v is None else f"{v:g}"
 
 
-def _results_by_name(run: StdfRun, name: str) -> list[float]:
-    return [t.result for t in run.tests if t.test_txt == name and t.result is not None]
-
-
 def _diff_table_interactive(rows: list[DiffRow], cond_keys: list[str], label_a: str, label_b: str) -> str:
     heads = ["Status", f"old #<br>{escape(label_a)}", f"new #<br>{escape(label_b)}", "Test",
              "old LLM", "new LLM", "old HLM", "new HLM", "Units"]
@@ -378,13 +375,14 @@ def _diff_table_interactive(rows: list[DiffRow], cond_keys: list[str], label_a: 
             cells.append(cell(b.conditions.get(k, "—") if b else "—", fk, ch))
         cells.append('<td class="fb" contenteditable="true"></td>')  # editable feedback
         body.append(
-            f'<tr data-name="{escape(r.name)}" data-status="{r.status}">{"".join(cells)}</tr>'
+            f'<tr data-name="{escape(r.name)}" data-status="{r.status}" '
+            f'data-flags="{r.status}">{"".join(cells)}</tr>'
         )
     n = {s: sum(1 for r in rows if r.status == s) for s in ("added", "removed", "changed", "identical")}
     toolbar = (
         '<div class="toolbar">'
-        '<input type="text" id="diff-filter" placeholder="filter tests…">'
-        '<button id="dl-fb">⬇ Download feedback</button>'
+        '<input type="text" class="rowfilter" placeholder="filter tests…">'
+        '<button class="dl-fb">⬇ Download feedback</button>'
         f'<span class="hint">click a header to sort · type to filter · click a Feedback cell to '
         f'edit · {n["changed"]} changed · {n["added"]} added · {n["removed"]} removed · '
         f'{n["identical"]} identical</span></div>'
@@ -421,6 +419,7 @@ _DASHBOARD_JS = """
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('hidden',x.dataset.p!==name);});
  }
  document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click',function(){tab(t.dataset.t);});});
+ // sortable tables
  document.querySelectorAll('table.grid th.sortable').forEach(function(th){
   th.addEventListener('click',function(){
    var tb=th.closest('table').querySelector('tbody');var rows=[].slice.call(tb.querySelectorAll('tr'));
@@ -435,120 +434,319 @@ _DASHBOARD_JS = """
    rows.forEach(function(r){tb.appendChild(r);});
   });
  });
- var f=document.getElementById('diff-filter');
- if(f)f.addEventListener('input',function(){var q=f.value.toLowerCase();
-  document.querySelectorAll('table.grid tbody tr').forEach(function(r){
-   r.style.display=r.innerText.toLowerCase().indexOf(q)>=0?'':'none';});});
- var dl=document.getElementById('dl-fb');
- if(dl)dl.addEventListener('click',function(){var out=[];
-  document.querySelectorAll('table.grid tbody tr').forEach(function(r){
+ // per-panel chip + text filtering over [data-flags] rows/cards
+ document.querySelectorAll('.panel').forEach(function(panel){
+  var bar=panel.querySelector('.chipbar');var textInput=panel.querySelector('.rowfilter');
+  if(!bar&&!textInput)return;
+  function apply(){
+   var active=bar?bar.querySelector('.chip-active'):null;var flag=active?active.dataset.flag:'all';
+   var q=textInput?textInput.value.toLowerCase():'';
+   panel.querySelectorAll('[data-flags]').forEach(function(el){
+    var okF=flag==='all'||((' '+el.dataset.flags+' ').indexOf(' '+flag+' ')>=0);
+    var okT=!q||el.innerText.toLowerCase().indexOf(q)>=0;
+    el.style.display=(okF&&okT)?'':'none';
+   });
+  }
+  if(bar)bar.querySelectorAll('.chip').forEach(function(c){c.addEventListener('click',function(){
+   bar.querySelectorAll('.chip').forEach(function(x){x.classList.remove('chip-active');});
+   c.classList.add('chip-active');apply();});});
+  if(textInput)textInput.addEventListener('input',apply);
+ });
+ // download the editable feedback in whichever table the button lives in
+ document.querySelectorAll('.dl-fb').forEach(function(btn){btn.addEventListener('click',function(){
+  var panel=btn.closest('.panel');var out=[];
+  panel.querySelectorAll('table.grid tbody tr').forEach(function(r){
    var fb=r.querySelector('td.fb');var t=fb?fb.innerText.trim():'';
-   if(t)out.push({test:r.dataset.name,status:r.dataset.status,feedback:t});});
+   if(t)out.push({test:r.dataset.name,status:r.dataset.status,flags:r.dataset.flags,feedback:t});});
   var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
   var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download='stdf-audit-feedback.json';a.click();});
+  a.download='stdf-audit-feedback.json';a.click();});});
 })();
 """
+
+# distribution shape → the coarse flag/chip it contributes (normal/skewed/sparse contribute none)
+_SHAPE_FLAG = {
+    "bimodal": "bimodal", "long-tail-right": "long-tail", "long-tail-left": "long-tail",
+    "outliers": "outliers", "discrete": "discrete",
+}
+# the chips shown on the explore + plot tabs: (label, flag-token)
+_CHIPS = (
+    ("All", "all"), ("Changed", "changed"), ("Added", "added"), ("Removed", "removed"),
+    ("Shifted", "shifted"), ("Uncorrelated", "uncorrelated"), ("Bimodal", "bimodal"),
+    ("Long-tail", "long-tail"), ("Outliers", "outliers"), ("Functional", "functional"),
+)
+
+
+@dataclass
+class TestAnalysis:
+    """Everything the explorer needs about one test, computed on the CPU (no AI): its record type,
+    distribution shape, run-to-run comparison, and the set of coarse flags to sort/filter on."""
+
+    name: str
+    status: str
+    rec: str
+    shape: str
+    comp: dict[str, Any]
+    lo: float | None
+    hi: float | None
+    flags: list[str]
+
+
+def _values_by_name(run: StdfRun) -> tuple[dict[str, list[float]], dict[str, str]]:
+    """One pass over a run: name → its numeric results, and name → record type (PTR/MPR/FTR)."""
+    vals: dict[str, list[float]] = defaultdict(list)
+    rec: dict[str, str] = {}
+    for t in run.tests:
+        rec.setdefault(t.test_txt, t.rec_type)
+        if t.result is not None:
+            vals[t.test_txt].append(t.result)
+    return vals, rec
+
+
+def _analyze(
+    rows: list[DiffRow], va_map: dict[str, list[float]], vb_map: dict[str, list[float]],
+    rec_map: dict[str, str], da: dict[str, TestDef], db: dict[str, TestDef],
+) -> list[TestAnalysis]:
+    out: list[TestAnalysis] = []
+    for r in rows:
+        va, vb = va_map.get(r.name, []), vb_map.get(r.name, [])
+        rec = rec_map.get(r.name, "PTR")
+        comp = analytics.compare_distributions(va, vb)
+        shape = analytics.classify_distribution(vb or va)["shape"]
+        d = db.get(r.name) or da.get(r.name)
+        lo, hi = (d.lo, d.hi) if d else (None, None)
+        flags = [r.status]
+        if comp["shifted"]:
+            flags.append("shifted")
+        if comp["uncorrelated"]:
+            flags.append("uncorrelated")
+        if rec == "FTR":
+            flags.append("functional")
+        if _SHAPE_FLAG.get(shape):
+            flags.append(_SHAPE_FLAG[shape])
+        out.append(TestAnalysis(r.name, r.status, rec, shape, comp, lo, hi, flags))
+    return out
+
+
+def _chipbar() -> str:
+    chips = "".join(
+        f'<button class="chip{" chip-active" if flag == "all" else ""}" data-flag="{flag}">'
+        f"{escape(label)}</button>"
+        for label, flag in _CHIPS
+    )
+    return f'<div class="chipbar">{chips}</div>'
+
+
+def _explore_table_html(analyses: list[TestAnalysis], label_a: str, label_b: str) -> str:
+    """The **Explore** surface: every test tagged with record type, distribution shape, run-to-run
+    shift, and Q-Q correlation — sortable, chip- + text-filterable, with an editable feedback cell.
+    This is where you push the load onto scripts and jump straight to the tests that matter."""
+    heads = ["Status", "Test", "rec", "shape", f"n {escape(label_a)}", f"n {escape(label_b)}",
+             f"mean {escape(label_a)}", f"mean {escape(label_b)}", "shift %", "Q-Q R²", "outlier %",
+             "flags", "Feedback"]
+    thead = "".join(f'<th class="sortable">{h}</th>' for h in heads)
+
+    def numcell(v: float | None, fmt: str = "{:.3g}") -> str:
+        if v is None:
+            return "<td>—</td>"
+        return f'<td data-v="{v}">{fmt.format(v)}</td>'
+
+    body = []
+    for a in analyses:
+        c = a.comp
+        qq = c["qq_r2"]
+        chips = " ".join(f'<span class="tag">{escape(f)}</span>'
+                         for f in a.flags if f not in ("identical",))
+        body.append(
+            f'<tr data-name="{escape(a.name)}" data-status="{a.status}" '
+            f'data-flags="{" ".join(a.flags)}">'
+            f'<td><span class="badge {a.status}">{a.status}</span></td>'
+            f"<td>{escape(a.name)}</td><td>{a.rec}</td><td>{escape(a.shape)}</td>"
+            f'<td data-v="{c["n_a"]}">{c["n_a"]}</td><td data-v="{c["n_b"]}">{c["n_b"]}</td>'
+            f"{numcell(c['mean_a'] if c['n_a'] else None, '{:.4g}')}"
+            f"{numcell(c['mean_b'] if c['n_b'] else None, '{:.4g}')}"
+            f"{numcell(c['pct_shift'] if c['n_a'] and c['n_b'] else None, '{:+.1f}')}"
+            f"{numcell(qq if qq is not None else None, '{:.3f}')}"
+            f"{numcell(c.get('outlier_frac_b'))}"
+            f"<td>{chips}</td><td class=\"fb\" contenteditable=\"true\"></td></tr>"
+        )
+    toolbar = (
+        '<div class="toolbar"><input type="text" class="rowfilter" placeholder="filter tests…">'
+        '<button class="dl-fb">⬇ Download feedback</button>'
+        '<span class="hint">chips + column headers + the box all filter/sort · '
+        f"{len(analyses)} tests · click a Feedback cell to annotate</span></div>"
+    )
+    return (
+        "<h2>Explore — every test classified on the CPU</h2>" + _chipbar() + toolbar
+        + '<div class="scroll"><table class="grid"><thead><tr>' + thead
+        + f"</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+    )
+
+
+def _interesting_score(a: TestAnalysis) -> float:
+    s = abs(float(a.comp.get("z_shift") or 0.0))
+    s += 3.0 if "uncorrelated" in a.flags else 0.0
+    s += 1.5 if a.status in ("added", "removed") else 0.0
+    s += 1.0 if set(a.flags) & {"bimodal", "long-tail", "outliers"} else 0.0
+    return s
+
+
+def _pick_plotted(analyses: list[TestAnalysis], cap: int) -> list[TestAnalysis]:
+    """Choose the tests to plot as a **balanced mix** across the interesting categories (round-robin),
+    so the gallery isn't all one flag — the user sees shifts, shape changes, added/removed and shape
+    archetypes together, then narrows with the chips."""
+    buckets = {
+        cat: sorted((a for a in analyses if cat in a.flags), key=_interesting_score, reverse=True)
+        for cat in ("uncorrelated", "shifted", "added", "removed", "bimodal", "outliers", "long-tail")
+    }
+    picked: list[TestAnalysis] = []
+    seen: set[str] = set()
+    idx = dict.fromkeys(buckets, 0)
+    while len(picked) < cap:
+        progressed = False
+        for cat, bucket in buckets.items():
+            i = idx[cat]
+            if i < len(bucket):
+                idx[cat] += 1
+                progressed = True
+                a = bucket[i]
+                if a.name not in seen:
+                    seen.add(a.name)
+                    picked.append(a)
+                    if len(picked) >= cap:
+                        break
+        if not progressed:
+            break
+    if not picked:  # nothing flagged — fall back to the first tests so the tab isn't empty
+        picked = analyses[:cap]
+    return picked
 
 
 def audit_report_html(
     run_a: StdfRun, run_b: StdfRun, *, backend: str = "matplotlib",
-    label_a: str = "A", label_b: str = "B", max_plots: int = 24,
+    label_a: str = "A", label_b: str = "B", max_plots: int = 48,
 ) -> str:
-    """A themed, **tabbed, interactive** STDF audit dashboard (R-STDF-2). Five tabs on one page:
-    **Diff** (Excel-like — sort/filter/editable feedback + export), **Q-Q** (per test, A vs B),
-    **Histograms** (per test, with red LLM/HLM limit lines + n/mean/median/std/min/max/Cpl/Cpu/Cpk),
-    **Trend** (per test mean across the runs), and **Site** (per test, site-to-site for the new run)."""
+    """A themed, **tabbed, interactive** STDF audit dashboard (R-STDF-2), built for **thousands** of
+    PTR/MPR/FTR tests. Six tabs on one page: **Explore** (every test classified on the CPU —
+    distribution shape, run-to-run shift, Q-Q correlation; chip/sort/text filters + editable
+    feedback), **Diff** (the field-by-field Beyond-Compare table), **Q-Q**, **Histograms** (red
+    LLM/HLM limit lines + Cpl/Cpu/Cpk), **Trend**, **Site**. The plot tabs render the most
+    interesting tests (biggest shift / uncorrelated / shape anomalies / added-removed) and carry the
+    same chips, so you filter *plots* the way you filter the table."""
     rep = audit_runs(run_a, run_b)
     cond_keys, rows = diff_tests(run_a, run_b)
     da, db = _defs(run_a), _defs(run_b)
-    names = [r.name for r in rows]
+    va_map, rec_a = _values_by_name(run_a)
+    vb_map, rec_b = _values_by_name(run_b)
+    rec_map = {**rec_a, **rec_b}
+    analyses = _analyze(rows, va_map, vb_map, rec_map, da, db)
+    # attach run-B outlier fraction for the explore column (cheap, needed only for display)
+    for a in analyses:
+        a.comp["outlier_frac_b"] = analytics.classify_distribution(
+            vb_map.get(a.name) or va_map.get(a.name, [])
+        )["outlier_frac"] * 100.0
+
     ya_p, ya_t = rep.yield_a
     yb_p, yb_t = rep.yield_b
     ya = 100 * ya_p / ya_t if ya_t else 0.0
     yb = 100 * yb_p / yb_t if yb_t else 0.0
-
+    recs = {r: sum(1 for a in analyses if a.rec == r) for r in ("PTR", "MPR", "FTR")}
+    n_uncorr = sum(1 for a in analyses if "uncorrelated" in a.flags)
+    n_shift = sum(1 for a in analyses if "shifted" in a.flags)
     summary = (
         f'<div class="acard"><strong>Yield</strong>: {escape(label_a)} {ya:.1f}% ({ya_p}/{ya_t}) → '
-        f"{escape(label_b)} {yb:.1f}% ({yb_p}/{yb_t}) · <strong>Δ {yb - ya:+.1f}%</strong> &nbsp;|&nbsp; "
-        f"{len(rep.matched)} matched · {len(rep.added)} added · {len(rep.removed)} removed</div>"
+        f"{escape(label_b)} {yb:.1f}% ({yb_p}/{yb_t}) · <strong>Δ {yb - ya:+.1f}%</strong> "
+        f"&nbsp;|&nbsp; {len(analyses)} tests "
+        f"(PTR {recs['PTR']} · MPR {recs['MPR']} · FTR {recs['FTR']}) &nbsp;|&nbsp; "
+        f"{len(rep.added)} added · {len(rep.removed)} removed · "
+        f"<strong>{n_shift} shifted · {n_uncorr} uncorrelated</strong></div>"
     )
     tabbar = (
         '<div class="tabbar">'
-        '<button class="tab active" data-t="diff">Diff</button>'
+        '<button class="tab active" data-t="explore">Explore</button>'
+        '<button class="tab" data-t="diff">Diff</button>'
         '<button class="tab" data-t="qq">Q-Q</button>'
         '<button class="tab" data-t="hist">Histograms</button>'
         '<button class="tab" data-t="trend">Trend</button>'
         '<button class="tab" data-t="site">Site</button></div>'
     )
-    diff_panel = f'<div class="panel" data-p="diff"><section class="acard">{_diff_table_interactive(rows, cond_keys, label_a, label_b)}</section></div>'
+    explore_panel = (
+        '<div class="panel" data-p="explore"><section class="acard">'
+        + _explore_table_html(analyses, label_a, label_b) + "</section></div>"
+    )
+    diff_panel = (
+        '<div class="panel hidden" data-p="diff"><section class="acard">'
+        + _diff_table_interactive(rows, cond_keys, label_a, label_b) + "</section></div>"
+    )
 
-    # plotly inlines its ~3.5 MB library per call — render every plot WITHOUT it and inline the
-    # runtime once at the top of the page (see plotly_prefix below) so the page stays small and the
-    # library loads before any plot div. matplotlib ignores include_js.
     def plot(kind: str, **kw: object) -> str:
         return analytics.render_plot(kind, backend=backend, include_js=False, **kw)  # type: ignore[arg-type]
 
+    # render plots only for the most interesting tests; cards carry data-flags/shape for chip filtering
+    plotted = _pick_plotted(analyses, max_plots)
+    plotted_names = {a.name for a in plotted}
+    site_map: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for t in run_b.tests:
+        if t.test_txt in plotted_names and t.result is not None:
+            site_map[t.test_txt][t.site].append(t.result)
+
     qq, hist, trend, site = [], [], [], []
-    for name in names[:max_plots]:
-        va, vb = _results_by_name(run_a, name), _results_by_name(run_b, name)
-        d = db.get(name) or da.get(name)
-        lo, hi = (d.lo, d.hi) if d else (None, None)
-        # Q-Q (A vs B)
+    for a in plotted:
+        name, va, vb = a.name, va_map.get(a.name, []), vb_map.get(a.name, [])
+        attrs = f'data-flags="{" ".join(a.flags)}" data-shape="{a.shape}"'
+        head = (f'<h3>{escape(name)}</h3><p class="stats">{a.rec} · {escape(a.shape)}'
+                f' · Q-Q R²={_cap_fmt(a.comp["qq_r2"])}'
+                f' · shift {a.comp["pct_shift"]:+.1f}%</p>')
         if len(va) >= 2 and len(vb) >= 2:
             p = plot("qq", series=[(label_a, va), (label_b, vb)],
-                     title=f"{name} — Q-Q ({label_a} vs {label_b})",
-                     xlabel=label_a, ylabel=label_b)
+                     title=f"{name} — Q-Q ({label_a} vs {label_b})", xlabel=label_a, ylabel=label_b)
         else:
             p = "<p class='stats'>needs ≥2 points in each revision for a Q-Q</p>"
-        qq.append(f'<section class="acard"><h3>{escape(name)}</h3>{p}</section>')
-        # Histogram (current run) with limit lines + capability table
+        qq.append(f'<section class="acard" {attrs}>{head}{p}</section>')
         vals = vb or va
-        vlines = [x for x in (lo, hi) if x is not None]
-        hp = (plot("histogram", y=vals, title=f"{name} distribution",
-                   xlabel=f"{name} result", ylabel="count", vlines=vlines)
-              if vals else "<p class='stats'>no data</p>")
+        vlines = [x for x in (a.lo, a.hi) if x is not None]
+        hp = (plot("histogram", y=vals, title=f"{name} distribution", xlabel=f"{name} result",
+                   ylabel="count", vlines=vlines) if vals else "<p class='stats'>no data</p>")
         cap_tbl = (
             '<div class="scroll"><table class="grid"><thead><tr><th>run</th><th>n</th><th>mean</th>'
             '<th>median</th><th>std</th><th>min</th><th>max</th><th>Cpl</th><th>Cpu</th><th>Cpk</th>'
-            f"</tr></thead><tbody>{_capability_row(label_a, va, lo, hi)}"
-            f"{_capability_row(label_b, vb, lo, hi)}</tbody></table></div>"
+            f"</tr></thead><tbody>{_capability_row(label_a, va, a.lo, a.hi)}"
+            f"{_capability_row(label_b, vb, a.lo, a.hi)}</tbody></table></div>"
         )
-        lim = f"<p class='stats'>spec limits (red): LLM={_num(lo)} · HLM={_num(hi)}</p>"
-        hist.append(f'<section class="acard"><h3>{escape(name)}</h3>{hp}{lim}{cap_tbl}</section>')
-        # Trend (mean across the two runs)
+        hist.append(f'<section class="acard" {attrs}>{head}{hp}'
+                    f'<p class="stats">spec limits (red): LLM={_num(a.lo)} · HLM={_num(a.hi)}</p>'
+                    f"{cap_tbl}</section>")
         tp = [(lbl, analytics.summary_stats(v)["mean"]) for lbl, v in ((label_a, va), (label_b, vb)) if v]
         if tp:
             tpl = plot("linear", x=list(range(len(tp))), y=[p2[1] for p2 in tp],
                        title=f"{name} mean trend", xlabel="revision", ylabel=f"{name} mean")
-            trend.append(f'<section class="acard"><h3>{escape(name)}</h3>{tpl}'
-                         f'<p class="stats">{" → ".join(f"{lbl}: {v:.4g}" for lbl, v in tp)}</p></section>')
-        # Site (current run)
-        groups = {t.site: [] for t in run_b.tests if t.test_txt == name}  # type: ignore[var-annotated]
-        for t in run_b.tests:
-            if t.test_txt == name and t.result is not None:
-                groups[t.site].append(t.result)
+            trend.append(f'<section class="acard" {attrs}>{head}{tpl}</section>')
+        groups = site_map.get(name, {})
         if len(groups) > 1:
             sp = plot("whisker", series=[(f"site {s}", v) for s, v in sorted(groups.items())],
                       title=f"{name} by site", ylabel=name)
-            site.append(f'<section class="acard"><h3>{escape(name)}</h3>{sp}</section>')
+            site.append(f'<section class="acard" {attrs}>{head}{sp}</section>')
 
-    def panel(pid: str, cards: list[str], empty: str) -> str:
-        return f'<div class="panel hidden" data-p="{pid}"><div class="plotgrid">{"".join(cards) or empty}</div></div>'
+    def panel(pid: str, cards: list[str], empty: str, *, chips: bool = False) -> str:
+        bar = _chipbar() if chips else ""
+        return (f'<div class="panel hidden" data-p="{pid}">{bar}'
+                f'<div class="plotgrid">{"".join(cards) or empty}</div></div>')
 
-    # one copy of the plotly runtime at the top of the page (only when plotly plots were produced)
+    plot_note = (f'<p class="stats">showing the {len(plotted)} most interesting tests '
+                 "(largest shift · uncorrelated · shape anomalies · added/removed); "
+                 "use the chips to filter.</p>")
     plotly_prefix = (
         analytics.plotly_js_tag() if backend == "plotly" and any((qq, hist, trend, site)) else ""
     )
     body = (
-        plotly_prefix + summary + tabbar + diff_panel
-        + panel("qq", qq, '<p class="stats">no tests to compare</p>')
-        + panel("hist", hist, '<p class="stats">no tests</p>')
+        plotly_prefix + summary + tabbar + explore_panel + diff_panel
+        + panel("qq", [plot_note, *qq], '<p class="stats">no tests to compare</p>', chips=True)
+        + panel("hist", [plot_note, *hist], '<p class="stats">no tests</p>', chips=True)
         + panel("trend", trend, '<p class="stats">no trend data</p>')
         + panel("site", site, '<p class="stats">single-site data</p>')
         + f"<script>{_DASHBOARD_JS}</script>"
     )
     return _page(
         f"STDF audit — {label_a} vs {label_b}", body,
-        subtitle="interactive test diff + capability plots",
+        subtitle="explore + diff + capability plots at scale",
     )

@@ -99,7 +99,9 @@ class ConditionTracker:
 
 @dataclass
 class StdfTest:
-    """One parametric/functional test result with its limits + the conditions active when it ran."""
+    """One parametric/functional test result with its limits + the conditions active when it ran.
+    ``rec_type`` is the STDF record it came from — ``PTR`` (single parametric), ``MPR`` (one pin of a
+    multiple-result parametric, ``pin`` set), or ``FTR`` (functional, ``result`` is None)."""
 
     test_num: int
     test_txt: str
@@ -112,6 +114,8 @@ class StdfTest:
     lo_limit: float | None = None
     hi_limit: float | None = None
     units: str = ""
+    rec_type: str = "PTR"
+    pin: int | None = None
 
 
 @dataclass
@@ -182,6 +186,46 @@ def _as_float(v: object) -> float | None:
     return None
 
 
+def _as_seq(v: object) -> list[object]:
+    """A pystdf array field comes back as a tuple/list; normalise (scalar/None → []/[v])."""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    return [v]
+
+
+def _tests_from_record(name: str, f: dict[str, object], conditions: dict[str, str]) -> list[StdfTest]:
+    """Turn one PTR / FTR / MPR record into StdfTests. PTR → one; FTR → one functional (result None);
+    MPR → **one per pin** (``TEST_TXT[pin]``), so each pin is analyzed as its own distribution."""
+    flg = _as_int(f.get("TEST_FLG"))
+    passed = not (flg & 0x80)
+    tnum = _as_int(f.get("TEST_NUM"))
+    txt = str(f.get("TEST_TXT") or "").strip()
+    head, site = _as_int(f.get("HEAD_NUM")), _as_int(f.get("SITE_NUM"))
+    lo, hi = _as_float(f.get("LO_LIMIT")), _as_float(f.get("HI_LIMIT"))
+    units = str(f.get("UNITS") or "").strip()
+
+    def make(result: float | None, *, rec: str, pin: int | None, suffix: str = "") -> StdfTest:
+        return StdfTest(
+            test_num=tnum, test_txt=(txt or f"test {tnum}") + suffix, result=result, head=head,
+            site=site, passed=passed, part_id="", conditions=dict(conditions),
+            lo_limit=lo, hi_limit=hi, units=units, rec_type=rec, pin=pin,
+        )
+
+    if name == "Mpr":
+        results = _as_seq(f.get("RTN_RSLT"))
+        pins = _as_seq(f.get("RTN_INDX"))
+        out = []
+        for i, r in enumerate(results):
+            pin = _as_int(pins[i]) if i < len(pins) else i
+            out.append(make(_as_float(r), rec="MPR", pin=pin, suffix=f"[{pin}]"))
+        return out
+    if name == "Ftr":
+        return [make(None, rec="FTR", pin=None)]
+    return [make(_as_float(f.get("RESULT")), rec="PTR", pin=None)]
+
+
 def parse_stdf_tests(
     data: bytes,
     *,
@@ -235,22 +279,7 @@ def parse_stdf_tests(
         elif name == "Pir":
             part_index += 1
         elif name in ("Ptr", "Ftr", "Mpr"):
-            flg = _as_int(f.get("TEST_FLG"))
-            pending.append(
-                StdfTest(
-                    test_num=_as_int(f.get("TEST_NUM")),
-                    test_txt=str(f.get("TEST_TXT") or "").strip(),
-                    result=_as_float(f.get("RESULT")),
-                    head=_as_int(f.get("HEAD_NUM")),
-                    site=_as_int(f.get("SITE_NUM")),
-                    passed=not (flg & 0x80),
-                    part_id="",
-                    conditions=tracker.snapshot(),
-                    lo_limit=_as_float(f.get("LO_LIMIT")),
-                    hi_limit=_as_float(f.get("HI_LIMIT")),
-                    units=str(f.get("UNITS") or "").strip(),
-                )
-            )
+            pending.extend(_tests_from_record(name, f, tracker.snapshot()))
         elif name == "Prr":
             part_id = str(f.get("PART_ID") or part_index)
             part_flg = _as_int(f.get("PART_FLG"))

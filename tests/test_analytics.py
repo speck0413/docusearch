@@ -52,3 +52,56 @@ def test_render_plot_rejects_bad_kind_and_backend() -> None:
         analytics.render_plot("piechart", y=[1, 2, 3])
     with pytest.raises(ValueError, match="backend"):
         analytics.render_plot("histogram", y=[1, 2, 3], backend="ascii")
+
+
+# ---------------------------------------------- algorithmic distribution intelligence
+
+
+def _rng() -> object:
+    import numpy as np
+    return np.random.default_rng(20260719)  # recorded seed (R-SRCH-5)
+
+
+def test_classify_distribution_labels_archetypes() -> None:
+    import numpy as np
+    r = _rng()
+    normal = r.normal(0, 1, 600)
+    bimodal = np.concatenate([r.normal(-4, 0.4, 300), r.normal(4, 0.4, 300)])
+    longtail = r.exponential(1.0, 600)
+    discrete = r.integers(0, 3, 600).astype(float)
+    assert analytics.classify_distribution(normal)["shape"] == "normal"
+    assert analytics.classify_distribution(bimodal)["shape"] == "bimodal"
+    assert analytics.classify_distribution(longtail)["shape"] == "long-tail-right"
+    assert analytics.classify_distribution(discrete)["shape"] == "discrete"
+    assert analytics.classify_distribution([2.5] * 50)["shape"] == "degenerate"
+    assert analytics.classify_distribution([1.0, 2.0, 3.0])["shape"] == "sparse"  # n < 8
+
+
+def test_classify_distribution_is_deterministic() -> None:
+    import numpy as np
+    xs = _rng().normal(0, 1, 200)
+    a = analytics.classify_distribution(xs)
+    b = analytics.classify_distribution(np.asarray(xs))
+    assert a == b
+
+
+def test_compare_distributions_correlated_shifted_uncorrelated() -> None:
+    import numpy as np
+    r = _rng()
+    a = r.normal(0, 1, 500)
+    # same distribution → runs track each other, nothing flagged
+    same = analytics.compare_distributions(a, r.normal(0, 1, 500))
+    assert same["correlated"] is True and same["qq_r2"] > 0.98
+    assert same["shifted"] is False and same["uncorrelated"] is False
+    # same shape, big mean shift → flagged SHIFTED (not a shape change)
+    shifted = analytics.compare_distributions(a, a + 3.0)
+    assert shifted["shifted"] is True and shifted["uncorrelated"] is False
+    # different shape, same mean (normal vs symmetric bimodal) → flagged UNCORRELATED (shape change)
+    bim = np.concatenate([r.normal(-4, 0.4, 250), r.normal(4, 0.4, 250)])
+    diff = analytics.compare_distributions(a, bim)
+    assert diff["uncorrelated"] is True and diff["correlated"] is False and diff["qq_r2"] < 0.95
+
+
+def test_compare_distributions_too_small() -> None:
+    out = analytics.compare_distributions([1.0, 2.0], [3.0, 4.0])
+    assert out["qq_r2"] is None and out["correlated"] is None

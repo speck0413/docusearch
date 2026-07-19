@@ -18,6 +18,9 @@ import io
 import statistics
 from collections.abc import Sequence
 from html import escape
+from typing import Any
+
+import numpy as np
 
 Number = float
 Series = Sequence[tuple[str, Sequence[float]]]  # named series for whisker/qq
@@ -57,6 +60,121 @@ def capability(
 def cpk(values: Sequence[float | None], lo: float, hi: float) -> float | None:
     """Cpk = min(Cpl, Cpu) vs a lower/upper spec limit, or None if undefined (n<2 or std=0)."""
     return capability(values, lo, hi)["cpk"]
+
+
+# --------------------------------------------------------- algorithmic distribution intelligence
+# The point of these is to push the "which tests are interesting" judgement onto the CPU: every test
+# is tagged with a distribution SHAPE and a run-to-run VERDICT so a human (or an agent) filters and
+# sorts to the handful that matter, instead of eyeballing thousands of plots. No AI in the loop.
+
+DISTRIBUTION_SHAPES = (
+    "sparse", "degenerate", "discrete", "bimodal", "long-tail-right", "long-tail-left",
+    "outliers", "normal", "skewed",
+)
+
+
+def _clean(values: Sequence[float | None]) -> list[float]:
+    return [float(v) for v in values if v is not None]
+
+
+def classify_distribution(values: Sequence[float | None]) -> dict[str, Any]:
+    """Label a numeric test's distribution **shape** from its own data (no limits needed), with the
+    moments/fractions behind the call. Shapes: ``sparse`` (n<8), ``degenerate`` (σ≈0), ``discrete``
+    (few distinct values), ``bimodal`` (Sarle's bimodality coefficient high), ``long-tail-right/left``
+    (heavy skew), ``outliers`` (fat IQR tails), ``normal`` (near-symmetric, mesokurtic), else
+    ``skewed``. Deterministic — same input, same label."""
+    xs = np.asarray(_clean(values), dtype=float)
+    n = int(xs.size)
+    base: dict[str, Any] = {
+        "n": n, "mean": 0.0, "std": 0.0, "skew": 0.0, "kurtosis": 0.0,
+        "outlier_frac": 0.0, "unique_frac": 0.0, "bimodality": 0.0,
+    }
+    if n < 8:
+        return {**base, "shape": "sparse", "mean": float(xs.mean()) if n else 0.0}
+    mean, std = float(xs.mean()), float(xs.std())
+    base.update(mean=mean, std=std, unique_frac=float(np.unique(xs).size) / n)
+    if std == 0:
+        return {**base, "shape": "degenerate"}
+    z = (xs - mean) / std
+    skew = float((z ** 3).mean())
+    kurt_excess = float((z ** 4).mean() - 3.0)
+    q1, q3 = (float(v) for v in np.percentile(xs, [25, 75]))
+    iqr = q3 - q1
+    outlier_frac = (
+        float(np.mean((xs < q1 - 1.5 * iqr) | (xs > q3 + 1.5 * iqr))) if iqr > 0 else 0.0
+    )
+    # Sarle's bimodality coefficient (excess kurtosis + small-sample correction); > ~0.55 → two modes.
+    correction = 3.0 * (n - 1) ** 2 / ((n - 2) * (n - 3)) if n > 3 else 0.0
+    denom = kurt_excess + correction
+    bc = (skew ** 2 + 1.0) / denom if denom > 0 else 0.0
+    base.update(skew=skew, kurtosis=kurt_excess, outlier_frac=outlier_frac, bimodality=bc)
+
+    if base["unique_frac"] <= 0.05 or np.unique(xs).size <= 5:
+        shape = "discrete"
+    elif skew > 1.0:  # heavy skew is a tail, even if BC is also high — check it before bimodal
+        shape = "long-tail-right"
+    elif skew < -1.0:
+        shape = "long-tail-left"
+    elif bc > 0.60:  # near-symmetric but two-humped
+        shape = "bimodal"
+    elif outlier_frac > 0.03:
+        shape = "outliers"
+    elif abs(skew) < 0.5 and abs(kurt_excess) < 1.0:
+        shape = "normal"
+    else:
+        shape = "skewed"
+    return {**base, "shape": shape}
+
+
+def compare_distributions(
+    a: Sequence[float | None], b: Sequence[float | None]
+) -> dict[str, Any]:
+    """Compare a test across two runs. ``qq_r2`` is the R² of the two runs' matched quantiles — the
+    Q-Q linearity: ~1 means the runs track the same shape (**correlated**), low means the shape
+    changed (**uncorrelated** — a shift or an unstable/new distribution). Also returns the mean shift
+    (raw, % of |mean A|, and in pooled-σ), and the KS distance. ``None`` fields when a run is too
+    small (<4 points)."""
+    xa, xb = _clean(a), _clean(b)
+    out: dict[str, Any] = {
+        "n_a": len(xa), "n_b": len(xb), "mean_a": float(np.mean(xa)) if xa else 0.0,
+        "mean_b": float(np.mean(xb)) if xb else 0.0, "mean_shift": 0.0, "pct_shift": 0.0,
+        "z_shift": 0.0, "ks": 0.0, "ks_crit": 0.0, "qq_r2": None, "differs": None,
+        "correlated": None, "shifted": None, "uncorrelated": None,
+    }
+    if len(xa) < 4 or len(xb) < 4:
+        return out
+    va, vb = np.asarray(xa), np.asarray(xb)
+    ma, mb = float(va.mean()), float(vb.mean())
+    shift = mb - ma
+    pooled = float(np.sqrt((va.var() + vb.var()) / 2.0)) or 1.0
+    n = min(len(va), len(vb), 256)
+    # Q-Q on the trimmed body [2%, 98%]: the extreme tails of a heavy-tailed/bimodal test are noisy
+    # sample-to-sample even when the shape is unchanged, and would otherwise read as "uncorrelated".
+    probs = np.linspace(0.02, 0.98, n)
+    qa, qb = np.quantile(va, probs), np.quantile(vb, probs)
+    if qa.std() == 0 or qb.std() == 0:
+        qq_r2 = 1.0 if qa.std() == qb.std() else 0.0
+    else:
+        qq_r2 = float(np.corrcoef(qa, qb)[0, 1] ** 2)
+    grid = np.linspace(min(va.min(), vb.min()), max(va.max(), vb.max()), 128)
+    cdf_a = np.searchsorted(np.sort(va), grid, side="right") / len(va)
+    cdf_b = np.searchsorted(np.sort(vb), grid, side="right") / len(vb)
+    ks = float(np.max(np.abs(cdf_a - cdf_b)))
+    z_shift = shift / pooled
+    # The robust run-to-run change detector is the two-sample KS gap vs its critical value — unlike
+    # Q-Q R² it's archetype-independent (a same-distribution bimodal/discrete/outlier pair doesn't
+    # false-flag). Require 1.3× the α=0.01 critical value for a confident "differs".
+    ks_crit = 1.63 * float(np.sqrt(1.0 / len(va) + 1.0 / len(vb)))
+    differs = ks > 1.3 * ks_crit
+    mean_moved = abs(z_shift) > 0.5
+    out.update(
+        mean_a=ma, mean_b=mb, mean_shift=shift, pct_shift=100.0 * shift / (abs(ma) or 1.0),
+        z_shift=z_shift, ks=ks, ks_crit=ks_crit, qq_r2=qq_r2, differs=bool(differs),
+        correlated=bool(not differs),               # runs track each other (Q-Q on a line)
+        shifted=bool(differs and mean_moved),        # differs, driven by a mean shift
+        uncorrelated=bool(differs and not mean_moved),  # differs by SHAPE — a Q-Q non-linearity
+    )
+    return out
 
 
 def _quantile_points(values: Sequence[float], n: int) -> list[float]:
