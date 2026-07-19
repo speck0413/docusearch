@@ -483,6 +483,26 @@ _DASHBOARD_JS = """
   var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
   var a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download='stdf-audit-feedback.json';a.click();});});
+ // sort a plot tab's cards by its goodness metric (data-sort); default worst-first, toggles
+ document.querySelectorAll('.sortbar').forEach(function(bar){
+  var panel=bar.closest('.panel');var grid=panel.querySelector('.plotgrid');
+  var btn=bar.querySelector('.sortbtn');if(!grid||!btn)return;
+  function run(){
+   var worst=btn.dataset.dir!=='best';var wdir=bar.dataset.worst;
+   var asc=worst?(wdir==='asc'):(wdir!=='asc');
+   var cards=[].slice.call(grid.querySelectorAll('[data-sort]'));
+   cards.sort(function(a,b){
+    var x=parseFloat(a.dataset.sort),y=parseFloat(b.dataset.sort);
+    var xn=isNaN(x),yn=isNaN(y);
+    if(xn&&yn)return 0;if(xn)return 1;if(yn)return -1;  // missing metric sinks to the end
+    return asc?x-y:y-x;});
+   cards.forEach(function(c){grid.appendChild(c);});
+  }
+  btn.addEventListener('click',function(){
+   btn.dataset.dir=btn.dataset.dir==='best'?'worst':'best';
+   btn.textContent=btn.dataset.dir==='best'?'best first':'worst first';run();});
+  run();
+ });
  // expand a table to a full-window overlay (and back); Esc also exits
  function setFull(tp,on){tp.classList.toggle('full',on);var b=tp.querySelector('.expand-btn');
   if(b)b.textContent=on?'\\u2715 Close':'\\u26f6 Full screen';}
@@ -519,6 +539,29 @@ _VIEW_FLAGS = {
     "trend": ("shifted", "correlated", "uncorrelated"),
     "site": ("site-shift", "shifted", "bimodal", "long-tail", "outliers", "discrete"),
 }
+# each plot tab's "goodness" metric to sort its cards by: (label, which end is WORST) — the plot cards
+# carry a matching data-sort value, and the tab defaults to worst-first so you review the risks first.
+_VIEW_SORT = {
+    "qq": ("Q-Q R²", "asc"),      # worst correlation = lowest R²
+    "hist": ("Cpk", "asc"),        # worst capability = lowest Cpk
+    "trend": ("shift σ", "desc"),  # worst = biggest run-to-run move
+    "site": ("site Δσ", "desc"),   # worst site match = biggest site spread
+}
+
+
+def _sort_attr(v: float | None) -> str:
+    """A ``data-sort`` attribute for a plot card (empty ⇒ the JS sorts it to the end)."""
+    return f' data-sort="{v}"' if v is not None else ' data-sort=""'
+
+
+def _sortbar(view: str) -> str:
+    spec = _VIEW_SORT.get(view)
+    if not spec:
+        return ""
+    label, worst = spec
+    return (f'<div class="sortbar" data-worst="{worst}">'
+            f'<span class="chiphint">Sort by {escape(label)}:</span>'
+            '<button class="sortbtn" data-dir="worst">worst first</button></div>')
 
 
 @dataclass
@@ -778,7 +821,7 @@ def audit_report_html(
                      title=f"{name} — Q-Q ({label_a} vs {label_b})", xlabel=label_a, ylabel=label_b)
         else:
             p = "<p class='stats'>needs ≥2 points in each revision for a Q-Q</p>"
-        qq.append(f'<section class="acard" {attrs}>{head}{p}</section>')
+        qq.append(f'<section class="acard" {attrs}{_sort_attr(a.comp["qq_r2"])}>{head}{p}</section>')
         # overlaid translucent histogram: old (A) blue, new (B) green — shifts pop out
         hist_series = [(label_a, va), (label_b, vb)] if (va and vb) else None
         vals = vb or va
@@ -792,28 +835,30 @@ def audit_report_html(
             f"</tr></thead><tbody>{_capability_row(label_a, va, a.lo, a.hi)}"
             f"{_capability_row(label_b, vb, a.lo, a.hi)}</tbody></table></div>"
         )
-        hist.append(f'<section class="acard" {attrs}>{head}{hp}'
+        hist.append(f'<section class="acard" {attrs}{_sort_attr(a.cpk)}>{head}{hp}'
                     f'<p class="stats">spec limits (red): LLM={_num(a.lo)} · HLM={_num(a.hi)}</p>'
                     f"{cap_tbl}</section>")
         tp = [(lbl, analytics.summary_stats(v)["mean"]) for lbl, v in ((label_a, va), (label_b, vb)) if v]
         if tp:
             tpl = plot("linear", x=list(range(len(tp))), y=[p2[1] for p2 in tp],
                        title=f"{name} mean trend", xlabel="revision", ylabel=f"{name} mean")
-            trend.append(f'<section class="acard" {attrs}>{head}{tpl}</section>')
+            zmag = abs(a.comp["z_shift"]) if (a.comp["n_a"] and a.comp["n_b"]) else None
+            trend.append(f'<section class="acard" {attrs}{_sort_attr(zmag)}>{head}{tpl}</section>')
         groups = site_map.get(name, {})
         if len(groups) > 1:
             sp = plot("whisker", series=[(f"site {s}", v) for s, v in sorted(groups.items())],
                       title=f"{name} by site", ylabel=name)
-            site.append(f'<section class="acard" {attrs}>{head}{sp}</section>')
+            site.append(f'<section class="acard" {attrs}{_sort_attr(a.site_spread)}>{head}{sp}</section>')
 
     plotted_flags = {f for a in plotted for f in a.flags}
 
     def panel(pid: str, cards: list[str], empty: str, *, view: str = "") -> str:
         bar = _chipbar(plotted_flags, view) if view else ""
+        sortbar = _sortbar(view) if view and cards else ""
         note = (f'<p class="stats">showing the {len(plotted)} most interesting tests '
-                "(largest shift · uncorrelated · shape anomalies · added/removed) — the chips filter "
-                "these.</p>") if view and cards else ""
-        return (f'<div class="panel hidden" data-p="{pid}">{bar}{note}'
+                "(largest shift · uncorrelated · shape anomalies · added/removed) — chips filter, the "
+                "sort button ranks by goodness.</p>") if view and cards else ""
+        return (f'<div class="panel hidden" data-p="{pid}">{bar}{sortbar}{note}'
                 f'<div class="plotgrid">{"".join(cards) or empty}</div></div>')
 
     plotly_prefix = (

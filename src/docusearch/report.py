@@ -577,6 +577,10 @@ padding:5px 13px;cursor:pointer;font:inherit;font-size:12.5px;font-weight:600;}
 border-radius:20px;padding:5px 12px;cursor:pointer;font:inherit;font-size:12px;font-weight:700;}
 .chipmode:hover,.chipclear:hover{background:var(--accent2);color:#062033;}
 .chiphint{color:var(--muted);font-size:11.5px;margin-right:2px;}
+.sortbar{display:flex;gap:8px;align-items:center;margin:2px 0 10px;}
+.sortbtn{background:var(--code);border:1px solid var(--accent2);color:var(--accent);border-radius:20px;
+padding:5px 13px;cursor:pointer;font:inherit;font-size:12px;font-weight:700;}
+.sortbtn:hover{background:var(--accent2);color:#062033;}
 td .tag,.tag{display:inline-block;background:var(--card2);border:1px solid var(--border);
 color:var(--accent2);border-radius:6px;padding:0 6px;margin:1px 2px;font-size:10.5px;font-weight:600;}
 /* fixed-size, self-scrolling table with a frozen header row; expand toggles a full-window overlay */

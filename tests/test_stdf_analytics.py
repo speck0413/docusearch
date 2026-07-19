@@ -110,6 +110,9 @@ def test_audit_dashboard_six_tabs_explore_conditions_and_capability() -> None:
     # fixed-size scrollable table (frozen header) + full-window expand
     assert 'class="tablewrap"' in html and 'class="tablepanel"' in html
     assert 'class="expand-btn"' in html and "position:sticky" in html
+    # plot tabs sort by their goodness metric (Q-Q R² / Cpk / shift σ / site Δσ)
+    assert 'class="sortbar"' in html and 'class="sortbtn"' in html and "data-sort=" in html
+    assert "Sort by Q-Q R²" in html and "Sort by Cpk" in html and "Sort by site Δσ" in html
     # histogram tab: red spec-limit lines + capability stats
     assert "d64545" in html  # red LLM/HLM limit lines
     assert "Cpl" in html and "Cpu" in html and "Cpk" in html
