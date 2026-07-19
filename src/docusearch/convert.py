@@ -353,28 +353,30 @@ def html_to_xlsx_bytes(
     emitted so the needle channel survives."""
     from openpyxl import Workbook
 
+    from .report_export import xlsx_cell  # shared formula-injection + control-char guard (H3/M1)
+
     doc = extract_html(html, content_selector=content_selector, strip_selectors=list(strip_selectors))
     wb = Workbook()
     ws = wb.active
     ws.title = "content"
     if doc.title:
         wb.properties.title = doc.title
-        ws.append([doc.title])
+        ws.append([xlsx_cell(doc.title)])
     last_heading: str | None = None
     for kind, item in _doc_blocks(doc):
         head = item.heading_path  # type: ignore[attr-defined]
         if head and head != last_heading:
-            ws.append([head])
+            ws.append([xlsx_cell(head)])
             last_heading = head
         if kind == "seg":
             for line in cast(Segment, item).text.splitlines() or [""]:
                 if line.strip():
-                    ws.append([line.strip()])
+                    ws.append([xlsx_cell(line.strip())])
         else:
             img = cast(ImageRef, item)
             cap = " ".join(t for t in (img.alt, img.caption) if t).strip()
             if cap:
-                ws.append([cap])
+                ws.append([xlsx_cell(cap)])
     if ws.max_row == 0:
         ws.append([doc.title or "(no text)"])
     buf = io.BytesIO()

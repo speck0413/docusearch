@@ -9,11 +9,29 @@ set is refused (R-CIT-1) before a byte is written. Reuses the format libraries' 
 from __future__ import annotations
 
 import io
+import re
 from collections.abc import Mapping, Sequence
 
 from . import citations
 
 EXPORT_FORMATS = ("pdf", "docx", "pptx", "xlsx")
+
+# Control chars that are illegal in OOXML/XML (keep tab, LF, CR) — a NUL in a title/body otherwise
+# crashes python-docx/openpyxl with a raw traceback (red-team M1).
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def xml_safe(text: str) -> str:
+    """Strip control characters that OOXML writers reject."""
+    return _CONTROL.sub("", text)
+
+
+def xlsx_cell(value: str) -> str:
+    """Sanitize a value for a spreadsheet cell: strip control chars AND neutralize **formula
+    injection** — a leading ``= + - @`` is prefixed with ``'`` so the cell stays TEXT, never a live
+    formula in whoever opens the file (CWE-1236, red-team H3)."""
+    v = xml_safe(value)
+    return "'" + v if v[:1] in ("=", "+", "-", "@") else v
 
 _AI_WARNING = "AI-generated — verify every claim against the cited sources before relying on it."
 
@@ -27,7 +45,7 @@ def _sections(
 
 
 def _paragraphs(body: str) -> list[str]:
-    return [ln.strip() for ln in body.splitlines() if ln.strip()]
+    return [xml_safe(ln.strip()) for ln in body.splitlines() if ln.strip()]
 
 
 def export_report(
@@ -89,21 +107,21 @@ def _to_docx(
     from docx import Document
 
     doc = Document()
-    doc.add_heading(title, 0)
+    doc.add_heading(xml_safe(title), 0)
     if subtitle:
-        doc.add_paragraph(subtitle)
+        doc.add_paragraph(xml_safe(subtitle))
     doc.add_paragraph(_AI_WARNING)
     for line in meta:
-        doc.add_paragraph(line)
+        doc.add_paragraph(xml_safe(line))
     for heading, bdy in secs:
         if heading:
-            doc.add_heading(heading, level=1)
+            doc.add_heading(xml_safe(heading), level=1)
         for para in _paragraphs(bdy):
             doc.add_paragraph(para)
     if refs:
         doc.add_heading("References", level=1)
         for r in refs:
-            doc.add_paragraph(r, style="List Bullet")
+            doc.add_paragraph(xml_safe(r), style="List Bullet")
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -116,17 +134,17 @@ def _to_pptx(
 
     prs = Presentation()
     cover = prs.slides.add_slide(prs.slide_layouts[0])
-    cover.shapes.title.text = title
+    cover.shapes.title.text = xml_safe(title)
     if cover.slide_layout.placeholders and len(cover.placeholders) > 1:
-        cover.placeholders[1].text = subtitle or _AI_WARNING
+        cover.placeholders[1].text = xml_safe(subtitle) or _AI_WARNING
     for heading, bdy in secs:
         slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = heading or title
+        slide.shapes.title.text = xml_safe(heading) or xml_safe(title)
         slide.placeholders[1].text = "\n".join(_paragraphs(bdy)) or " "
     if refs:
         ref_slide = prs.slides.add_slide(prs.slide_layouts[1])
         ref_slide.shapes.title.text = "References"
-        ref_slide.placeholders[1].text = "\n".join(refs)
+        ref_slide.placeholders[1].text = "\n".join(xml_safe(r) for r in refs)
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
@@ -138,21 +156,21 @@ def _to_xlsx(title: str, secs: list[tuple[str, str]], meta: list[str], refs: lis
     wb = Workbook()
     ws = wb.active
     ws.title = "Report"
-    ws.append([title])
+    ws.append([xlsx_cell(title)])
     ws.append([_AI_WARNING])
     for line in meta:
-        ws.append([line])
+        ws.append([xlsx_cell(line)])
     for heading, bdy in secs:
         ws.append([])
         if heading:
-            ws.append([heading])
+            ws.append([xlsx_cell(heading)])
         for para in _paragraphs(bdy):
-            ws.append([para])
+            ws.append([xlsx_cell(para)])
     if refs:
         ws.append([])
         ws.append(["References"])
         for r in refs:
-            ws.append([r])
+            ws.append([xlsx_cell(r)])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -168,23 +186,23 @@ def _to_pdf(
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
     styles = getSampleStyleSheet()
-    flow = [Paragraph(escape(title), styles["Title"])]
+    flow = [Paragraph(escape(xml_safe(title)), styles["Title"])]
     if subtitle:
-        flow.append(Paragraph(escape(subtitle), styles["Italic"]))
+        flow.append(Paragraph(escape(xml_safe(subtitle)), styles["Italic"]))
     flow.append(Paragraph(f"<i>{escape(_AI_WARNING)}</i>", styles["BodyText"]))
     for line in meta:
-        flow.append(Paragraph(escape(line), styles["BodyText"]))
+        flow.append(Paragraph(escape(xml_safe(line)), styles["BodyText"]))
     flow.append(Spacer(1, 12))
     for heading, bdy in secs:
         if heading:
-            flow.append(Paragraph(escape(heading), styles["Heading1"]))
+            flow.append(Paragraph(escape(xml_safe(heading)), styles["Heading1"]))
         for para in _paragraphs(bdy):
             flow.append(Paragraph(escape(para), styles["BodyText"]))
         flow.append(Spacer(1, 8))
     if refs:
         flow.append(Paragraph("References", styles["Heading1"]))
         for r in refs:
-            flow.append(Paragraph(escape(r), styles["BodyText"]))
+            flow.append(Paragraph(escape(xml_safe(r)), styles["BodyText"]))
     buf = io.BytesIO()
     SimpleDocTemplate(buf, pagesize=letter, title=title).build(flow)
     return buf.getvalue()

@@ -84,6 +84,8 @@ def render_plot(
     k = kind.lower()
     if k not in PLOT_KINDS:
         raise ValueError(f"unknown plot kind {kind!r}; expected one of {PLOT_KINDS}")
+    if k == "qq" and (not series or len(series) < 2):  # qq compares TWO series (red-team H1)
+        raise ValueError("plot kind 'qq' needs two named series to compare")
     if backend == "matplotlib":
         return _render_matplotlib(k, series, x, y, title, xlabel, ylabel, bins)
     if backend == "plotly":
@@ -170,5 +172,11 @@ def _render_plotly(
     elif kind == "linear":
         fig.add_scatter(x=list(x or []), y=list(y or []), mode="lines+markers")
     fig.update_layout(title=title, xaxis_title=xlabel, yaxis_title=ylabel, showlegend=bool(series))
-    html: str = fig.to_html(full_html=False, include_plotlyjs="inline")
+    # Deterministic div id (default is a random UUID) so the same inputs render byte-identical HTML.
+    import hashlib
+
+    div_id = "plot-" + hashlib.sha256(
+        f"{kind}|{title}|{xlabel}|{ylabel}|{series}|{x}|{y}".encode()
+    ).hexdigest()[:16]
+    html: str = fig.to_html(full_html=False, include_plotlyjs="inline", div_id=div_id)
     return html

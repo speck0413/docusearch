@@ -38,6 +38,7 @@ from . import embed, runlog
 from .config import Config, SourceConfig
 from .embed import EmbedProvider
 from .enrich import GotchaPattern, active_gotcha_patterns, gotcha_tag_text, match_gotcha
+from .stdf import StdfTest
 from .store import Store
 
 # A progress sink: (phase, done, total). ``phase`` is "ingest" (files) or "embed"
@@ -1240,6 +1241,25 @@ def _write_stdf(
     ])
     result.chunks += len(run.tests)
     result.stdf_tests += len(run.tests)
+    # Per-part rollup chunks when configured (stdf.granularity: part | both) — a part becomes its own
+    # searchable unit alongside/instead of the per-test chunks (R-STDF-2).
+    if config.stdf.granularity in ("part", "both"):
+        by_part: dict[str, list[StdfTest]] = {}
+        for t in run.tests:
+            by_part.setdefault(t.part_id, []).append(t)
+        for pos, part in enumerate(run.parts):
+            tests_p = by_part.get(part.part_id, [])
+            n_pass = sum(1 for t in tests_p if t.passed)
+            text = (
+                f"part {part.part_id} insertion {part.insertion} wafer {part.wafer_id} "
+                f"x {part.x} y {part.y} bin {part.hard_bin} "
+                f"{'PASS' if part.passed else 'FAIL'} {len(tests_p)} tests {n_pass} pass"
+            )
+            store.add_chunk(
+                document_id=doc_id, ord=len(run.tests) + pos, text=text, kind="part",
+                locator=f"part {part.part_id} {part.insertion}",
+            )
+        result.chunks += len(run.parts)
 
 
 def _write_parsed(

@@ -105,11 +105,13 @@ class Service:
             return {
                 "version": __version__,
                 "mode": self.config.mode,
+                "store_type": self.config.store_type,  # document | data — a client routes by this
                 "documents": store.count_documents(),
                 "chunks": store.count_chunks(),
                 "embeddings": store.count_embeddings(),
                 "images": store.count_images(),
                 "relations": store.count_relations(),
+                "stdf_results": store.count_stdf_results(),
                 "embed_model": store.get_meta("embed_model") or "none",
                 "embed_dim": int(store.get_meta("embed_dim") or 0),
             }
@@ -484,7 +486,12 @@ class Service:
         path = self.document_path(doc_id, store=store, user=user, groups=groups)
         if path is None:
             raise ValueError(f"no readable STDF document with id {doc_id}")
-        return stdf.parse_stdf_tests(path.read_bytes(), scope=self.config.stdf.cond_scope)
+        try:
+            return stdf.parse_stdf_tests(path.read_bytes(), scope=self.config.stdf.cond_scope)
+        except Exception as exc:  # noqa: BLE001 - a non-STDF doc in a mixed store must fail clean (H2)
+            raise ValueError(
+                f"document {doc_id} ({path.name}) is not a readable STDF file: {type(exc).__name__}"
+            ) from exc
 
     def _backend(self, backend: str) -> str:
         return backend or self.config.stdf.plot_backend
