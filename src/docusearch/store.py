@@ -403,6 +403,36 @@ class Store:
             (doc_id,),
         ).fetchall()
 
+    def clear_flags(self, kind: str) -> int:
+        """Delete every flag of one ``kind`` — a discrepancy re-scan replaces its prior findings."""
+        cur = self._conn.execute("DELETE FROM flags WHERE kind=?", (kind,))
+        self._maybe_commit()
+        return int(cur.rowcount)
+
+    def duplicate_active_documents(self) -> list[tuple[str, list[tuple[int, str]]]]:
+        """Groups of ACTIVE documents that share a content_hash (byte-identical files ingested
+        under different paths/sources) — the duplicate half of the discrepancy scan (§17). Each
+        group is ``(content_hash, [(doc_id, path), …])``; only hashes with ≥2 active docs."""
+        rows = self._conn.execute(
+            "SELECT content_hash, id, path FROM documents "
+            "WHERE status='active' AND content_hash IN ("
+            "  SELECT content_hash FROM documents WHERE status='active' "
+            "  GROUP BY content_hash HAVING COUNT(*) > 1"
+            ") ORDER BY content_hash, id"
+        ).fetchall()
+        groups: dict[str, list[tuple[int, str]]] = {}
+        for h, did, path in rows:
+            groups.setdefault(str(h), []).append((int(did), str(path)))
+        return [(h, groups[h]) for h in sorted(groups)]
+
+    def chunk_doc_map(self) -> dict[int, int]:
+        """``{chunk_id: document_id}`` for every chunk — used to tell same-doc near-duplicates
+        (uninteresting) from cross-document conflict candidates in the discrepancy scan."""
+        return {
+            int(r[0]): int(r[1])
+            for r in self._conn.execute("SELECT id, document_id FROM chunks")
+        }
+
     def flagged_chunks(self, kind: str, limit: int = 0) -> list[sqlite3.Row]:
         """Flagged (chunk, doc, rule) rows for one ``kind`` — for report filters and precision
         sampling at the gate. ``limit`` 0 means all, ordered deterministically by flag id."""

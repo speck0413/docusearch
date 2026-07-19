@@ -683,6 +683,35 @@ def _cmd_related(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_discrepancies(args: argparse.Namespace) -> int:
+    """Scan for duplicate active documents + high-similarity conflict candidates (§17)."""
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    report = Catalog(cfg).check_discrepancies(persist=args.persist)
+    dups, conflicts = report.duplicate_actives, report.conflict_candidates
+    print(f"# Discrepancy scan\n\nDuplicate active documents: **{len(dups)}** group(s)")
+    for g in dups:
+        ids = ", ".join(f"{d} ({p})" for d, p in g.docs)
+        print(f"  · {g.content_hash[:12]}…: docs {ids}")
+    print(f"\nConflict candidates (near-duplicate across docs): **{len(conflicts)}**")
+    for p in conflicts[: args.limit]:
+        print(
+            f"  · ~{p.similarity:.3f}  chunk {p.chunk_a} (doc {p.doc_a}) ↔ "
+            f"chunk {p.chunk_b} (doc {p.doc_b})"
+        )
+    if args.persist:
+        print("\nRecorded findings as `discrepancy` flags (filterable in the index).")
+    if not report.conflict_candidates and cfg.embed.model == "none":
+        print(
+            "\nNote: this index is BM25-only — conflict detection needs embeddings "
+            "(set `embed.model` and re-ingest).",
+            file=sys.stderr,
+        )
+    runlog.log("cli.discrepancies", dups=len(dups), conflicts=len(conflicts), persist=args.persist)
+    runlog.flush()
+    return 0
+
+
 def _self_heal_loop(cat: Catalog, minutes: int) -> None:  # pragma: no cover - lifetime loop
     """Periodically prune orphaned documents for the life of a long-running server."""
     while True:
@@ -917,6 +946,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_related.add_argument("--depth", type=int, default=1, help="walk N hops (default 1)")
     p_related.add_argument("--config", default="docusearch.yaml", help="config path")
     p_related.set_defaults(func=_cmd_related)
+
+    p_disc = sub.add_parser(
+        "discrepancies",
+        help="scan for duplicate active docs + high-similarity conflict candidates (§17)",
+    )
+    p_disc.add_argument(
+        "--persist", action="store_true", help="record findings as filterable `discrepancy` flags"
+    )
+    p_disc.add_argument("--limit", type=int, default=50, help="max conflict pairs to print")
+    p_disc.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_disc.set_defaults(func=_cmd_discrepancies)
 
     p_serve = sub.add_parser("serve", help="run the REST + MCP server (Phase 3)")
     p_serve.add_argument("--config", default="docusearch.yaml", help="config path")

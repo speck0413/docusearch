@@ -20,6 +20,7 @@ import yaml
 
 if TYPE_CHECKING:
     from .config import Config, SourceConfig
+    from .store import Store
 
 GOTCHA_PREFIX = "[GOTCHA]"
 
@@ -193,6 +194,99 @@ def _strip_code_fence(text: str) -> str:
         if t.endswith("```"):
             t = t[: t.rfind("```")]
     return t.strip()
+
+
+@dataclass(frozen=True)
+class DuplicateGroup:
+    """A set of ACTIVE documents that are byte-identical (same content_hash)."""
+
+    content_hash: str
+    docs: list[tuple[int, str]]  # (doc_id, path)
+
+
+@dataclass(frozen=True)
+class ConflictPair:
+    """Two chunks in DIFFERENT documents that are highly similar but not identical — a candidate
+    for conflicting/duplicated guidance a human should reconcile."""
+
+    chunk_a: int
+    chunk_b: int
+    doc_a: int
+    doc_b: int
+    similarity: float
+
+
+@dataclass
+class DiscrepancyReport:
+    duplicate_actives: list[DuplicateGroup] = field(default_factory=list)
+    conflict_candidates: list[ConflictPair] = field(default_factory=list)
+
+
+def scan_discrepancies(
+    store: Store,
+    *,
+    vector_index: object | None = None,
+    sim_lo: float = 0.90,
+    sim_hi: float = 0.999,
+    neighbors: int = 6,
+    limit: int = 200,
+) -> DiscrepancyReport:
+    """Scan the index for discrepancies (§17): (1) duplicate ACTIVE documents (same content_hash);
+    (2) high-similarity **conflict candidates** — chunk pairs across different documents whose
+    cosine similarity falls in ``[sim_lo, sim_hi)`` (near-identical excluded — those are dupes, not
+    conflicts). Conflict detection needs embeddings + a ``vector_index`` (``.query(vec, k)``); a
+    BM25-only index reports duplicate actives only. Deterministic: ordered by (−sim, chunk ids)."""
+    dups = [DuplicateGroup(h, docs) for h, docs in store.duplicate_active_documents()]
+    pairs: list[ConflictPair] = []
+    if vector_index is not None and store.count_embeddings() > 0:
+        import numpy as np
+
+        chunk_doc = store.chunk_doc_map()
+        seen: set[tuple[int, int]] = set()
+        for cid, blob in store.all_embeddings():
+            vec = np.frombuffer(blob, dtype=np.float32)
+            for nid, sim in vector_index.query(vec, neighbors + 1):  # type: ignore[attr-defined]
+                if nid == cid or not (sim_lo <= sim < sim_hi):
+                    continue
+                da, db = chunk_doc.get(cid), chunk_doc.get(nid)
+                if da is None or db is None or da == db:
+                    continue  # same-doc near-dupes aren't cross-document conflicts
+                key = (min(cid, nid), max(cid, nid))
+                if key in seen:
+                    continue
+                seen.add(key)
+                a, b = key
+                pairs.append(ConflictPair(a, b, chunk_doc[a], chunk_doc[b], round(float(sim), 4)))
+        pairs.sort(key=lambda p: (-p.similarity, p.chunk_a, p.chunk_b))
+        pairs = pairs[:limit]
+    return DiscrepancyReport(duplicate_actives=dups, conflict_candidates=pairs)
+
+
+def persist_discrepancies(store: Store, report: DiscrepancyReport) -> int:
+    """Write the scan's findings as ``flags`` rows (kind=discrepancy), replacing any prior scan's.
+    Returns the number of flags written. Duplicate actives flag each doc; conflict candidates flag
+    both chunks with the peer + similarity in the note."""
+    store.clear_flags("discrepancy")
+    written = 0
+    for g in report.duplicate_actives:
+        peers = ", ".join(str(d) for d, _ in g.docs)
+        for doc_id, _ in g.docs:
+            store.add_flag(
+                doc_id=doc_id, chunk_id=None, kind="discrepancy", source="scan",
+                rule_id="duplicate-active", note=f"identical content to docs [{peers}]",
+            )
+            written += 1
+    for p in report.conflict_candidates:
+        for cid, other, doc in (
+            (p.chunk_a, p.chunk_b, p.doc_a),
+            (p.chunk_b, p.chunk_a, p.doc_b),
+        ):
+            store.add_flag(
+                doc_id=doc, chunk_id=cid, kind="discrepancy", source="scan",
+                rule_id="near-duplicate", note=f"~{p.similarity:.3f} cosine to chunk {other}",
+            )
+            written += 1
+    return written
 
 
 def run_preflight(

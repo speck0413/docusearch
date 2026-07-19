@@ -303,6 +303,31 @@ def test_relations_nhop_endpoint(tmp_path: Path) -> None:
     assert depth2[0]["neighbor"] == depth2[0]["doc_id"]  # legacy key preserved for agents
 
 
+def test_discrepancies_endpoint_finds_duplicate_actives(tmp_path: Path) -> None:
+    # two byte-identical docs under different names must surface as a duplicate-active group.
+    root = tmp_path / "docs"
+    root.mkdir()
+    body = "<body><h1>Reset</h1><p>The identical reset procedure for the tester.</p></body>"
+    (root / "one.html").write_text(body, encoding="utf-8")
+    (root / "two.html").write_text(body, encoding="utf-8")
+    config_path = tmp_path / "docusearch.yaml"
+    config_path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(config_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store)
+    client = TestClient(create_app(config))
+    data = client.get("/v1/discrepancies").json()
+    assert len(data["duplicate_actives"]) == 1
+    assert len(data["duplicate_actives"][0]["docs"]) == 2
+    assert data["persisted"] is False
+
+
 def test_404s(client: TestClient) -> None:
     assert client.get("/v1/documents/9999").status_code == 404
     assert client.get("/v1/images/deadbeef").status_code == 404
@@ -332,7 +357,9 @@ def test_mcp_is_mounted_at_configured_path(tmp_path: Path) -> None:
 
         tool_names = {t.name for t in build_mcp(Service(config), config)._tool_manager.list_tools()}
     assert config.serve.mcp_path in {getattr(r, "path", None) for r in app.routes}
-    assert {"search_docs", "get_document", "related_documents", "catalog_stats"} <= tool_names
+    assert {
+        "search_docs", "get_document", "related_documents", "catalog_stats", "check_discrepancies"
+    } <= tool_names
 
 
 @pytest.mark.model

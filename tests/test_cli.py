@@ -528,6 +528,36 @@ def test_related_cli_walks_nhop(tmp_path: Path, capsys) -> None:  # type: ignore
     assert "2·out" in out and "C" in out  # 2-hop neighbour
 
 
+def test_discrepancies_cli_reports_and_persists(
+    tmp_path: Path, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from docusearch import config as cfg
+    from docusearch import ingest
+    from docusearch.store import Store
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    body = "<body><h1>H</h1><p>The identical shared paragraph of text here.</p></body>"
+    (root / "one.html").write_text(body, encoding="utf-8")
+    (root / "two.html").write_text(body, encoding="utf-8")  # dup
+    cfg_path = tmp_path / "d.yaml"
+    cfg_path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(cfg_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store)
+    assert cli.main(["discrepancies", "--persist", "--config", str(cfg_path)]) == 0
+    out = capsys.readouterr().out
+    assert "Duplicate active documents: **1**" in out
+    with Store.open(config.paths.db_path) as store:
+        assert store.count_flags("discrepancy") == 2  # one flag per dup doc, persisted
+
+
 def test_preflight_refuses_to_clobber_approved_rules(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

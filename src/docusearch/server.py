@@ -232,6 +232,45 @@ class Service:
         runlog.log("api.feedback", user=user, rating=rating)
         return {"recorded": True, **entry}
 
+    def discrepancies(
+        self, *, store: str | None = None, persist: bool = False,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Discrepancy scan for one store (§17 Phase 5) — duplicate active docs + conflict
+        candidates. Read-gated for a private store; ``persist`` records ``discrepancy`` flags."""
+        from .catalog import Catalog
+
+        cfg = self._target_config(store)
+        if not cfg.access.permits(user=user, groups=groups or set()):
+            raise PermissionError("access denied: this store is private")
+        report = Catalog(cfg).check_discrepancies(persist=persist)
+        # enrich with paths/titles so the caller can show a useful table without a second round-trip
+        with Store.open(cfg.paths.db_path) as store_db:
+            titles = {
+                int(r["id"]): (str(r["path"]), str(r["title"]))
+                for r in store_db._conn.execute("SELECT id, path, title FROM documents")  # noqa: SLF001
+            }
+        return {
+            "duplicate_actives": [
+                {
+                    "content_hash": g.content_hash,
+                    "docs": [{"doc_id": d, "path": p} for d, p in g.docs],
+                }
+                for g in report.duplicate_actives
+            ],
+            "conflict_candidates": [
+                {
+                    "chunk_a": p.chunk_a, "chunk_b": p.chunk_b,
+                    "doc_a": p.doc_a, "doc_b": p.doc_b,
+                    "doc_a_path": titles.get(p.doc_a, ("", ""))[0],
+                    "doc_b_path": titles.get(p.doc_b, ("", ""))[0],
+                    "similarity": p.similarity,
+                }
+                for p in report.conflict_candidates
+            ],
+            "persisted": persist,
+        }
+
     def _target_config(self, store: str | None) -> Config:
         """Resolve which store to ingest into: a named federation member (vendor / internal / user
         / acme …) or, with no name, this config's own single store. A named store errors if there is
@@ -745,6 +784,22 @@ def build_mcp(service: Service, config: Config) -> Any:
             return []
 
     @mcp.tool()
+    def check_discrepancies(
+        store: str | None = None, persist: bool = False,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Scan a store for duplicate active documents + high-similarity conflict candidates
+        (chunk pairs across docs that say near-identical things). `persist` records discrepancy
+        flags. Gated for a private store."""
+        try:
+            return service.discrepancies(
+                store=store, persist=persist, user=user,
+                groups=set(groups) if groups else None,
+            )
+        except (PermissionError, ValueError) as err:
+            return {"error": "ACCESS", "message": str(err)}
+
+    @mcp.tool()
     def catalog_stats(user: str | None = None, groups: list[str] | None = None) -> dict[str, Any]:
         """Counts + embedding model for the catalog (gated for a private store)."""
         try:
@@ -926,6 +981,20 @@ def create_app(config: Config) -> FastAPI:
         try:
             return service.relations(
                 doc_id, direction, depth=depth, store=store, user=user, groups=groups
+            )
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+
+    @app.get("/v1/discrepancies")
+    def discrepancies_route(
+        request: Request, store: str | None = None, persist: bool = False
+    ) -> dict[str, Any]:
+        user, groups = _read_identity(request)
+        try:
+            return service.discrepancies(
+                store=store, persist=persist, user=user, groups=groups
             )
         except PermissionError as err:
             raise HTTPException(status_code=403, detail=str(err)) from err

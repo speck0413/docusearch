@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import overload
 
-from . import embed, ingest, search, vision
+from . import embed, enrich, ingest, search, vision
 from .config import DEFAULT_CONFIG_PATH, Config, ConfigError, load
 from .embed import EmbedProvider
 from .ingest import IngestResult
@@ -204,6 +204,27 @@ class Catalog:
         """Render the current index audit (counts + anomalies)."""
         with Store.open(self.db_path) as store:
             return ingest.render_store_audit(store)
+
+    def check_discrepancies(self, *, persist: bool = False) -> enrich.DiscrepancyReport:
+        """Scan for duplicate active documents + high-similarity conflict candidates (§17). Uses the
+        vector index for conflict detection when the store is embedded (BM25-only ⇒ dupes only).
+        ``persist`` writes the findings as filterable ``discrepancy`` flags."""
+        provider = self._provider()
+        with Store.open(self.db_path) as store:
+            vector_index = None
+            if provider is not None and store.count_embeddings() > 0:
+                index_model = store.get_meta("embed_model")
+                if index_model is None or index_model == provider.model_id:
+                    ann_path = (
+                        Path(self.db_path).with_suffix(".hnsw")
+                        if self.db_path != ":memory:"
+                        else "__no_ann__"
+                    )
+                    vector_index = search.VectorIndex.load(store, provider.dim, ann_path)
+            report = enrich.scan_discrepancies(store, vector_index=vector_index)
+            if persist:
+                enrich.persist_discrepancies(store, report)
+            return report
 
 
 def _open_member(name: str, member_config: Config) -> tuple[FederatedMember, Store]:
