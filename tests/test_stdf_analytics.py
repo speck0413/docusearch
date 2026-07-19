@@ -51,6 +51,30 @@ def test_audit_alignment_yield_and_conditions() -> None:
     assert vmin.mean_delta is not None and vmin.mean_delta < 0  # B mean lower
 
 
+def test_diff_tests_detects_limit_tnum_and_membership_changes() -> None:
+    def run(tests: list[tuple[int, str, float, float, float]], cod: str) -> stdf.StdfRun:
+        b = StdfBuilder().far().mir(lot_id="L", test_cod=cod)
+        b.pir()
+        for tnum, name, res, lo, hi in tests:
+            b.ptr(tnum, name, res, lo=lo, hi=hi, units="V")
+        b.prr(part_id="1", hard_bin=1)
+        b.mrr()
+        return stdf.parse_stdf_tests(b.to_bytes())
+
+    ra = run([(1000, "VMIN", 0.72, 0.70, 0.85), (2000, "IDDQ", 1e-6, 0.0, 2e-6)], "WS1")
+    rb = run([(1001, "VMIN", 0.72, 0.70, 0.80), (3000, "FMAX", 1.2, 0.0, 2.0)], "WS2")
+    _keys, rows = stdf_analytics.diff_tests(ra, rb)
+    by = {r.name: r for r in rows}
+    assert by["VMIN"].status == "changed"
+    assert by["VMIN"].changed == {"tnum", "hi"}  # test number 1000→1001 AND HLM 0.85→0.80
+    assert by["IDDQ"].status == "removed"  # only in A
+    assert by["FMAX"].status == "added"  # only in B
+
+    html = stdf_analytics.audit_report_html(ra, rb, label_a="WS1", label_b="WS2")
+    assert "0.85" in html and "0.8" in html  # both old and new HLM shown side by side
+    assert 'td class="chg"' in html  # the changed cells are highlighted
+
+
 def test_report_builders_produce_self_contained_html() -> None:
     run_a = _run([0.71, 0.72, 0.73, 0.74])
     run_b = _run([0.69, 0.72, 0.73, 0.74], add_extra=True)
@@ -63,9 +87,10 @@ def test_report_builders_produce_self_contained_html() -> None:
     # trend
     tr = stdf_analytics.trend_html([("r1", run_a), ("r2", run_b)], 1000, backend="matplotlib")
     assert "trend" in tr and "data:image/png" in tr
-    # audit drill-down
+    # audit — themed page + Beyond-Compare test-diff table
     rep = stdf_analytics.audit_report_html(run_a, run_b, label_a="lotA", label_b="lotB")
+    assert rep.startswith("<!doctype html>") and "docusearch" in rep  # shared theme
     assert "STDF audit" in rep and "Yield" in rep
-    assert "<details>" in rep  # per-test drill-down
-    assert "2000" in rep  # the added IDDQ test noted
-    assert "data:image/png" in rep  # Q-Q plots embedded
+    assert "Test diff" in rep and 'class="grid"' in rep  # tabular diff, not per-test plots
+    assert "IDDQ" in rep and "2000" in rep  # the added test shown by name + number
+    assert "badge added" in rep  # add/remove/changed status badges

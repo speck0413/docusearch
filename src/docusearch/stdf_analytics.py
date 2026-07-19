@@ -177,9 +177,9 @@ def insertion_yield_html(
         for r in rows
     )
     return (
-        '<section class="stdf-yield"><h3>Yield per insertion</h3><table border="1">'
-        "<tr><th>insertion</th><th>parts</th><th>first-pass yield</th><th>final yield</th>"
-        f"<th>retested</th></tr>{body}</table></section>"
+        '<section class="stdf-yield"><h3>Yield per insertion</h3><div class="scroll">'
+        '<table class="grid"><thead><tr><th>insertion</th><th>parts</th><th>first-pass yield</th>'
+        f"<th>final yield</th><th>retested</th></tr></thead><tbody>{body}</tbody></table></div></section>"
     )
 
 
@@ -198,12 +198,13 @@ def part_trace_html(
             cells.append(f"<td>{'PASS' if p.passed else 'FAIL'} · b{p.hard_bin}</td>" if p else "<td>—</td>")
         body.append(f"<tr><td>{escape('/'.join(key))}</td>{''.join(cells)}</tr>")
     return (
-        f'<section class="stdf-trace"><h3>Part progression ({"/".join(part_key)})</h3>'
-        f'<table border="1"><tr><th>part</th>{head}</tr>{"".join(body)}</table></section>'
+        f'<section class="stdf-trace"><h3>Part progression ({escape("/".join(part_key))})</h3>'
+        f'<div class="scroll"><table class="grid"><thead><tr><th>part</th>{head}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table></div></section>'
     )
 
 
-# ------------------------------------------------------- drill-down HTML report builders
+# ------------------------------------------------------- themed HTML report builders
 
 
 def _test_txt(run: StdfRun, test_num: int) -> str:
@@ -219,23 +220,30 @@ def _stats_line(s: dict[str, float]) -> str:
     )
 
 
+def _page(title: str, body: str, *, subtitle: str = "") -> str:
+    from . import report  # lazy: the themed-page wrapper (shared with the cited reports)
+
+    return report.themed_page(title, body, subtitle=subtitle, eyebrow="docusearch · STDF analytics")
+
+
 def plot_test_html(
     run: StdfRun, test_num: int, *, kind: str = "histogram", backend: str = "matplotlib"
 ) -> str:
-    """A single test's distribution plot + summary stats."""
+    """A single test's distribution plot + summary stats, in the shared theme."""
     vals = results_for(run, test_num)
     txt = _test_txt(run, test_num)
     plot = analytics.render_plot(
         kind, y=vals, title=f"{txt} (test {test_num})", xlabel=txt, ylabel="count", backend=backend
     )
-    return (
-        f'<section class="stdf-plot"><h3>{escape(txt)} — test {test_num}</h3>{plot}'
+    card = (
+        f'<section class="acard"><h2>{escape(txt)} — test {test_num}</h2>{plot}'
         f"<p class='stats'>{_stats_line(analytics.summary_stats(vals))}</p></section>"
     )
+    return _page(f"{txt} — distribution", card, subtitle=f"test {test_num} · {kind}")
 
 
 def site_compare_html(run: StdfRun, test_num: int, *, backend: str = "matplotlib") -> str:
-    """Site-to-site box comparison of one test."""
+    """Site-to-site box comparison of one test, themed."""
     groups = site_groups(run, test_num)
     series = [(f"site {site}", vals) for site, vals in groups.items()]
     txt = _test_txt(run, test_num)
@@ -246,13 +254,14 @@ def site_compare_html(run: StdfRun, test_num: int, *, backend: str = "matplotlib
         f"<li>site {site}: {_stats_line(analytics.summary_stats(v))}</li>"
         for site, v in groups.items()
     )
-    return f'<section class="stdf-sites"><h3>{escape(txt)} — site-to-site</h3>{plot}<ul>{rows}</ul></section>'
+    card = f'<section class="acard"><h2>{escape(txt)} — site-to-site</h2>{plot}<ul>{rows}</ul></section>'
+    return _page(f"{txt} — site-to-site", card)
 
 
 def trend_html(
     runs: list[tuple[str, StdfRun]], test_num: int, *, stat: str = "mean", backend: str = "matplotlib"
 ) -> str:
-    """Long-run trend of a test's ``stat`` across ordered runs."""
+    """Long-run trend of a test's ``stat`` across ordered runs, themed."""
     pts = trend_points(runs, test_num, stat)
     txt = runs[0][1] and _test_txt(runs[0][1], test_num)
     plot = analytics.render_plot(
@@ -260,44 +269,147 @@ def trend_html(
         title=f"{txt} {stat} trend", xlabel="run", ylabel=f"{txt} {stat}", backend=backend,
     )
     rows = "".join(f"<li>{escape(label)}: {value:.4g}</li>" for label, value in pts)
-    return f'<section class="stdf-trend"><h3>{escape(str(txt))} — {stat} trend</h3>{plot}<ul>{rows}</ul></section>'
+    card = f'<section class="acard"><h2>{escape(str(txt))} — {stat} trend</h2>{plot}<ul>{rows}</ul></section>'
+    return _page(f"{txt} — {stat} trend", card)
+
+
+# ---- Beyond-Compare-style test diff (revision to revision) ---------------------
+
+
+@dataclass
+class TestDef:
+    """A test's definition in one run — the fields the diff compares."""
+
+    test_num: int
+    test_txt: str
+    lo: float | None
+    hi: float | None
+    units: str
+    conditions: dict[str, str]
+
+
+@dataclass
+class DiffRow:
+    name: str
+    status: str  # added | removed | changed | identical
+    a: TestDef | None
+    b: TestDef | None
+    changed: set[str] = field(default_factory=set)  # {"tnum","lo","hi","cond:<key>"}
+
+
+def _defs(run: StdfRun) -> dict[str, TestDef]:
+    out: dict[str, TestDef] = {}
+    for t in run.tests:
+        if t.test_txt not in out:  # a test's definition is constant across its touchdowns
+            out[t.test_txt] = TestDef(
+                t.test_num, t.test_txt, t.lo_limit, t.hi_limit, t.units, dict(t.conditions)
+            )
+    return out
+
+
+def diff_tests(run_a: StdfRun, run_b: StdfRun) -> tuple[list[str], list[DiffRow]]:
+    """Align tests **by name + conditions** (the unique id) and flag exactly what changed revision to
+    revision — test number, limits (LLM/HLM), or conditions (R-STDF-2). Returns the union of
+    condition keys (for columns) and one :class:`DiffRow` per test."""
+    da, db = _defs(run_a), _defs(run_b)
+    cond_keys = sorted({k for d in (*da.values(), *db.values()) for k in d.conditions})
+    rows: list[DiffRow] = []
+    for name in sorted(set(da) | set(db)):
+        a, b = da.get(name), db.get(name)
+        if a and not b:
+            rows.append(DiffRow(name, "removed", a, None))
+        elif b and not a:
+            rows.append(DiffRow(name, "added", None, b))
+        else:
+            assert a is not None and b is not None
+            changed: set[str] = set()
+            if a.test_num != b.test_num:
+                changed.add("tnum")
+            if a.lo != b.lo:
+                changed.add("lo")
+            if a.hi != b.hi:
+                changed.add("hi")
+            for k in cond_keys:
+                if a.conditions.get(k) != b.conditions.get(k):
+                    changed.add(f"cond:{k}")
+            rows.append(DiffRow(name, "changed" if changed else "identical", a, b, changed))
+    return cond_keys, rows
+
+
+def _num(v: float | None) -> str:
+    return "—" if v is None else f"{v:g}"
+
+
+def _diff_table_html(run_a: StdfRun, run_b: StdfRun, label_a: str, label_b: str) -> str:
+    cond_keys, rows = diff_tests(run_a, run_b)
+    heads = ["Status", f"old #<br>{escape(label_a)}", f"new #<br>{escape(label_b)}", "Test",
+             "old LLM", "new LLM", "old HLM", "new HLM", "Units"]
+    for k in cond_keys:
+        heads += [f"old {escape(k)}", f"new {escape(k)}"]
+    thead = "".join(f"<th>{h}</th>" for h in heads)
+
+    def cell(val: str, field_name: str, changed: set[str]) -> str:
+        cls = ' class="chg"' if field_name in changed else ""
+        return f"<td{cls}>{escape(val)}</td>"
+
+    body_rows = []
+    for r in rows:
+        a, b, ch = r.a, r.b, r.changed
+        cells = [f'<td><span class="badge {r.status}">{r.status}</span></td>']
+        cells.append(cell(str(a.test_num) if a else "—", "tnum", ch))
+        cells.append(cell(str(b.test_num) if b else "—", "tnum", ch))
+        cells.append(f"<td>{escape(r.name)}</td>")
+        cells.append(cell(_num(a.lo) if a else "—", "lo", ch))
+        cells.append(cell(_num(b.lo) if b else "—", "lo", ch))
+        cells.append(cell(_num(a.hi) if a else "—", "hi", ch))
+        cells.append(cell(_num(b.hi) if b else "—", "hi", ch))
+        cells.append(f"<td>{escape((a or b).units)}</td>")  # type: ignore[union-attr]
+        for k in cond_keys:
+            fk = f"cond:{k}"
+            cells.append(cell(a.conditions.get(k, "—") if a else "—", fk, ch))
+            cells.append(cell(b.conditions.get(k, "—") if b else "—", fk, ch))
+        body_rows.append(f'<tr class="{r.status}">{"".join(cells)}</tr>')
+    n = {s: sum(1 for r in rows if r.status == s) for s in ("added", "removed", "changed", "identical")}
+    legend = (
+        f'<p class="stats">{n["changed"]} changed · {n["added"]} added · {n["removed"]} removed · '
+        f'{n["identical"]} identical &nbsp;—&nbsp; changed cells highlighted; every field shown old vs new.</p>'
+    )
+    return (
+        '<section class="acard"><h2>Test diff — revision to revision</h2>'
+        f"{legend}<div class='scroll'><table class='grid'><thead><tr>{thead}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody></table></div></section>"
+    )
 
 
 def audit_report_html(
     run_a: StdfRun, run_b: StdfRun, *, backend: str = "matplotlib",
     label_a: str = "A", label_b: str = "B",
 ) -> str:
-    """A **drill-down** audit report: top-level summary (yields, added/removed tests, condition
-    diff) → collapsible per-test Q-Q + stat deltas, so the user clicks from the yield delta down to
-    the individual test (R-STDF-2)."""
+    """A themed audit: a summary card (yield + counts), the **Beyond-Compare test-diff table**
+    (every field old vs new, changes highlighted — a table view, separate from plots), and a
+    yield-per-insertion table (R-STDF-2)."""
     rep = audit_runs(run_a, run_b)
     ya_p, ya_t = rep.yield_a
     yb_p, yb_t = rep.yield_b
     ya = 100 * ya_p / ya_t if ya_t else 0.0
     yb = 100 * yb_p / yb_t if yb_t else 0.0
-    parts = [
-        '<section class="stdf-audit"><h2>STDF audit</h2>',
-        f"<p><strong>Yield</strong>: {label_a} {ya:.1f}% ({ya_p}/{ya_t}) → "
-        f"{label_b} {yb:.1f}% ({yb_p}/{yb_t}) &nbsp; <strong>Δ {yb - ya:+.1f}%</strong></p>",
-        f"<p><strong>Tests</strong>: {len(rep.matched)} matched · "
-        f"{len(rep.added)} added ({rep.added}) · {len(rep.removed)} removed ({rep.removed})</p>",
-        f"<p><strong>Conditions only in {label_a}</strong>: {rep.conditions_only_a or '—'}<br>"
-        f"<strong>Conditions only in {label_b}</strong>: {rep.conditions_only_b or '—'}</p>",
-        "<h3>Per-test (drill down)</h3>",
-    ]
-    for d in rep.matched:
-        qq = analytics.render_plot(
-            "qq",
-            series=[(label_a, results_for(run_a, d.test_num)), (label_b, results_for(run_b, d.test_num))],
-            title=f"{d.test_txt} Q-Q ({label_a} vs {label_b})", xlabel=label_a, ylabel=label_b,
-            backend=backend,
+    summary = (
+        '<section class="acard"><h2>Summary</h2>'
+        f"<p><strong>Yield</strong>: {escape(label_a)} {ya:.1f}% ({ya_p}/{ya_t}) → "
+        f"{escape(label_b)} {yb:.1f}% ({yb_p}/{yb_t}) &nbsp;·&nbsp; <strong>Δ {yb - ya:+.1f}%</strong></p>"
+        f"<p><strong>Tests</strong>: {len(rep.matched)} matched · {len(rep.added)} added · "
+        f"{len(rep.removed)} removed</p>"
+        f"<p><strong>Conditions only in {escape(label_a)}</strong>: {escape(str(rep.conditions_only_a or '—'))}<br>"
+        f"<strong>Conditions only in {escape(label_b)}</strong>: {escape(str(rep.conditions_only_b or '—'))}</p>"
+        "</section>"
+    )
+    diff = _diff_table_html(run_a, run_b, label_a, label_b)
+    yld = ""
+    if run_a.parts or run_b.parts:
+        yld = insertion_yield_html([*run_a.parts, *run_b.parts]).replace(
+            '<section class="stdf-yield">', '<section class="acard">'
         )
-        flag = " ⚠️" if d.mean_delta is not None and abs(d.mean_delta) > 0 else ""
-        dmean = f"{d.mean_delta:+.4g}" if d.mean_delta is not None else "n/a"
-        parts.append(
-            f"<details><summary>test {d.test_num} — {escape(d.test_txt)} "
-            f"(Δmean {dmean}){flag}</summary>"
-            f"<p>{label_a}: {_stats_line(d.a)}<br>{label_b}: {_stats_line(d.b)}</p>{qq}</details>"
-        )
-    parts.append("</section>")
-    return "".join(parts)
+    return _page(
+        f"STDF audit — {label_a} vs {label_b}", summary + diff + yld,
+        subtitle="test-by-test diff of test number, limits, and conditions",
+    )

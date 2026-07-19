@@ -64,8 +64,9 @@ def test_stdf_plot_and_site_and_trend(tmp_path: Path) -> None:
 def test_stdf_audit_drilldown(tmp_path: Path) -> None:
     svc, ids = _service(tmp_path)
     audit = svc.stdf_audit(ids["b"], ids["c"])
+    assert audit["html"].startswith("<!doctype html>")  # themed page
     assert "STDF audit" in audit["html"] and "Yield" in audit["html"]
-    assert "<details>" in audit["html"]  # drill-down
+    assert "Test diff" in audit["html"] and 'class="grid"' in audit["html"]  # tabular diff view
 
 
 def test_plot_data_general(tmp_path: Path) -> None:

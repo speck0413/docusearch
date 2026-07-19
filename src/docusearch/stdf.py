@@ -99,7 +99,7 @@ class ConditionTracker:
 
 @dataclass
 class StdfTest:
-    """One parametric/functional test result with the conditions active when it ran."""
+    """One parametric/functional test result with its limits + the conditions active when it ran."""
 
     test_num: int
     test_txt: str
@@ -109,6 +109,9 @@ class StdfTest:
     passed: bool
     part_id: str
     conditions: dict[str, str]
+    lo_limit: float | None = None
+    hi_limit: float | None = None
+    units: str = ""
 
 
 @dataclass
@@ -243,6 +246,9 @@ def parse_stdf_tests(
                     passed=not (flg & 0x80),
                     part_id="",
                     conditions=tracker.snapshot(),
+                    lo_limit=_as_float(f.get("LO_LIMIT")),
+                    hi_limit=_as_float(f.get("HI_LIMIT")),
+                    units=str(f.get("UNITS") or "").strip(),
                 )
             )
         elif name == "Prr":
