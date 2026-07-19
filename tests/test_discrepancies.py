@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from docusearch import enrich
+from docusearch import config as cfg
+from docusearch import enrich, ingest
+from docusearch.catalog import Catalog
 from docusearch.search import VectorIndex
 from docusearch.store import Store
+
+from ._fakes import FakeProvider
 
 
 def _doc(store: Store, path: str, content_hash: str) -> int:
@@ -71,6 +75,32 @@ def test_scan_finds_cross_doc_near_duplicate_conflicts() -> None:
         assert 0.90 <= pair.similarity < 0.9999
         # c3 is not similar to anything; same-doc pairs excluded
         assert c3 not in {pair.chunk_a, pair.chunk_b}
+
+
+def test_catalog_check_discrepancies_wires_vector_index(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # End-to-end through Catalog on a hybrid index: duplicate actives surface and, with embeddings,
+    # the vector-index conflict path runs and persists flags.
+    root = tmp_path / "docs"
+    root.mkdir()
+    body = "<body><h1>H</h1><p>The identical shared reset paragraph of text.</p></body>"
+    (root / "one.html").write_text(body, encoding="utf-8")
+    (root / "two.html").write_text(body, encoding="utf-8")  # duplicate active
+    cfg_path = tmp_path / "d.yaml"
+    cfg_path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(cfg_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store, provider=FakeProvider())
+    monkeypatch.setattr(Catalog, "_provider", lambda self: FakeProvider())
+    report = Catalog(config).check_discrepancies(persist=True)
+    assert len(report.duplicate_actives) == 1
+    with Store.open(config.paths.db_path) as store:
+        assert store.count_flags("discrepancy") >= 2  # dup docs flagged
 
 
 def test_persist_discrepancies_writes_flags() -> None:

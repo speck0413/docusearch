@@ -14,6 +14,8 @@ from docusearch.catalog import Catalog
 from docusearch.config import ConfigError
 from docusearch.store import Store
 
+from ._fakes import FakeProvider
+
 
 def _config(tmp_path: Path, *, ai_summaries: bool) -> cfg.Config:
     root = tmp_path / "docs"
@@ -53,6 +55,21 @@ def test_enrich_summaries_makes_searchable_chunk_and_is_idempotent(tmp_path: Pat
     # a re-run summarizes nothing new (idempotent, no double spend)
     again = cat.enrich_summaries(model="m", runner=_fake_runner)
     assert again.pending == 0 and again.summarized == 0
+
+
+def test_enrich_summaries_embeds_new_chunks_on_hybrid_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # On a hybrid index the summary chunk must be embedded (so hybrid search finds it) and the ANN
+    # refreshed — the embed-after-enrich path.
+    config = _config(tmp_path, ai_summaries=True)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store, provider=FakeProvider())
+    monkeypatch.setattr(Catalog, "_provider", lambda self: FakeProvider())
+    result = Catalog(config).enrich_summaries(model="m", runner=_fake_runner)
+    assert result.summarized == 1
+    with Store.open(config.paths.db_path) as store:
+        assert store.chunks_without_embeddings() == []  # summary chunk got embedded too
 
 
 def test_enrich_summaries_refuses_when_disabled(tmp_path: Path) -> None:
