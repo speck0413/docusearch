@@ -163,6 +163,9 @@ class Service:
                 fed_results = [
                     fed.search(q, top_k=k, prefix=prefix, roles=roles) for q in query_texts
                 ]
+            # feedback-aware re-rank across members: each hit boosted by its member's tier + that
+            # member's feedback for this user (feedback > internal > vendor), then re-sorted (Phase 8)
+            fed_results = [self._rerank_federated(cfg, lst, user) for lst in fed_results]
             return fed_results, "(federation)", "federated"
         if not cfg.access.permits(user=user, groups=grp):
             raise PermissionError("access denied: this store is private")
@@ -192,6 +195,32 @@ class Service:
         model_used = provider.model_id if provider is not None else "none"
         mode = "hybrid" if (provider is not None and vector_index is not None) else "bm25"
         return result_lists, model_used, mode
+
+    def _rerank_federated(
+        self, cfg: Config, hits: list[SearchHit], user: str | None
+    ) -> list[SearchHit]:
+        """Re-rank a federation's merged hits by each hit's **member tier** (internal > vendor) and
+        that member's feedback for the requesting user (feedback > internal > vendor), then re-sort
+        (Phase 8). Each member's feedback lives in its own store; a no-op when weights are all 0."""
+        rk = self.config.ranking
+        if rk.internal_boost == 0 and rk.vendor_boost == 0 and rk.feedback_weight == 0:
+            return hits
+        member_tier = {m.name: m.tier for m in cfg.federation}
+        boost = {"internal": rk.internal_boost, "vendor": rk.vendor_boost}
+        needed = {h.store for h in hits if h.store}
+        fb_by_member: dict[str, dict[int, int]] = {}
+        for m in cfg.federation:
+            if m.name in needed:
+                with Store.open(load(Path(m.config)).paths.db_path) as db:
+                    fb_by_member[m.name] = db.feedback_scores(author=user)
+        scored = []
+        for h in hits:
+            tier = member_tier.get(h.store, "vendor")
+            fb = fb_by_member.get(h.store, {}).get(h.doc_id, 0)
+            delta = boost.get(tier, rk.vendor_boost) + rk.feedback_weight * fb
+            scored.append((h.score + delta, h))
+        scored.sort(key=lambda sh: sh[0], reverse=True)
+        return [replace(h, score=round(sc, 6)) for sc, h in scored]
 
     def _rerank_with_feedback(
         self, store: Store, result_lists: list[list[SearchHit]], user: str | None
@@ -244,15 +273,18 @@ class Service:
     def submit_feedback(
         self, *, user: str, text: str, doc_id: int | None = None,
         chunk_id: int | None = None, rating: int | None = None, make_global: bool = False,
+        store: str | None = None,
     ) -> dict[str, Any]:
         """Record a user's feedback in the store (Phase 8). It is **private to ``user``** by default;
         ``make_global`` promotes it to everyone. A ``rating`` (-1/0/+1) with a ``doc_id`` target makes
-        it ranking-eligible. Also mirrored to an append-only JSONL under ``tmp_dir`` for easy review."""
+        it ranking-eligible. In a federation, ``store`` names the member the target doc belongs to so
+        the feedback lands where that member's re-rank reads it. Also mirrored to JSONL for review."""
         import json
 
         scope = "global" if make_global else "user"
-        with Store.open(self.config.paths.db_path) as store:
-            fb_id = store.add_feedback(
+        target_db = self._target_config(store).paths.db_path
+        with Store.open(target_db) as db:
+            fb_id = db.add_feedback(
                 author=user, scope=scope, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating,
             )
         entry = {
@@ -861,6 +893,7 @@ class FeedbackRequest(BaseModel):
     chunk_id: int | None = None
     rating: int | None = None  # optional thumbs (-1/0/+1)
     make_global: bool = False  # promote from private (default) to everyone
+    store: str | None = None  # federation member the target doc belongs to
 
 
 class EmbedRequest(BaseModel):
@@ -1338,14 +1371,18 @@ def build_mcp(service: Service, config: Config) -> Any:
     @mcp.tool()
     def submit_feedback(
         text: str, user: str, doc_id: int | None = None, chunk_id: int | None = None,
-        rating: int | None = None, make_global: bool = False,
+        rating: int | None = None, make_global: bool = False, store: str | None = None,
     ) -> dict[str, Any]:
         """Record a user's feedback (attributed to `user`). Private to that user by default; set
-        `make_global=true` to share with everyone. A `rating` (-1/0/+1) on a `doc_id` nudges ranking."""
-        return service.submit_feedback(
-            user=user, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating,
-            make_global=make_global,
-        )
+        `make_global=true` to share with everyone. A `rating` (-1/0/+1) on a `doc_id` nudges ranking.
+        In a federation, pass the `store` the doc came from so the feedback lands in that member."""
+        try:
+            return service.submit_feedback(
+                user=user, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating,
+                make_global=make_global, store=store,
+            )
+        except (ValueError, PermissionError) as err:
+            return {"error": "FEEDBACK", "message": str(err)}
 
     @mcp.tool()
     def build_report(spec: dict[str, Any], fmt: str = "md") -> dict[str, Any]:
@@ -1630,10 +1667,13 @@ def create_app(config: Config) -> FastAPI:
     def feedback_route(req: FeedbackRequest, request: Request) -> dict[str, Any]:
         """Record user feedback (attributed to X-Docusearch-User)."""
         user = _require_user(request)
-        return service.submit_feedback(
-            user=user, text=req.text, doc_id=req.doc_id, chunk_id=req.chunk_id, rating=req.rating,
-            make_global=req.make_global,
-        )
+        try:
+            return service.submit_feedback(
+                user=user, text=req.text, doc_id=req.doc_id, chunk_id=req.chunk_id,
+                rating=req.rating, make_global=req.make_global, store=req.store,
+            )
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
 
     @app.post("/v1/ingest")
     def ingest_route(req: IngestRequest, request: Request) -> dict[str, Any]:

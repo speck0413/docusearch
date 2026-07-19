@@ -391,6 +391,7 @@ SCHEMA: tuple[_Node, ...] = (
         (
             _Field("name", "", inline="label for this member store, e.g. python | rust | internal"),
             _Field("config", "", inline="path to that store's docusearch.yaml"),
+            _Field("tier", "vendor", inline="authority tier of this member: internal | vendor"),
         ),
         comment=(
             "OPTIONAL — federate several independent stores into one searchable set (R-TEST-3).\n"
@@ -602,6 +603,7 @@ class FederationMemberConfig:
 
     name: str
     config: str
+    tier: str = "vendor"  # authority tier of this whole member (internal | vendor) for re-ranking
 
 
 @dataclass(frozen=True)
@@ -812,7 +814,10 @@ class Config:
                 jsonl=bool(lg["jsonl"]),
             ),
             federation=[
-                FederationMemberConfig(name=str(f["name"]), config=str(f["config"]))
+                FederationMemberConfig(
+                    name=str(f["name"]), config=str(f["config"]),
+                    tier=str(f.get("tier", "vendor")),
+                )
                 for f in m.get("federation", [])
                 if isinstance(f, Mapping) and str(f.get("name", "")).strip()
             ],
