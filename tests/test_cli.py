@@ -454,6 +454,71 @@ def test_no_command_returns_2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert cli.main([]) == 2
 
 
+def _preflight_config(tmp_path: Path) -> Path:
+    root = tmp_path / "docs"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "x.html").write_text("<body><h1>H</h1><p>Do NOT.</p></body>", encoding="utf-8")
+    cfg_path = tmp_path / "d.yaml"
+    cfg_path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 1\n'
+        f'embed:\n  model: "none"\n'
+        f'enrich:\n  preflight_rules: "{(tmp_path / "preflight_rules.yaml").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    return cfg_path
+
+
+def test_preflight_writes_rules_and_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    from docusearch import enrich
+
+    cfg_path = _preflight_config(tmp_path)
+    out = tmp_path / "preflight_rules.yaml"
+    seen: dict[str, object] = {}
+
+    def fake_run_preflight(config, *, out_path, model, seed):  # type: ignore[no-untyped-def]
+        seen.update(out_path=str(out_path), model=model, seed=seed)
+        rules = enrich.PreflightRules(
+            approved=False, gotcha_patterns=[enrich.GotchaPattern(r"do NOT", "warning")], sampled=1
+        )
+        enrich.write_preflight_rules(rules, out_path)
+        return rules
+
+    monkeypatch.setattr(enrich, "run_preflight", fake_run_preflight)
+    rc = cli.main(["preflight", "--config", str(cfg_path), "--model", "m", "--seed", "3"])
+    assert rc == 0
+    assert seen == {"out_path": str(out), "model": "m", "seed": 3}
+    assert out.is_file()
+    combined = capsys.readouterr()
+    assert "warning" in (combined.out + combined.err) and str(out) in combined.out
+
+
+def test_preflight_refuses_to_clobber_approved_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from docusearch import enrich
+
+    cfg_path = _preflight_config(tmp_path)
+    out = tmp_path / "preflight_rules.yaml"
+    enrich.write_preflight_rules(
+        enrich.PreflightRules(approved=True, gotcha_patterns=[enrich.GotchaPattern("x", "l")]), out
+    )
+    calls = {"n": 0}
+
+    def fake_run_preflight(config, **kw):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        return enrich.PreflightRules(approved=False)
+
+    monkeypatch.setattr(enrich, "run_preflight", fake_run_preflight)
+    assert cli.main(["preflight", "--config", str(cfg_path)]) == 1  # refuses without --yes
+    assert calls["n"] == 0  # never touched the approved file
+    assert cli.main(["preflight", "--config", str(cfg_path), "--yes"]) == 0  # --yes overrides
+    assert calls["n"] == 1
+
+
 def test_cli_writes_a_log_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     cli.main(["init"])

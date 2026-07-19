@@ -182,6 +182,55 @@ def _cmd_vision(args: argparse.Namespace) -> int:
     return 1 if result.enriched == 0 and result.failed > 0 else 0
 
 
+def _cmd_preflight(args: argparse.Namespace) -> int:
+    """Pre-flight classification (R-ING-7): sample the corpus, ask Claude (temp 0) to propose
+    gotcha rules, write an UNAPPROVED preflight_rules.yaml for review."""
+    from . import enrich
+
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    out_path = Path(args.out) if args.out else Path(cfg.enrich.preflight_rules)
+
+    if out_path.is_file():  # never silently blow away rules you've already approved
+        existing = enrich.load_preflight_rules(out_path)
+        if existing.approved and not args.yes:
+            print(
+                f"{out_path} already exists and is APPROVED ({len(existing.gotcha_patterns)} "
+                "rules). Re-running would replace it with a fresh, unapproved proposal.\n"
+                "Re-run with --yes to overwrite, or pass --out to write elsewhere.",
+                file=sys.stderr,
+            )
+            return 1
+
+    print(
+        f"Sampling up to {cfg.enrich.preflight_sample} docs (stratified by folder) and asking "
+        f"{args.model!r} to propose gotcha rules — uses your Claude Code login, no API key.",
+        file=sys.stderr,
+    )
+    try:
+        rules = enrich.run_preflight(
+            cfg, out_path=out_path, model=args.model, seed=args.seed
+        )
+    except enrich.EnrichError as exc:
+        print(f"preflight failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Proposed {len(rules.gotcha_patterns)} gotcha rule(s) from {rules.sampled} sampled docs "
+        f"→ {out_path}"
+    )
+    for g in rules.gotcha_patterns:
+        print(f"  · [{g.label}] /{g.pattern}/")
+    print(
+        f"\nReview {out_path}, edit as needed, then set `approved: true` to apply the rules at "
+        "the next `docusearch ingest`. Nothing runs until you approve.",
+        file=sys.stderr,
+    )
+    runlog.log("cli.preflight", sampled=rules.sampled, rules=len(rules.gotcha_patterns))
+    runlog.flush()
+    return 0
+
+
 def _cmd_audit(args: argparse.Namespace) -> int:
     cfg = config.load(Path(args.config))
     _configure_logging(cfg)
@@ -767,6 +816,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_vision.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     p_vision.add_argument("--config", default="docusearch.yaml", help="config path")
     p_vision.set_defaults(func=_cmd_vision)
+
+    p_preflight = sub.add_parser(
+        "preflight",
+        help="sample the corpus → Claude proposes gotcha rules → preflight_rules.yaml (you approve)",
+    )
+    p_preflight.add_argument(
+        "--model", default="claude-opus-4-8", help="Claude model for the proposal (temp 0)"
+    )
+    p_preflight.add_argument(
+        "--out", default=None, help="where to write the rules (default: enrich.preflight_rules)"
+    )
+    p_preflight.add_argument("--seed", type=int, default=7, help="sampling seed (deterministic)")
+    p_preflight.add_argument(
+        "--yes", action="store_true", help="overwrite an already-approved rules file"
+    )
+    p_preflight.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_preflight.set_defaults(func=_cmd_preflight)
 
     p_inspect = sub.add_parser(
         "inspect", help="sample a source and propose content_selector / strip_selectors"
