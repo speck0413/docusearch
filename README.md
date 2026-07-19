@@ -242,6 +242,44 @@ docusearch serve --config federation.yaml            # REST + MCP for the whole 
 docusearch search --config federation.yaml --stores acme "match loop single bit"   # scope to ACME
 ```
 
+### Private stores & access control
+
+A store is **public** (anyone on the server) or **private** (a whitelist). Set it in the store's
+config — omit it and the store is public:
+
+```yaml
+access:
+  visibility: private
+  allowed_users:  [alice, bob]
+  allowed_groups: [engineering]
+```
+
+The requester's identity comes from the **`X-Docusearch-User`** (and `X-Docusearch-Groups`) HTTP
+header on REST, or the `user`/`groups` arguments on the MCP `search_docs` tool. A private single
+store returns **403** to anyone not whitelisted; in a federation a private member simply **drops out**
+of the results and looks "unknown" if explicitly scoped — its existence isn't leaked. Heavier
+isolation is just a **dedicated store** (a federation member) with its own whitelist. The local CLI
+(the operator) is unrestricted.
+
+### Adding documents (write API)
+
+```bash
+# a server-side folder or a .zip/.tar.gz archive (uncompressed server-side), labelled + attributed
+curl -X POST localhost:8321/v1/ingest -H 'X-Docusearch-User: alice' \
+     -H 'content-type: application/json' \
+     -d '{"path": "/inbound/vendor-2025q3", "store": "vendor", "label": "vendor-2025q3"}'
+
+# multipart upload of an archive
+curl -X POST localhost:8321/v1/ingest/upload -H 'X-Docusearch-User: alice' \
+     -F file=@docs.zip -F store=internal -F label=q3-notes
+```
+
+`POST /v1/ingest` (folder or archive path) and `POST /v1/ingest/upload` (multipart `.zip`/`.tar.gz`)
+add documents to a chosen store (`store` = a federation member such as `vendor`/`internal`/`user`),
+tagged with a `label` and attributed to the submitting username (**required** — 401 without it).
+Archives are uncompressed with zip-slip / tar-traversal rejected. `POST /v1/feedback` records user
+feedback. The MCP exposes the same as the `ingest_docs` and `submit_feedback` tools.
+
 ## Quick start (dev)
 
 ```bash
