@@ -187,11 +187,38 @@ class Service:
                 roles=roles,
                 bm25_only=force_bm25,
             )
-        # search() returns a list-of-lists for a sequence input
-        result_lists: list[list[SearchHit]] = results  # type: ignore[assignment]
+            # feedback-aware re-rank (Phase 8): boost by source tier + this user's feedback
+            result_lists = self._rerank_with_feedback(store, results, user)  # type: ignore[arg-type]
         model_used = provider.model_id if provider is not None else "none"
         mode = "hybrid" if (provider is not None and vector_index is not None) else "bm25"
         return result_lists, model_used, mode
+
+    def _rerank_with_feedback(
+        self, store: Store, result_lists: list[list[SearchHit]], user: str | None
+    ) -> list[list[SearchHit]]:
+        """Adjust each hit's score by its **source tier** (internal > vendor) and the requesting
+        user's **net feedback** on that document (feedback > internal > vendor), then re-sort
+        (Phase 8, R-FB). A no-op when all ranking weights are 0. Single-store only for now — the
+        federation path merges members before this and is a follow-up."""
+        rk = self.config.ranking
+        if rk.internal_boost == 0 and rk.vendor_boost == 0 and rk.feedback_weight == 0:
+            return result_lists
+        tier_of = {s.name: s.tier for s in self.config.sources}
+        boost = {"internal": rk.internal_boost, "vendor": rk.vendor_boost}
+        fb = store.feedback_scores(author=user)
+        src = store.document_source_map(
+            [h.doc_id for lst in result_lists for h in lst]
+        )
+        out: list[list[SearchHit]] = []
+        for lst in result_lists:
+            scored = []
+            for h in lst:
+                tier = tier_of.get(src.get(h.doc_id, ""), "vendor")
+                delta = boost.get(tier, rk.vendor_boost) + rk.feedback_weight * fb.get(h.doc_id, 0)
+                scored.append((h.score + delta, h))
+            scored.sort(key=lambda sh: sh[0], reverse=True)
+            out.append([replace(h, score=round(sc, 6)) for sc, h in scored])
+        return out
 
     def check_read_access(self, user: str | None, groups: set[str] | None) -> None:
         """Raise ``PermissionError`` if a SINGLE private store may not be read by this requester —

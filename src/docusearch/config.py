@@ -162,6 +162,15 @@ SCHEMA: tuple[_Node, ...] = (
                 ),
             ),
             _Field(
+                "tier",
+                "vendor",
+                comment=(
+                    "Authority tier for ranking (Phase 8): internal | vendor.\n"
+                    "A search re-ranks so feedback > internal > vendor — an `internal` source's hits\n"
+                    "get a boost over `vendor` ones (tune under `ranking:`); user feedback outranks both."
+                ),
+            ),
+            _Field(
                 "csv",
                 {},
                 comment=(
@@ -232,6 +241,20 @@ SCHEMA: tuple[_Node, ...] = (
             _Field("top_k_default", 10, inline="results returned when not otherwise specified"),
             _Field("rrf_k", 60, inline="RRF constant for hybrid fusion"),
             _Field("bm25_only", False, inline="force-skip vectors at query time"),
+        ),
+    ),
+    _Section(
+        "ranking",
+        (
+            _Field("internal_boost", 0.02, inline="added to an `internal`-tier hit's score"),
+            _Field("vendor_boost", 0.0, inline="added to a `vendor`-tier hit's score (baseline)"),
+            _Field("feedback_weight", 0.03, inline="× a document's net feedback rating, added to score"),
+        ),
+        comment=(
+            "Feedback-aware re-ranking (Phase 8). After the relevance search, each hit's score gets\n"
+            "+tier_boost (internal>vendor) and +feedback_weight×(net rating for the requesting user).\n"
+            "Defaults keep relevance dominant while realising feedback > internal > vendor at the\n"
+            "margin; raise the boosts to enforce the ordering harder. Set all to 0 to disable."
         ),
     ),
     _Section(
@@ -557,6 +580,8 @@ class SourceConfig:
     min_content_chars: int
     audience: list[str]
     insertion: str = ""
+    tier: str = "vendor"  # authority tier for ranking (Phase 8): internal | vendor. feedback ranks
+    #                       above both via the separate feedback signal (feedback > internal > vendor).
     # Delimited/fixed-width data (Phase 10). `delimiter` overrides the by-extension default
     # (csv→comma, tsv→tab); `widths` (a tuple of column widths) reads a fixed-width file instead.
     # The role-map is empty = wide mode (every numeric column is a metric); set label+value for a
@@ -624,6 +649,15 @@ class SearchConfig:
 
 
 @dataclass(frozen=True)
+class RankingConfig:
+    """Feedback-aware re-ranking weights (Phase 8): additive boosts on top of the relevance score."""
+
+    internal_boost: float
+    vendor_boost: float
+    feedback_weight: float
+
+
+@dataclass(frozen=True)
 class ServeConfig:
     host: str
     port: int
@@ -677,6 +711,7 @@ class Config:
     embed: EmbedConfig
     index: IndexConfig
     search: SearchConfig
+    ranking: RankingConfig
     serve: ServeConfig
     access: AccessConfig
     enrich: EnrichConfig
@@ -688,7 +723,7 @@ class Config:
     def _from_mapping(cls, m: Mapping[str, Any]) -> Config:
         p, e, ix = m["paths"], m["embed"], m["index"]
         se, sv, en, lg = m["search"], m["serve"], m["enrich"], m["logging"]
-        st = m["stdf"]
+        st, rk = m["stdf"], m["ranking"]
         return cls(
             mode=str(m["mode"]),
             server_url=str(m["server_url"]),
@@ -711,6 +746,7 @@ class Config:
                     min_content_chars=int(s["min_content_chars"]),
                     audience=_strs(s["audience"]),
                     insertion=str(s.get("insertion", "")),
+                    tier=str(s.get("tier", "vendor")),
                     csv_delimiter=str(_csv_map(s).get("delimiter", "")),
                     csv_widths=tuple(int(w) for w in _csv_map(s).get("widths", []) or []),
                     csv_label=str(_csv_map(s).get("label", "")),
@@ -735,6 +771,11 @@ class Config:
                 ann=bool(ix["ann"]),
                 ann_m=int(ix["ann_m"]),
                 ann_ef_construction=int(ix["ann_ef_construction"]),
+            ),
+            ranking=RankingConfig(
+                internal_boost=float(rk["internal_boost"]),
+                vendor_boost=float(rk["vendor_boost"]),
+                feedback_weight=float(rk["feedback_weight"]),
             ),
             search=SearchConfig(
                 top_k_default=int(se["top_k_default"]),

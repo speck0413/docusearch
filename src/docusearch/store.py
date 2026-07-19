@@ -686,6 +686,20 @@ class Store:
     def count_feedback(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0])
 
+    def document_source_map(self, doc_ids: Sequence[int]) -> dict[int, str]:
+        """``{doc_id: source label}`` for the given ids — used to resolve each hit's authority tier
+        (the config maps a source name → tier) during feedback-aware re-ranking."""
+        ids = list(dict.fromkeys(doc_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        return {
+            int(r["id"]): str(r["source"] or "")
+            for r in self._conn.execute(
+                f"SELECT id, source FROM documents WHERE id IN ({placeholders})", ids  # noqa: S608
+            )
+        }
+
     def stdf_documents(self) -> list[sqlite3.Row]:
         """Every STDF document with its SKU (the ``source`` label = part SKU/name it was filed under),
         lot, distinct insertions, and result/part counts — the file catalog behind ``stdf ls``.
