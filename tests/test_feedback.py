@@ -48,3 +48,23 @@ def test_feedback_scores_aggregate_and_cleanup(tmp_path: Path) -> None:
         assert store.feedback_scores() == {3: 1} and store.count_feedback() == 3
         store.delete_document(3)  # deleting the target removes its feedback
         assert store.count_feedback() == 0
+
+
+def test_cross_tier_discrepancy_annotation() -> None:
+    """A conflict pair spanning internal vs vendor is flagged cross-tier, internal is authoritative."""
+    from types import SimpleNamespace
+
+    from docusearch.server import _annotate_conflict_tiers
+
+    meta = {1: ("vendor/a.md", "vendor"), 2: ("internal/b.md", "internal"), 3: ("vendor/c.md", "vendor")}
+    tier_of = {"vendor": "vendor", "internal": "internal"}
+    conflicts = [
+        SimpleNamespace(chunk_a=10, chunk_b=20, doc_a=1, doc_b=2, similarity=0.95),  # cross-tier
+        SimpleNamespace(chunk_a=30, chunk_b=40, doc_a=1, doc_b=3, similarity=0.95),  # both vendor
+    ]
+    rows, cross = _annotate_conflict_tiers(conflicts, meta, tier_of)
+    assert cross == 1
+    a, b = rows
+    assert a["cross_tier"] is True and a["authoritative_doc"] == 2  # internal wins over vendor
+    assert a["doc_a_tier"] == "vendor" and a["doc_b_tier"] == "internal"
+    assert b["cross_tier"] is False and b["authoritative_doc"] is None

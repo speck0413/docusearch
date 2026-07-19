@@ -278,12 +278,18 @@ class Service:
         if not cfg.access.permits(user=user, groups=groups or set()):
             raise PermissionError("access denied: this store is private")
         report = Catalog(cfg).check_discrepancies(persist=persist)
-        # enrich with paths/titles so the caller can show a useful table without a second round-trip
+        # enrich with paths + the source's authority TIER so a cross-tier disagreement (internal vs
+        # vendor saying near-identical-but-possibly-conflicting things) is flagged with which tier
+        # wins (feedback > internal > vendor, R-FB) — the "log which system says what" ask (#63).
         with Store.open(cfg.paths.db_path) as store_db:
-            titles = {
-                int(r["id"]): (str(r["path"]), str(r["title"]))
-                for r in store_db._conn.execute("SELECT id, path, title FROM documents")  # noqa: SLF001
+            meta = {
+                int(r["id"]): (str(r["path"] or ""), str(r["source"] or ""))
+                for r in store_db._conn.execute("SELECT id, path, source FROM documents")  # noqa: SLF001
             }
+        tier_of = {s.name: s.tier for s in cfg.sources}
+        conflicts, cross_tier = _annotate_conflict_tiers(report.conflict_candidates, meta, tier_of)
+        if cross_tier:
+            runlog.log("api.discrepancy.cross_tier", store=store or "default", count=cross_tier)
         return {
             "duplicate_actives": [
                 {
@@ -292,16 +298,8 @@ class Service:
                 }
                 for g in report.duplicate_actives
             ],
-            "conflict_candidates": [
-                {
-                    "chunk_a": p.chunk_a, "chunk_b": p.chunk_b,
-                    "doc_a": p.doc_a, "doc_b": p.doc_b,
-                    "doc_a_path": titles.get(p.doc_a, ("", ""))[0],
-                    "doc_b_path": titles.get(p.doc_b, ("", ""))[0],
-                    "similarity": p.similarity,
-                }
-                for p in report.conflict_candidates
-            ],
+            "conflict_candidates": conflicts,
+            "cross_tier_conflicts": cross_tier,
             "persisted": persist,
         }
 
@@ -912,6 +910,38 @@ def _request_identity(request: Request) -> tuple[str | None, set[str]]:
 
 _ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar")
 _MAX_EXTRACT_BYTES = 2 * 1024**3  # 2 GB decompressed cap — zip-bomb guard (red-team M5)
+
+
+_TIER_RANK = {"internal": 2, "vendor": 1}  # feedback outranks both via the separate feedback signal
+
+
+def _annotate_conflict_tiers(
+    conflicts: Any, meta: dict[int, tuple[str, str]], tier_of: dict[str, str]
+) -> tuple[list[dict[str, Any]], int]:
+    """Tag each conflict-candidate pair with each doc's authority **tier** and, when the two sides
+    are **cross-tier** (a disagreement between e.g. internal and vendor), the ``authoritative_doc``
+    (the higher tier wins — feedback > internal > vendor). Returns (rows, cross_tier_count) — the
+    "log which system says what" output for #63."""
+    def tier(doc: int) -> str:
+        return tier_of.get(meta.get(doc, ("", ""))[1], "vendor")
+
+    rows: list[dict[str, Any]] = []
+    cross = 0
+    for p in conflicts:
+        ta, tb = tier(p.doc_a), tier(p.doc_b)
+        is_cross = ta != tb
+        cross += int(is_cross)
+        authoritative = None
+        if is_cross:
+            authoritative = p.doc_a if _TIER_RANK.get(ta, 0) >= _TIER_RANK.get(tb, 0) else p.doc_b
+        rows.append({
+            "chunk_a": p.chunk_a, "chunk_b": p.chunk_b, "doc_a": p.doc_a, "doc_b": p.doc_b,
+            "doc_a_path": meta.get(p.doc_a, ("", ""))[0],
+            "doc_b_path": meta.get(p.doc_b, ("", ""))[0],
+            "doc_a_tier": ta, "doc_b_tier": tb, "cross_tier": is_cross,
+            "authoritative_doc": authoritative, "similarity": p.similarity,
+        })
+    return rows, cross
 
 
 def _match_glob(path: str, pattern: str) -> bool:
