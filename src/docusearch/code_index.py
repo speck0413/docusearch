@@ -14,6 +14,7 @@ qualname nesting, signature slicing, and comment-docstring logic are all languag
 from __future__ import annotations
 
 import importlib
+import re
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import PurePosixPath
@@ -44,6 +45,9 @@ class _Spec:
     module: str                 # grammar package, e.g. "tree_sitter_python"
     lang_attr: str              # attribute returning the PyCapsule, e.g. "language"
     kinds: dict[str, str] = field(default_factory=dict)  # tree-sitter node type -> base kind
+    # node types that are only a real definition when they carry a body (a C/C++ struct/class used as
+    # a type or forward-declared has no body — skip it so it isn't double-counted as a symbol)
+    require_body: frozenset[str] = frozenset()
 
 
 # One row per supported language. `kinds` maps the grammar's definition node types to a base kind;
@@ -69,6 +73,25 @@ LANG_SPECS: dict[str, _Spec] = {
                   {"class_declaration": "class", "interface_declaration": "interface",
                    "enum_declaration": "enum", "method_declaration": "method",
                    "constructor_declaration": "method"}),
+    "c": _Spec("tree_sitter_c", "language",
+               {"function_definition": "function", "struct_specifier": "struct",
+                "union_specifier": "struct", "enum_specifier": "enum", "type_definition": "type"},
+               require_body=frozenset({"struct_specifier", "union_specifier", "enum_specifier"})),
+    "cpp": _Spec("tree_sitter_cpp", "language",
+                 {"function_definition": "function", "class_specifier": "class",
+                  "struct_specifier": "struct", "union_specifier": "struct",
+                  "enum_specifier": "enum", "namespace_definition": "namespace"},
+                 require_body=frozenset({"class_specifier", "struct_specifier",
+                                         "union_specifier", "enum_specifier"})),
+    "csharp": _Spec("tree_sitter_c_sharp", "language",
+                    {"class_declaration": "class", "interface_declaration": "interface",
+                     "struct_declaration": "struct", "enum_declaration": "enum",
+                     "record_declaration": "class", "method_declaration": "method",
+                     "constructor_declaration": "method", "destructor_declaration": "method",
+                     "property_declaration": "property",
+                     "namespace_declaration": "namespace",
+                     "file_scoped_namespace_declaration": "namespace"}),
+    # "vba" has no tree-sitter grammar — it is parsed by _parse_vba (a line-based extractor) instead.
 }
 
 # File extension → language.
@@ -77,6 +100,11 @@ _EXT: dict[str, str] = {
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
     ".ts": "typescript", ".tsx": "typescript",
     ".go": "go", ".rs": "rust", ".java": "java",
+    ".c": "c", ".h": "c",
+    ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c++": "cpp",
+    ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp", ".h++": "cpp",
+    ".cs": "csharp",
+    ".vba": "vba", ".bas": "vba", ".cls": "vba", ".frm": "vba",
 }
 
 # Kinds whose scope makes a nested "function" a "method", and defines a qualname boundary.
@@ -85,8 +113,14 @@ _CLASS_LIKE = frozenset({"class", "struct", "interface", "trait", "enum", "impl"
 _BODY_TYPES = frozenset({
     "block", "statement_block", "class_body", "interface_body", "enum_body", "enum_class_body",
     "declaration_list", "field_declaration_list", "enum_variant_list",
+    "compound_statement", "enumerator_list", "enum_member_declaration_list", "accessor_list",
 })
 _COMMENT_TYPES = frozenset({"comment", "line_comment", "block_comment"})
+# Declarator leaves that name a C/C++ definition (the name is buried in the declarator, not a field).
+_C_NAME_NODES = frozenset({
+    "identifier", "field_identifier", "type_identifier", "qualified_identifier",
+    "destructor_name", "operator_name",
+})
 
 
 def detect_language(path: str) -> str | None:
@@ -117,7 +151,21 @@ def _parser(language: str) -> Parser:
 
 def _name(node: Node) -> str | None:
     field_node = node.child_by_field_name("name")
-    return field_node.text.decode("utf-8", "replace") if field_node and field_node.text else None
+    if field_node is not None and field_node.text:
+        return field_node.text.decode("utf-8", "replace")
+    # C/C++: no "name" field — descend the `declarator` chain to the identifier that names it.
+    cur = node.child_by_field_name("declarator")
+    for _ in range(40):  # bounded: guards against a cyclic/pathological tree
+        if cur is None:
+            return None
+        if cur.type in _C_NAME_NODES:
+            return cur.text.decode("utf-8", "replace").strip() if cur.text else None
+        nxt = cur.child_by_field_name("declarator")
+        if nxt is None:  # pointer/array/parenthesized wrappers: step into the next declarator child
+            nxt = next((c for c in cur.children if c.type.endswith("declarator")
+                        or c.type in _C_NAME_NODES), None)
+        cur = nxt
+    return None
 
 
 def _signature(node: Node, src: bytes) -> str:
@@ -173,8 +221,11 @@ def parse_symbols(text: str, language: str, *, path: str = "") -> list[Symbol]:
 
     Raises ``ValueError`` for an unsupported ``language``. tree-sitter is error-tolerant, so a syntax
     error in one region does not lose the well-formed symbols around it."""
+    if language == "vba":  # no tree-sitter grammar — a line-based parser handles VBA
+        return _parse_vba(text, path)
     if language not in LANG_SPECS:
-        raise ValueError(f"unsupported language: {language!r} (have: {', '.join(LANG_SPECS)})")
+        raise ValueError(
+            f"unsupported language: {language!r} (have: {', '.join([*LANG_SPECS, 'vba'])})")
     spec = LANG_SPECS[language]
     src = text.encode("utf-8")
     root = _parser(language).parse(src).root_node
@@ -187,7 +238,9 @@ def parse_symbols(text: str, language: str, *, path: str = "") -> list[Symbol]:
     while stack:
         node, parent, parent_class_like = stack.pop()
         child_parent, child_class_like = parent, parent_class_like
-        if node.type in spec.kinds:
+        has_body = node.type not in spec.require_body or any(
+            c.type in _BODY_TYPES for c in node.children)
+        if node.type in spec.kinds and has_body:
             name = _name(node)
             if name:
                 qualname = f"{parent}.{name}" if parent else name
@@ -207,4 +260,78 @@ def parse_symbols(text: str, language: str, *, path: str = "") -> list[Symbol]:
             stack.append((child, child_parent, child_class_like))
 
     out.sort(key=lambda s: (s.start_line, s.qualname))
+    return out
+
+
+# ---- VBA (no tree-sitter grammar exists — a line-based extractor; VBA procedures never nest) -------
+
+_VBA_DECL = re.compile(
+    r"^\s*(?:(?:Public|Private|Friend|Global)\s+)?(?:Static\s+)?"
+    r"(?P<kw>Sub|Function|Property\s+(?:Get|Let|Set)|Type|Enum)\s+(?P<name>[A-Za-z_]\w*)",
+    re.IGNORECASE,
+)
+_VBA_END = re.compile(r"^\s*End\s+(?P<kw>Sub|Function|Property|Type|Enum)\b", re.IGNORECASE)
+_VBA_KIND = {"sub": "function", "function": "function", "property": "property",
+             "type": "type", "enum": "enum"}
+
+
+def _vba_leading_comment(lines: list[str], i: int) -> str:
+    """Contiguous ``'`` / ``Rem`` comment lines immediately above line ``i`` — a VBA docstring."""
+    out: list[str] = []
+    k = i - 1
+    while k >= 0:
+        s = lines[k].strip()
+        if s.startswith("'"):
+            out.append(s.lstrip("'").strip())
+        elif s[:4].lower() == "rem ":
+            out.append(s[4:].strip())
+        else:
+            break
+        k -= 1
+    out.reverse()
+    return " ".join(" ".join(out).split())
+
+
+def _parse_vba(text: str, path: str) -> list[Symbol]:
+    """Extract Sub / Function / Property / Type / Enum from VBA. A ``.cls`` file is a class module: a
+    synthetic class (from the file stem) is emitted and its procedures become methods."""
+    lines = text.splitlines()
+    n = len(lines)
+    is_cls = PurePosixPath(path).suffix.lower() == ".cls"
+    cls = PurePosixPath(path).stem if is_cls else ""
+    out: list[Symbol] = []
+    if cls:
+        out.append(Symbol("vba", "class", cls, cls, f"Class {cls}", "", 1, n or 1, "", path))
+    i = 0
+    while i < n:
+        m = _VBA_DECL.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        base = m.group("kw").split()[0].lower()  # sub | function | property | type | enum
+        name = m.group("name")
+        # signature: the declaration line, joining VBA's ` _` line continuations
+        sig_parts = [lines[i].strip()]
+        j = i
+        while sig_parts[-1].endswith("_") and j + 1 < n:
+            sig_parts[-1] = sig_parts[-1][:-1].rstrip()
+            j += 1
+            sig_parts.append(lines[j].strip())
+        signature = " ".join(sig_parts).strip()
+        # scan to the matching End <keyword> (procedures don't nest, so the next one closes it)
+        end_line = j
+        k = j + 1
+        while k < n:
+            em = _VBA_END.match(lines[k])
+            if em and em.group("kw").lower() == base:
+                end_line = k
+                break
+            k += 1
+        kind = _VBA_KIND[base]
+        if cls and kind == "function":
+            kind = "method"
+        qual = f"{cls}.{name}" if cls else name
+        out.append(Symbol("vba", kind, name, qual, signature, _vba_leading_comment(lines, i),
+                          i + 1, end_line + 1, cls, path))
+        i = end_line + 1
     return out

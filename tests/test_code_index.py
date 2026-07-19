@@ -31,6 +31,10 @@ def _by_qual(text: str, language: str) -> dict[str, code_index.Symbol]:
     return {s.qualname: s for s in code_index.parse_symbols(text, language, path="x")}
 
 
+def _by_qual_path(text: str, language: str, path: str) -> dict[str, code_index.Symbol]:
+    return {s.qualname: s for s in code_index.parse_symbols(text, language, path=path)}
+
+
 def test_python_functions_classes_methods() -> None:
     syms = _by_qual(PY, "python")
     assert set(syms) == {"greet", "Store", "Store.open"}
@@ -81,8 +85,77 @@ def test_detect_language_by_extension() -> None:
     assert code_index.detect_language("foo.go") == "go"
     assert code_index.detect_language("foo.rs") == "rust"
     assert code_index.detect_language("foo.java") == "java"
+    assert code_index.detect_language("foo.c") == "c"
+    assert code_index.detect_language("foo.h") == "c"
+    assert code_index.detect_language("foo.cpp") == "cpp"
+    assert code_index.detect_language("foo.hpp") == "cpp"
+    assert code_index.detect_language("foo.cs") == "csharp"
+    assert code_index.detect_language("foo.bas") == "vba"
+    assert code_index.detect_language("Sheet1.cls") == "vba"
     assert code_index.detect_language("README.md") is None
     assert code_index.detect_language("noext") is None
+
+
+def test_c_symbols() -> None:
+    src = ("int add(int a, int b) { return a + b; }\n"
+           "static char *dup_str(const char *s) { return 0; }\n"
+           "struct Point { int x; int y; };\n"
+           "enum Color { RED, GREEN };\n")
+    syms = _by_qual(src, "c")
+    assert syms["add"].kind == "function" and "int add(int a, int b)" in syms["add"].signature
+    assert syms["dup_str"].kind == "function"        # pointer return: name still resolved
+    assert syms["Point"].kind == "struct" and syms["Color"].kind == "enum"
+
+
+def test_cpp_symbols_methods_and_namespace() -> None:
+    src = ("class Foo {\npublic:\n  int bar(int x) { return x; }\n  void baz() const {}\n};\n"
+           "void Foo::qux() {}\n"
+           "namespace ns { int helper() { return 0; } }\n")
+    syms = _by_qual(src, "cpp")
+    assert syms["Foo"].kind == "class"
+    assert syms["Foo.bar"].kind == "method" and syms["Foo.bar"].parent == "Foo"
+    assert syms["Foo.baz"].kind == "method"
+    assert syms["ns"].kind == "namespace"
+    assert syms["ns.helper"].kind == "function" and syms["ns.helper"].parent == "ns"
+
+
+def test_csharp_symbols() -> None:
+    src = ("namespace N {\n  public class C {\n    public void M(int a) {}\n"
+           "    public int P { get; set; }\n  }\n  interface I { void F(); }\n}\n")
+    syms = _by_qual(src, "csharp")
+    assert syms["N"].kind == "namespace"
+    assert syms["N.C"].kind == "class"
+    assert syms["N.C.M"].kind == "method" and syms["N.C.M"].parent == "N.C"
+    assert syms["N.C.P"].kind == "property"
+    assert syms["N.I"].kind == "interface"
+
+
+def test_vba_symbols() -> None:
+    src = ("' Greet a person.\n"
+           "Public Function Greet(name As String) As String\n"
+           "    Greet = \"hi \" & name\n"
+           "End Function\n\n"
+           "Private Sub DoWork()\n"
+           "    Debug.Print 1\n"
+           "End Sub\n\n"
+           "Public Property Get Count() As Long\n"
+           "    Count = 3\n"
+           "End Property\n")
+    syms = _by_qual(src, "vba")
+    assert syms["Greet"].kind == "function"
+    assert "Function Greet(name As String) As String" in syms["Greet"].signature
+    assert syms["Greet"].docstring == "Greet a person."
+    assert syms["Greet"].start_line == 2 and syms["Greet"].end_line == 4
+    assert syms["DoWork"].kind == "function"
+    assert syms["Count"].kind == "property"
+
+
+def test_vba_class_module_members_are_methods() -> None:
+    # a .cls file is a class module: a synthetic class from the file stem, procedures are its methods
+    src = "Public Sub Run()\nEnd Sub\n"
+    syms = _by_qual_path(src, "vba", "Widget.cls")
+    assert syms["Widget"].kind == "class"
+    assert syms["Widget.Run"].kind == "method" and syms["Widget.Run"].parent == "Widget"
 
 
 def test_unsupported_language_raises() -> None:

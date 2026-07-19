@@ -97,6 +97,9 @@ code = [
   "tree-sitter-go>=0.23",
   "tree-sitter-rust>=0.23",
   "tree-sitter-java>=0.23",
+  "tree-sitter-c>=0.23",
+  "tree-sitter-cpp>=0.23",
+  "tree-sitter-c-sharp>=0.23",
 ]
 # Cloud image enrichment (enrich.vision_images). Off by default; lazy-imported so core
 # ingest/search never pull the SDK. The SDK owns the Messages-API request shape, typed
@@ -176,7 +179,8 @@ module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "repo
           "docx", "docx.*", "markdown_it", "markdown_it.*", "pptx", "pptx.*", "openpyxl",
           "openpyxl.*", "pystdf", "pystdf.*", "matplotlib", "matplotlib.*", "plotly", "plotly.*",
           "tree_sitter_python", "tree_sitter_javascript", "tree_sitter_typescript",
-          "tree_sitter_go", "tree_sitter_rust", "tree_sitter_java"]
+          "tree_sitter_go", "tree_sitter_rust", "tree_sitter_java",
+          "tree_sitter_c", "tree_sitter_cpp", "tree_sitter_c_sharp"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

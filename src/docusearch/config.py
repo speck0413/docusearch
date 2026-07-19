@@ -99,8 +99,8 @@ SCHEMA: tuple[_Node, ...] = (
             "  document : prose/docs (HTML/PDF/DOCX/MD/PPTX/XLSX) — full-text + hybrid search\n"
             "  data     : primarily plottable data (STDF/WAT/tabular) — the analytics engine,\n"
             "             tests still searchable but analysis (plots/audit/trend) is the point\n"
-            "  code     : source repos (Python/JS/TS/Go/Rust/Java) — parsed into searchable\n"
-            "             symbols (functions/classes) + a derived style guide (GATE 9)"
+            "  code     : source repos (Python/JS/TS/Go/Rust/Java/C/C++/C#/VBA) — parsed into\n"
+            "             searchable symbols (functions/classes) + a derived style guide (GATE 9)"
         ),
         choices=("document", "data", "code"),
     ),
