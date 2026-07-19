@@ -1097,12 +1097,15 @@ def _cmd_stdf_wafermap(args: argparse.Namespace) -> int:
     if doc is None:
         return 2
     res = client.call("wafer_map", doc_id=doc["doc_id"], wafer_id=args.wafer,
-                      color_by=args.color_by, store=args.store, user=args.user or None)
+                      color_by=args.color_by, test_num=args.test or 0,
+                      store=args.store, user=args.user or None)
     err = _tool_error(res)
     if err:
         print(f"error: {err}", file=sys.stderr)
         return 1
-    out = _save_report(cfg, args.out, f"wafermap_doc{doc['doc_id']}_{args.wafer or 'first'}", res["html"])
+    tag = f"test{args.test}" if args.test else args.color_by
+    out = _save_report(cfg, args.out, f"wafermap_doc{doc['doc_id']}_{args.wafer or 'first'}_{tag}",
+                       res["html"])
     print(f"Wrote wafer map {out}")
     return 0
 
@@ -1435,6 +1438,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_wm.add_argument("glob", help="glob selecting exactly one STDF file")
     p_wm.add_argument("--wafer", default="", help="wafer id (default: the first wafer present)")
     p_wm.add_argument("--color-by", default="pass", choices=("pass", "softbin"), help="die colouring")
+    p_wm.add_argument("--test", type=int, default=None,
+                      help="test number → a parametric (WAT) map coloured by that test's value")
     p_wm.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
     _add_stdf_common(p_wm)
     p_wm.set_defaults(func=_cmd_stdf_wafermap)

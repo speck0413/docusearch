@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from docusearch import wafer
-from docusearch.stdf import StdfPart
+from docusearch.stdf import StdfPart, StdfTest
 
 
 def _part(w: str, x: int, y: int, hb: int, sb: int) -> StdfPart:
@@ -125,3 +125,19 @@ def test_wafer_service_over_ingested_stdf(tmp_path) -> None:  # type: ignore[no-
     assert "Lot LOTW" in ml
     tr = svc.production_trend(ids)["html"]
     assert "Production yield trend" in tr and "2 lots" in tr
+
+
+def test_parametric_wafer_map() -> None:
+    # a gradient of VMIN across the wafer: value rises with x
+    tests, parts = [], []
+    for i, (x, y) in enumerate((x, y) for x in range(1, 4) for y in range(1, 4)):
+        pid = str(i + 1)
+        tests.append(StdfTest(test_num=1000, test_txt="VMIN", result=0.70 + 0.01 * x, head=1,
+                              site=1, passed=True, part_id=pid, conditions={}, units="V"))
+        parts.append(StdfPart(lot_id="L", sublot_id="", wafer_id="W01", x=x, y=y, part_id=pid,
+                              head=1, site=1, hard_bin=1, soft_bin=1, passed=True, insertion="WS1"))
+    html = wafer.param_wafer_map_html(tests, parts, 1000, wafer_id="W01")
+    assert "VMIN" in html and "parametric map" in html and 'class="die"' in html
+    assert "background:#" in html  # heat-coloured dies
+    missing = wafer.param_wafer_map_html(tests, parts, 9999)  # a test number with no data
+    assert "no parametric map" in missing

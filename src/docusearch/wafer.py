@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from html import escape
 
 from . import analytics, report
-from .stdf import StdfPart
+from .stdf import StdfPart, StdfTest
 
 # a categorical palette for soft-bin colouring (bin 1 = pass green; others cycle)
 _BIN_COLORS = ("#3cb371", "#d64545", "#4c8dff", "#e6a020", "#c060d0", "#48cae4", "#9fb6d6", "#e07b39")
@@ -162,6 +162,67 @@ def mother_lot_html(parts: Sequence[StdfPart], *, backend: str = "matplotlib") -
     )
     return report.themed_page(f"Mother lot — {lot}", body,
                               subtitle=f"{len(stats)} wafers · {lot_y:.1f}% lot yield")
+
+
+def _heat(t: float) -> str:
+    """A cool→warm colour (blue → green → red) for a normalised value ``t`` in [0, 1] — the die
+    shading on a **parametric** wafer map (WAT-style)."""
+    stops = ((0.0, (43, 108, 176)), (0.5, (60, 179, 113)), (1.0, (214, 69, 69)))
+    t = 0.0 if t < 0 else 1.0 if t > 1 else t
+    for (t0, c0), (t1, c1) in zip(stops, stops[1:], strict=False):
+        if t <= t1:
+            f = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+            r, g, b = (round(a + (b2 - a) * f) for a, b2 in zip(c0, c1, strict=True))
+            return f"#{r:02x}{g:02x}{b:02x}"
+    return "#d64545"
+
+
+def param_wafer_map_html(
+    tests: Sequence[StdfTest], parts: Sequence[StdfPart], test_num: int, *, wafer_id: str = "",
+) -> str:
+    """A **parametric wafer map** (WAT-style): each die coloured by test ``test_num``'s measured
+    **value** (cool→warm across the value range), not just pass/fail — reveals spatial parametric
+    gradients across the wafer. Joins test results to die positions by part id."""
+    pos = {p.part_id: p for p in _mapped(parts) if not wafer_id or p.wafer_id == wafer_id}
+    txt = next((t.test_txt for t in tests if t.test_num == test_num), f"test {test_num}")
+    units = next((t.units for t in tests if t.test_num == test_num and t.units), "")
+    dies = [
+        (pos[t.part_id], float(t.result)) for t in tests
+        if t.test_num == test_num and t.result is not None and t.part_id in pos
+    ]
+    if not dies:
+        return report.themed_page(
+            f"{escape(txt)} — wafer map",
+            f'<p class="stats">no {escape(txt)} values with die coordinates</p>',
+            subtitle="no parametric map")
+    vals = [v for _, v in dies]
+    vmin, vmax = min(vals), max(vals)
+    span = (vmax - vmin) or 1.0
+    xs = [int(p.x) for p, _ in dies]  # type: ignore[arg-type]
+    ys = [int(p.y) for p, _ in dies]  # type: ignore[arg-type]
+    x_min, y_min = min(xs), min(ys)
+    ncols = max(xs) - x_min + 1
+    cells = []
+    for p, v in dies:
+        col, row = int(p.x) - x_min + 1, int(p.y) - y_min + 1  # type: ignore[arg-type]
+        cells.append(
+            f'<div class="die" style="grid-column:{col};grid-row:{row};'
+            f'background:{_heat((v - vmin) / span)}" title="({p.x},{p.y}) {escape(txt)}={v:.4g}">'
+            "</div>")
+    grid = (f'<div class="wafermap" style="grid-template-columns:repeat({ncols},13px)">'
+            + "".join(cells) + "</div>")
+    stats = analytics.summary_stats(vals)
+    wname = wafer_id or (dies[0][0].wafer_id if dies else "")
+    body = (
+        f'<section class="acard"><h2>{escape(txt)} — wafer {escape(wname)} '
+        f'(parametric map)</h2>'
+        f'<p class="stats">range {vmin:.4g} … {vmax:.4g} {escape(units)} · '
+        f'mean {stats["mean"]:.4g} · std {stats["std"]:.3g} · n={int(stats["n"])} · '
+        f'<span class="tag" style="border-color:#2b6cb0">low</span>'
+        f'<span class="tag" style="border-color:#d64545">high</span></p>{grid}</section>'
+    )
+    return report.themed_page(f"{txt} — parametric wafer map", body,
+                              subtitle=f"{escape(txt)} across wafer {escape(wname)}")
 
 
 def production_trend_html(

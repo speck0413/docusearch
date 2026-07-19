@@ -680,14 +680,19 @@ class Service:
         return {"html": html}
 
     def wafer_map(
-        self, doc_id: int, *, wafer_id: str = "", color_by: str = "pass",
+        self, doc_id: int, *, wafer_id: str = "", color_by: str = "pass", test_num: int = 0,
         store: str | None = None, user: str | None = None, groups: set[str] | None = None,
     ) -> dict[str, Any]:
-        """A wafer map (die grid coloured by pass/fail or soft bin) from an STDF document's parts."""
+        """A wafer map from an STDF document's parts: coloured by pass/fail or soft bin, or — when
+        ``test_num`` is given — a **parametric** (WAT-style) map coloured by that test's value."""
         from . import wafer
 
         run = self._stdf_run(doc_id, store=store, user=user, groups=groups)
-        return {"html": wafer.wafer_map_html(run.parts, wafer_id=wafer_id, color_by=color_by)}
+        if test_num:
+            html = wafer.param_wafer_map_html(run.tests, run.parts, test_num, wafer_id=wafer_id)
+        else:
+            html = wafer.wafer_map_html(run.parts, wafer_id=wafer_id, color_by=color_by)
+        return {"html": html}
 
     def mother_lot(
         self, doc_id: int, *, backend: str = "", store: str | None = None,
@@ -1315,14 +1320,15 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def wafer_map(
-        doc_id: int, wafer_id: str = "", color_by: str = "pass",
+        doc_id: int, wafer_id: str = "", color_by: str = "pass", test_num: int = 0,
         store: str | None = None, user: str | None = None, groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """A **wafer map** for an STDF document: a die grid at each part's (x,y), coloured by
-        `pass` (default) or `softbin`. `wafer_id` picks the wafer (else the first). Returns HTML."""
+        `pass` (default) or `softbin`. Pass `test_num` for a **parametric** (WAT-style) map coloured
+        by that test's measured value. `wafer_id` picks the wafer (else the first). Returns HTML."""
         try:
-            return service.wafer_map(doc_id, wafer_id=wafer_id, color_by=color_by, store=store,
-                                     user=user, groups=_grp(groups))
+            return service.wafer_map(doc_id, wafer_id=wafer_id, color_by=color_by, test_num=test_num,
+                                     store=store, user=user, groups=_grp(groups))
         except (PermissionError, ValueError) as err:
             return {"error": "WAFER", "message": str(err)}
 
