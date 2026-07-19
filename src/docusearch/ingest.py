@@ -45,7 +45,11 @@ ProgressFn = Callable[[str, int, int], None]
 _HASH_BLOCK = 1 << 20
 
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-_SKIP = {"script", "style", "template", "svg", "math", "noscript"}
+# Never indexed and never mined for relations: scripting/markup noise plus semantic navigation
+# chrome (nav/aside/footer). A cross-reference counts only when it lives in the BODY text we index —
+# a link in the navigation pane does not (Stephen, 2026-07-18). Div/class-based nav (e.g. a Sphinx
+# sidebar) is still handled by `content_selector` / `strip_selectors`, since it carries no semantic tag.
+_SKIP = {"script", "style", "template", "svg", "math", "noscript", "nav", "aside", "footer"}
 # Block-level tags: an element with NO block-level element child is a "leaf block" whose
 # text is emitted whole (with a separator so inline children never glue); an element WITH
 # a block child is a container we recurse into (buffering its own inline/text runs).

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,10 +75,32 @@ def write_preflight_rules(rules: PreflightRules, path: Path | str) -> None:
     )
 
 
+def _as_approved(value: object) -> bool:
+    """Strict truthiness for the approval gate (R-ING-7, red-team H1): only a real YAML boolean
+    ``true`` or an explicit true-ish string (``true``/``yes``/``on``) opens the gate. A hand-typed
+    quoted ``"false"`` / ``"no"`` / ``0`` must NOT — plain ``bool("false")`` is ``True`` in Python,
+    which would silently apply unapproved rules."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "on"}
+    return False
+
+
 def load_preflight_rules(path: Path | str) -> PreflightRules:
-    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    """Parse ``preflight_rules.yaml``. Raises ``EnrichError`` (not a raw parser traceback) on a
+    malformed file so a typo fails safe with a one-line, actionable message (red-team M1)."""
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        first = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        raise EnrichError(f"{path} is not valid YAML: {first[:150]} — fix or remove it") from exc
+    if not isinstance(data, dict):
+        raise EnrichError(
+            f"{path} must be a YAML mapping (approved:/gotcha_patterns:), got {type(data).__name__}"
+        )
     return PreflightRules(
-        approved=bool(data.get("approved", False)),
+        approved=_as_approved(data.get("approved", False)),
         gotcha_patterns=[
             GotchaPattern(str(g["pattern"]), str(g.get("label", "")))
             for g in (data.get("gotcha_patterns") or [])
@@ -88,20 +111,86 @@ def load_preflight_rules(path: Path | str) -> PreflightRules:
     )
 
 
+def _is_risky_regex(pattern: str) -> bool:
+    """Fast static ReDoS pre-filter (red-team H2): flag a **nested quantifier** — a quantified group
+    immediately followed by another quantifier, e.g. ``(a+)+``, ``(a*)*``, ``([a-z]+)+``, ``(.*)+``,
+    ``(a+){2,}``. Catches the obvious catastrophic shape without spawning a probe; the authoritative
+    check is the empirical ``_pattern_is_safe`` (which also catches ``(a|a)*b`` and friends)."""
+    return (
+        re.search(r"\([^()]*[+*][^()]*\)\s*[*+]", pattern) is not None
+        or re.search(r"\([^()]*[+*][^()]*\)\{\d+,", pattern) is not None
+    )
+
+
+_REDOS_PROBE = (
+    "import re,sys\n"
+    "rx=re.compile(sys.argv[1], re.IGNORECASE)\n"
+    "for s in ['a'*64+'!','0'*64+'!','ab'*40+'!',' '*64+'!','aaaa'*32+'X']:\n"
+    "    rx.search(s)\n"
+)
+
+
+def _pattern_is_safe(pattern: str, *, timeout: float = 2.0) -> bool:
+    """Empirically confirm a gotcha regex can't catastrophically backtrack: run it against
+    adversarial probe strings in a **separate process** with a wall-clock timeout (killed on
+    expiry). Returns False on timeout or error. Reliable where a static heuristic isn't — catches
+    ``(a|a)*b`` etc. — and cross-platform (no signals/threads, Windows-safe, R-ARCH-5). Run once per
+    pattern at load (a handful per ingest), never on the query path."""
+    import subprocess  # lazy: only when validating rules
+    import sys
+
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", _REDOS_PROBE, pattern],
+            capture_output=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception:  # noqa: BLE001 - any spawn failure -> treat as unsafe, don't apply
+        return False
+    return proc.returncode == 0
+
+
 def active_gotcha_patterns(path: Path | str) -> list[GotchaPattern]:
     """The gotcha patterns to apply at ingest — **empty** unless the rules file exists AND is
-    approved (R-ING-7: proposed rules never run until Stephen approves the file)."""
+    approved (R-ING-7: proposed rules never run until Stephen approves the file). A malformed file
+    fails **safe**: warn loudly and apply no rules rather than abort the whole ingest (red-team M1).
+    Patterns that are invalid or ReDoS-risky are dropped with a warning, never applied (H2)."""
     p = Path(path)
     if not p.is_file():
         return []
-    rules = load_preflight_rules(p)
-    return rules.gotcha_patterns if rules.approved else []
+    try:
+        rules = load_preflight_rules(p)
+    except EnrichError as exc:
+        warnings.warn(f"{exc} — applying no gotcha rules this ingest", stacklevel=2)
+        return []
+    if not rules.approved:
+        return []
+    safe: list[GotchaPattern] = []
+    for g in rules.gotcha_patterns:
+        try:
+            re.compile(g.pattern)
+        except re.error as exc:
+            warnings.warn(f"skipping invalid gotcha regex {g.pattern!r}: {exc}", stacklevel=2)
+            continue
+        if _is_risky_regex(g.pattern) or not _pattern_is_safe(g.pattern):
+            warnings.warn(
+                f"skipping ReDoS-risky gotcha pattern {g.pattern!r} (catastrophic backtracking) — "
+                "rewrite it without ambiguous/nested quantifiers",
+                stacklevel=2,
+            )
+            continue
+        safe.append(g)
+    return safe
 
 
 def match_gotcha(text: str, patterns: list[GotchaPattern]) -> str | None:
     """The label of the first gotcha pattern that matches ``text`` (case-insensitive), or None. A
-    malformed regex is skipped, not fatal (R-ING-8)."""
+    malformed regex is skipped, and a ReDoS-risky pattern is skipped rather than run (R-ING-8,
+    red-team H2), so even a direct call can't hang."""
     for g in patterns:
+        if _is_risky_regex(g.pattern):
+            continue
         try:
             if re.search(g.pattern, text, re.IGNORECASE):
                 return g.label

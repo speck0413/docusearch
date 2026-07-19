@@ -31,7 +31,7 @@ from typing import Any, TextIO
 
 import yaml
 
-from . import config, embed, ingest, report, runlog
+from . import config, embed, enrich, ingest, report, runlog
 from ._version import __version__
 from .catalog import Catalog, open_federation
 from .config import Config, ConfigError
@@ -218,8 +218,6 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
 def _cmd_preflight(args: argparse.Namespace) -> int:
     """Pre-flight classification (R-ING-7): sample the corpus, ask Claude (temp 0) to propose
     gotcha rules, write an UNAPPROVED preflight_rules.yaml for review."""
-    from . import enrich
-
     cfg = config.load(Path(args.config))
     _configure_logging(cfg)
     out_path = Path(args.out) if args.out else Path(cfg.enrich.preflight_rules)
@@ -557,7 +555,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
             classification=(
                 args.classification
                 if args.classification is not None
-                else str(spec.get("classification", "Confidential — Acme"))
+                else str(spec.get("classification", "Confidential"))
             ),
             ref_targets=ref_targets,
             trace=spec.get("trace"),
@@ -968,7 +966,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument(
         "--classification",
         default=None,
-        help="confidentiality banner (default: Confidential — Acme)",
+        help="confidentiality banner (default: Confidential)",
     )
     p_report.add_argument("--config", default="docusearch.yaml", help="config path")
     p_report.set_defaults(func=_cmd_report)
@@ -1027,9 +1025,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         result: int = args.func(args)
-    except (embed.EmbedError, config.ConfigError, StoreError, VisionError) as err:
-        # Known, user-actionable failures (model mismatch, bad config, unusable DB):
-        # print just the guidance, not a Python traceback the user can't act on.
+    except (embed.EmbedError, config.ConfigError, StoreError, VisionError, enrich.EnrichError) as err:
+        # Known, user-actionable failures (model mismatch, bad config, unusable DB, malformed
+        # preflight rules): print just the guidance, not a Python traceback the user can't act on.
         print(f"error: {err}", file=sys.stderr)
         return 1
     return result

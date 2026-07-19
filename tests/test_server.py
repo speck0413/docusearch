@@ -328,6 +328,13 @@ def test_discrepancies_endpoint_finds_duplicate_actives(tmp_path: Path) -> None:
     assert data["persisted"] is False
 
 
+def test_relations_absurd_id_does_not_500(client: TestClient) -> None:
+    # red-team M2: an int64-overflow doc_id must not crash the relations endpoint (was 500).
+    resp = client.get("/v1/relations/999999999999999999999999999999")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
 def test_404s(client: TestClient) -> None:
     assert client.get("/v1/documents/9999").status_code == 404
     assert client.get("/v1/images/deadbeef").status_code == 404

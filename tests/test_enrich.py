@@ -72,6 +72,60 @@ def test_active_gotcha_patterns_missing_file_is_empty(tmp_path: Path) -> None:
     assert enrich.active_gotcha_patterns(tmp_path / "nope.yaml") == []
 
 
+def test_quoted_false_does_not_open_the_approval_gate(tmp_path: Path) -> None:
+    # red-team H1: bool("false") is True in Python — a hand-typed quoted "false" must NOT approve.
+    path = tmp_path / "preflight_rules.yaml"
+    for value in ('"false"', '"no"', "0", "null", "false"):
+        path.write_text(
+            f"approved: {value}\ngotcha_patterns:\n  - {{pattern: 'x', label: 'l'}}\n",
+            encoding="utf-8",
+        )
+        assert enrich.load_preflight_rules(path).approved is False, value
+        assert enrich.active_gotcha_patterns(path) == [], value
+    # only a real true / true-ish token approves
+    for value in ("true", "yes", '"true"', "on"):
+        path.write_text(
+            f"approved: {value}\ngotcha_patterns:\n  - {{pattern: 'x', label: 'l'}}\n",
+            encoding="utf-8",
+        )
+        assert enrich.load_preflight_rules(path).approved is True, value
+
+
+def test_redos_gotcha_patterns_are_dropped_not_run(tmp_path: Path) -> None:
+    # red-team H2: a catastrophic-backtracking regex must never reach re.search at ingest — both the
+    # nested-quantifier shape (static-caught) and the ambiguous-alternation shape (empirically caught).
+    import pytest
+
+    assert enrich._is_risky_regex(r"(a+)+$")  # static heuristic
+    assert not enrich._is_risky_regex(r"(a|a)*b")  # static MISSES this one …
+    assert not enrich._pattern_is_safe(r"(a|a)*b")  # … but the empirical probe catches it
+    assert enrich._pattern_is_safe(r"\bdeprecated\b")  # a normal pattern is safe
+    pats = [
+        enrich.GotchaPattern(r"(a+)+$", "boom1"),
+        enrich.GotchaPattern(r"(a|a)*b", "boom2"),
+        enrich.GotchaPattern(r"do NOT", "warn"),
+    ]
+    path = tmp_path / "preflight_rules.yaml"
+    enrich.write_preflight_rules(enrich.PreflightRules(approved=True, gotcha_patterns=pats), path)
+    with pytest.warns(UserWarning, match="ReDoS-risky"):
+        active = enrich.active_gotcha_patterns(path)
+    assert [g.label for g in active] == ["warn"]  # both catastrophic patterns filtered out
+
+
+def test_malformed_rules_file_fails_safe(tmp_path: Path) -> None:
+    # red-team M1: a YAML typo must NOT abort ingest — active_gotcha_patterns warns + applies no
+    # rules; a direct load_preflight_rules still raises a clean, actionable EnrichError.
+    import pytest
+
+    path = tmp_path / "preflight_rules.yaml"
+    path.write_text("approved: [true\n  broken: yaml\n", encoding="utf-8")
+    with pytest.warns(UserWarning, match="not valid YAML"):
+        assert enrich.active_gotcha_patterns(path) == []  # fail safe: no rules, no crash
+    with pytest.raises(enrich.EnrichError) as exc:
+        enrich.load_preflight_rules(path)
+    assert "not valid YAML" in str(exc.value)
+
+
 def test_match_gotcha_returns_first_label_or_none() -> None:
     pats = [
         enrich.GotchaPattern(pattern=r"do NOT", label="warning"),

@@ -82,7 +82,7 @@ def render_report(
     request: str = "",
     requested_by: str = "",
     model: str = "",
-    classification: str = "Confidential — Acme",
+    classification: str = "Confidential",
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None = None,
     trace: Mapping[str, object] | None = None,
 ) -> str:

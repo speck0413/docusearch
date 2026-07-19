@@ -98,6 +98,26 @@ def test_strip_selectors_remove_chrome() -> None:
     assert "footer junk" not in text
 
 
+def test_semantic_nav_excluded_from_body_and_relations_without_selector() -> None:
+    # Stephen 2026-07-18: a cross-link counts only if it's in the BODY text we index. Semantic
+    # navigation chrome (nav/aside/footer) must be excluded from BOTH indexed text and relations
+    # even with NO content_selector — a nav-pane link must not become a relation.
+    html = (
+        "<body>"
+        '<nav><a href="navlink.html">nav to somewhere</a> navigation junk</nav>'
+        '<aside><a href="asidelink.html">aside link</a> sidebar junk</aside>'
+        '<main><h1>Doc</h1><p>Real content with a <a href="bodylink.html">body link</a>.</p></main>'
+        '<footer><a href="footlink.html">footer link</a> footer junk</footer>'
+        "</body>"
+    )
+    doc = ingest.extract_html(html)  # no content_selector
+    text = _bodies(doc)
+    assert "Real content" in text
+    assert "navigation junk" not in text and "sidebar junk" not in text and "footer junk" not in text
+    targets = [link.target for link in doc.links]
+    assert targets == ["bodylink.html"]  # ONLY the body link is a relation
+
+
 def test_script_and_style_ignored() -> None:
     doc = ingest.extract_html(SAMPLE, content_selector="main.article")
     assert "var x" not in _bodies(doc)

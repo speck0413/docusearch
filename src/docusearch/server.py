@@ -360,7 +360,7 @@ class Service:
             request=str(spec.get("request", "")),
             requested_by=str(spec.get("requested_by", "")),
             model=str(spec.get("model", "")),
-            classification=str(spec.get("classification", "Confidential — Acme")),
+            classification=str(spec.get("classification", "Confidential")),
             # Rich reference labels (store — title — heading), but served /v1/documents HTTP links a
             # remote client can open — identical to the CLI report save for the link host.
             ref_targets=report.reference_targets(cfg.paths.db_path, evidence, base_url=base_url),
@@ -484,6 +484,8 @@ class Service:
         shortest hop count, direction, and (for direct hops) link_type."""
         if direction not in ("out", "in", "both"):
             raise ValueError(f"direction must be out|in|both, got {direction!r}")
+        if not _fits_i64(doc_id):  # absurd id -> no neighbours, not a sqlite OverflowError (M2)
+            return []
         with Store.open(self._db_for_read(store, user, groups)) as store_db:
             rows = store_db.related_documents(doc_id, direction, depth=depth)
         # keep the legacy `neighbor` key (agents depend on it) alongside the richer fields

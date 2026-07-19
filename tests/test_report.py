@@ -104,10 +104,10 @@ def test_header_provenance_and_ai_warning() -> None:
         request="how do I control PA",
         requested_by="Stephen Peck",
         model="claude-haiku-4-5",
-        classification="Confidential — Acme",
+        classification="Internal — Example Corp",
         **_kwargs(),  # type: ignore[arg-type]
     )
-    assert "Confidential — Acme" in out  # confidentiality ribbon
+    assert "Internal — Example Corp" in out  # ribbon renders whatever classification is passed
     assert "AI-generated" in out and "double-checked" in out  # the warning
     assert "how do I control PA" in out  # the exact request
     assert "Stephen Peck" in out and "claude-haiku-4-5" in out  # who/what generated it
