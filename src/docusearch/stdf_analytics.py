@@ -340,76 +340,206 @@ def _num(v: float | None) -> str:
     return "—" if v is None else f"{v:g}"
 
 
-def _diff_table_html(run_a: StdfRun, run_b: StdfRun, label_a: str, label_b: str) -> str:
-    cond_keys, rows = diff_tests(run_a, run_b)
+def _results_by_name(run: StdfRun, name: str) -> list[float]:
+    return [t.result for t in run.tests if t.test_txt == name and t.result is not None]
+
+
+def _diff_table_interactive(rows: list[DiffRow], cond_keys: list[str], label_a: str, label_b: str) -> str:
     heads = ["Status", f"old #<br>{escape(label_a)}", f"new #<br>{escape(label_b)}", "Test",
              "old LLM", "new LLM", "old HLM", "new HLM", "Units"]
     for k in cond_keys:
         heads += [f"old {escape(k)}", f"new {escape(k)}"]
-    thead = "".join(f"<th>{h}</th>" for h in heads)
+    heads.append("Feedback")
+    thead = "".join(f'<th class="sortable">{h}</th>' for h in heads)
 
-    def cell(val: str, field_name: str, changed: set[str]) -> str:
-        cls = ' class="chg"' if field_name in changed else ""
-        return f"<td{cls}>{escape(val)}</td>"
+    def cell(val: str, field_name: str, changed: set[str], *, num: bool = False) -> str:
+        cls = " chg" if field_name in changed else ""
+        dv = f' data-v="{escape(val)}"' if num and val not in ("—", "") else ""
+        return f'<td class="{cls.strip()}"{dv}>{escape(val)}</td>'
 
-    body_rows = []
+    body = []
     for r in rows:
         a, b, ch = r.a, r.b, r.changed
-        cells = [f'<td><span class="badge {r.status}">{r.status}</span></td>']
-        cells.append(cell(str(a.test_num) if a else "—", "tnum", ch))
-        cells.append(cell(str(b.test_num) if b else "—", "tnum", ch))
-        cells.append(f"<td>{escape(r.name)}</td>")
-        cells.append(cell(_num(a.lo) if a else "—", "lo", ch))
-        cells.append(cell(_num(b.lo) if b else "—", "lo", ch))
-        cells.append(cell(_num(a.hi) if a else "—", "hi", ch))
-        cells.append(cell(_num(b.hi) if b else "—", "hi", ch))
-        cells.append(f"<td>{escape((a or b).units)}</td>")  # type: ignore[union-attr]
+        units = escape((a or b).units) if (a or b) else ""  # type: ignore[union-attr]
+        cells = [
+            f'<td><span class="badge {r.status}">{r.status}</span></td>',
+            cell(str(a.test_num) if a else "—", "tnum", ch, num=True),
+            cell(str(b.test_num) if b else "—", "tnum", ch, num=True),
+            f"<td>{escape(r.name)}</td>",
+            cell(_num(a.lo) if a else "—", "lo", ch, num=True),
+            cell(_num(b.lo) if b else "—", "lo", ch, num=True),
+            cell(_num(a.hi) if a else "—", "hi", ch, num=True),
+            cell(_num(b.hi) if b else "—", "hi", ch, num=True),
+            f"<td>{units}</td>",
+        ]
         for k in cond_keys:
             fk = f"cond:{k}"
             cells.append(cell(a.conditions.get(k, "—") if a else "—", fk, ch))
             cells.append(cell(b.conditions.get(k, "—") if b else "—", fk, ch))
-        body_rows.append(f'<tr class="{r.status}">{"".join(cells)}</tr>')
+        cells.append('<td class="fb" contenteditable="true"></td>')  # editable feedback
+        body.append(
+            f'<tr data-name="{escape(r.name)}" data-status="{r.status}">{"".join(cells)}</tr>'
+        )
     n = {s: sum(1 for r in rows if r.status == s) for s in ("added", "removed", "changed", "identical")}
-    legend = (
-        f'<p class="stats">{n["changed"]} changed · {n["added"]} added · {n["removed"]} removed · '
-        f'{n["identical"]} identical &nbsp;—&nbsp; changed cells highlighted; every field shown old vs new.</p>'
+    toolbar = (
+        '<div class="toolbar">'
+        '<input type="text" id="diff-filter" placeholder="filter tests…">'
+        '<button id="dl-fb">⬇ Download feedback</button>'
+        f'<span class="hint">click a header to sort · type to filter · click a Feedback cell to '
+        f'edit · {n["changed"]} changed · {n["added"]} added · {n["removed"]} removed · '
+        f'{n["identical"]} identical</span></div>'
     )
     return (
-        '<section class="acard"><h2>Test diff — revision to revision</h2>'
-        f"{legend}<div class='scroll'><table class='grid'><thead><tr>{thead}</tr></thead>"
-        f"<tbody>{''.join(body_rows)}</tbody></table></div></section>"
+        '<h2>Test diff — revision to revision</h2>' + toolbar +
+        '<div class="scroll"><table class="grid"><thead><tr>' + thead +
+        f"</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
     )
+
+
+def _cap_fmt(v: float | None) -> str:
+    return "—" if v is None else f"{v:.3g}"
+
+
+def _capability_row(label: str, vals: list[float], lo: float | None, hi: float | None) -> str:
+    s = analytics.summary_stats(vals)
+    if not s.get("n"):
+        return f"<tr><td>{escape(label)}</td><td colspan='9'>no data</td></tr>"
+    cap = analytics.capability(vals, lo, hi)
+    fmt = _cap_fmt
+    return (
+        f"<tr><td>{escape(label)}</td><td>{int(s['n'])}</td><td>{s['mean']:.4g}</td>"
+        f"<td>{s['median']:.4g}</td><td>{s['std']:.3g}</td><td>{s['min']:.4g}</td>"
+        f"<td>{s['max']:.4g}</td><td>{fmt(cap['cpl'])}</td><td>{fmt(cap['cpu'])}</td>"
+        f"<td>{fmt(cap['cpk'])}</td></tr>"
+    )
+
+
+_DASHBOARD_JS = """
+(function(){
+ function tab(name){
+  document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.dataset.t===name);});
+  document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('hidden',x.dataset.p!==name);});
+ }
+ document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click',function(){tab(t.dataset.t);});});
+ document.querySelectorAll('table.grid th.sortable').forEach(function(th){
+  th.addEventListener('click',function(){
+   var tb=th.closest('table').querySelector('tbody');var rows=[].slice.call(tb.querySelectorAll('tr'));
+   var col=th.cellIndex;var asc=th.dataset.asc!=='1';th.dataset.asc=asc?'1':'0';
+   rows.sort(function(a,b){
+    var ca=a.cells[col],cb=b.cells[col];
+    var x=ca.dataset.v!=null?ca.dataset.v:ca.innerText,y=cb.dataset.v!=null?cb.dataset.v:cb.innerText;
+    var nx=parseFloat(x),ny=parseFloat(y);
+    if(!isNaN(nx)&&!isNaN(ny))return asc?nx-ny:ny-nx;
+    return asc?String(x).localeCompare(y):String(y).localeCompare(x);
+   });
+   rows.forEach(function(r){tb.appendChild(r);});
+  });
+ });
+ var f=document.getElementById('diff-filter');
+ if(f)f.addEventListener('input',function(){var q=f.value.toLowerCase();
+  document.querySelectorAll('table.grid tbody tr').forEach(function(r){
+   r.style.display=r.innerText.toLowerCase().indexOf(q)>=0?'':'none';});});
+ var dl=document.getElementById('dl-fb');
+ if(dl)dl.addEventListener('click',function(){var out=[];
+  document.querySelectorAll('table.grid tbody tr').forEach(function(r){
+   var fb=r.querySelector('td.fb');var t=fb?fb.innerText.trim():'';
+   if(t)out.push({test:r.dataset.name,status:r.dataset.status,feedback:t});});
+  var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='stdf-audit-feedback.json';a.click();});
+})();
+"""
 
 
 def audit_report_html(
     run_a: StdfRun, run_b: StdfRun, *, backend: str = "matplotlib",
-    label_a: str = "A", label_b: str = "B",
+    label_a: str = "A", label_b: str = "B", max_plots: int = 24,
 ) -> str:
-    """A themed audit: a summary card (yield + counts), the **Beyond-Compare test-diff table**
-    (every field old vs new, changes highlighted — a table view, separate from plots), and a
-    yield-per-insertion table (R-STDF-2)."""
+    """A themed, **tabbed, interactive** STDF audit dashboard (R-STDF-2). Five tabs on one page:
+    **Diff** (Excel-like — sort/filter/editable feedback + export), **Q-Q** (per test, A vs B),
+    **Histograms** (per test, with red LLM/HLM limit lines + n/mean/median/std/min/max/Cpl/Cpu/Cpk),
+    **Trend** (per test mean across the runs), and **Site** (per test, site-to-site for the new run)."""
     rep = audit_runs(run_a, run_b)
+    cond_keys, rows = diff_tests(run_a, run_b)
+    da, db = _defs(run_a), _defs(run_b)
+    names = [r.name for r in rows]
     ya_p, ya_t = rep.yield_a
     yb_p, yb_t = rep.yield_b
     ya = 100 * ya_p / ya_t if ya_t else 0.0
     yb = 100 * yb_p / yb_t if yb_t else 0.0
+
     summary = (
-        '<section class="acard"><h2>Summary</h2>'
-        f"<p><strong>Yield</strong>: {escape(label_a)} {ya:.1f}% ({ya_p}/{ya_t}) → "
-        f"{escape(label_b)} {yb:.1f}% ({yb_p}/{yb_t}) &nbsp;·&nbsp; <strong>Δ {yb - ya:+.1f}%</strong></p>"
-        f"<p><strong>Tests</strong>: {len(rep.matched)} matched · {len(rep.added)} added · "
-        f"{len(rep.removed)} removed</p>"
-        f"<p><strong>Conditions only in {escape(label_a)}</strong>: {escape(str(rep.conditions_only_a or '—'))}<br>"
-        f"<strong>Conditions only in {escape(label_b)}</strong>: {escape(str(rep.conditions_only_b or '—'))}</p>"
-        "</section>"
+        f'<div class="acard"><strong>Yield</strong>: {escape(label_a)} {ya:.1f}% ({ya_p}/{ya_t}) → '
+        f"{escape(label_b)} {yb:.1f}% ({yb_p}/{yb_t}) · <strong>Δ {yb - ya:+.1f}%</strong> &nbsp;|&nbsp; "
+        f"{len(rep.matched)} matched · {len(rep.added)} added · {len(rep.removed)} removed</div>"
     )
-    diff = _diff_table_html(run_a, run_b, label_a, label_b)
-    yld = ""
-    if run_a.parts or run_b.parts:
-        yld = insertion_yield_html([*run_a.parts, *run_b.parts]).replace(
-            '<section class="stdf-yield">', '<section class="acard">'
+    tabbar = (
+        '<div class="tabbar">'
+        '<button class="tab active" data-t="diff">Diff</button>'
+        '<button class="tab" data-t="qq">Q-Q</button>'
+        '<button class="tab" data-t="hist">Histograms</button>'
+        '<button class="tab" data-t="trend">Trend</button>'
+        '<button class="tab" data-t="site">Site</button></div>'
+    )
+    diff_panel = f'<div class="panel" data-p="diff"><section class="acard">{_diff_table_interactive(rows, cond_keys, label_a, label_b)}</section></div>'
+
+    qq, hist, trend, site = [], [], [], []
+    for name in names[:max_plots]:
+        va, vb = _results_by_name(run_a, name), _results_by_name(run_b, name)
+        d = db.get(name) or da.get(name)
+        lo, hi = (d.lo, d.hi) if d else (None, None)
+        # Q-Q (A vs B)
+        if len(va) >= 2 and len(vb) >= 2:
+            p = analytics.render_plot("qq", series=[(label_a, va), (label_b, vb)],
+                                      title=f"{name} — Q-Q ({label_a} vs {label_b})",
+                                      xlabel=label_a, ylabel=label_b, backend=backend)
+        else:
+            p = "<p class='stats'>needs ≥2 points in each revision for a Q-Q</p>"
+        qq.append(f'<section class="acard"><h3>{escape(name)}</h3>{p}</section>')
+        # Histogram (current run) with limit lines + capability table
+        vals = vb or va
+        vlines = [x for x in (lo, hi) if x is not None]
+        hp = (analytics.render_plot("histogram", y=vals, title=f"{name} distribution",
+                                    xlabel=f"{name} result", ylabel="count", backend=backend,
+                                    vlines=vlines) if vals else "<p class='stats'>no data</p>")
+        cap_tbl = (
+            '<div class="scroll"><table class="grid"><thead><tr><th>run</th><th>n</th><th>mean</th>'
+            '<th>median</th><th>std</th><th>min</th><th>max</th><th>Cpl</th><th>Cpu</th><th>Cpk</th>'
+            f"</tr></thead><tbody>{_capability_row(label_a, va, lo, hi)}"
+            f"{_capability_row(label_b, vb, lo, hi)}</tbody></table></div>"
         )
+        lim = f"<p class='stats'>spec limits (red): LLM={_num(lo)} · HLM={_num(hi)}</p>"
+        hist.append(f'<section class="acard"><h3>{escape(name)}</h3>{hp}{lim}{cap_tbl}</section>')
+        # Trend (mean across the two runs)
+        tp = [(lbl, analytics.summary_stats(v)["mean"]) for lbl, v in ((label_a, va), (label_b, vb)) if v]
+        if tp:
+            tpl = analytics.render_plot("linear", x=list(range(len(tp))), y=[p2[1] for p2 in tp],
+                                        title=f"{name} mean trend", xlabel="revision",
+                                        ylabel=f"{name} mean", backend=backend)
+            trend.append(f'<section class="acard"><h3>{escape(name)}</h3>{tpl}'
+                         f'<p class="stats">{" → ".join(f"{lbl}: {v:.4g}" for lbl, v in tp)}</p></section>')
+        # Site (current run)
+        groups = {t.site: [] for t in run_b.tests if t.test_txt == name}  # type: ignore[var-annotated]
+        for t in run_b.tests:
+            if t.test_txt == name and t.result is not None:
+                groups[t.site].append(t.result)
+        if len(groups) > 1:
+            sp = analytics.render_plot("whisker", series=[(f"site {s}", v) for s, v in sorted(groups.items())],
+                                       title=f"{name} by site", ylabel=name, backend=backend)
+            site.append(f'<section class="acard"><h3>{escape(name)}</h3>{sp}</section>')
+
+    def panel(pid: str, cards: list[str], empty: str) -> str:
+        return f'<div class="panel hidden" data-p="{pid}"><div class="plotgrid">{"".join(cards) or empty}</div></div>'
+
+    body = (
+        summary + tabbar + diff_panel
+        + panel("qq", qq, '<p class="stats">no tests to compare</p>')
+        + panel("hist", hist, '<p class="stats">no tests</p>')
+        + panel("trend", trend, '<p class="stats">no trend data</p>')
+        + panel("site", site, '<p class="stats">single-site data</p>')
+        + f"<script>{_DASHBOARD_JS}</script>"
+    )
     return _page(
-        f"STDF audit — {label_a} vs {label_b}", summary + diff + yld,
-        subtitle="test-by-test diff of test number, limits, and conditions",
+        f"STDF audit — {label_a} vs {label_b}", body,
+        subtitle="interactive test diff + capability plots",
     )

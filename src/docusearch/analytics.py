@@ -40,12 +40,23 @@ def summary_stats(values: Sequence[float | None]) -> dict[str, float]:
     }
 
 
-def cpk(values: Sequence[float | None], lo: float, hi: float) -> float | None:
-    """Process capability index vs a lower/upper spec limit, or None if undefined (n<2 or std=0)."""
+def capability(
+    values: Sequence[float | None], lo: float | None, hi: float | None
+) -> dict[str, float | None]:
+    """Process-capability indices vs the spec limits: **Cpl** = (μ−LSL)/3σ, **Cpu** = (USL−μ)/3σ,
+    **Cpk** = min(Cpl, Cpu). Each is None when undefined (n<2, σ=0, or the limit is missing)."""
     s = summary_stats(values)
     if s.get("n", 0) < 2 or s["std"] == 0:
-        return None
-    return min(hi - s["mean"], s["mean"] - lo) / (3 * s["std"])
+        return {"cpl": None, "cpu": None, "cpk": None}
+    cpl = (s["mean"] - lo) / (3 * s["std"]) if lo is not None else None
+    cpu = (hi - s["mean"]) / (3 * s["std"]) if hi is not None else None
+    both = [c for c in (cpl, cpu) if c is not None]
+    return {"cpl": cpl, "cpu": cpu, "cpk": min(both) if both else None}
+
+
+def cpk(values: Sequence[float | None], lo: float, hi: float) -> float | None:
+    """Cpk = min(Cpl, Cpu) vs a lower/upper spec limit, or None if undefined (n<2 or std=0)."""
+    return capability(values, lo, hi)["cpk"]
 
 
 def _quantile_points(values: Sequence[float], n: int) -> list[float]:
@@ -76,20 +87,22 @@ def render_plot(
     ylabel: str = "",
     backend: str = "matplotlib",
     bins: int = 20,
+    vlines: Sequence[float] = (),
 ) -> str:
     """Render one chart to a **self-contained** HTML fragment. ``histogram``/``quantile`` use ``y``
     (or the first ``series``); ``whisker`` uses all named ``series``; ``qq`` compares the first two
-    ``series``; ``xy``/``linear`` use ``x`` + ``y``. Returns a ``data:`` PNG ``<img>`` (matplotlib)
-    or a plotly ``<div>``."""
+    ``series``; ``xy``/``linear`` use ``x`` + ``y``. ``vlines`` draws **red vertical limit lines**
+    (e.g. LLM/HLM on a histogram). Returns a ``data:`` PNG ``<img>`` (matplotlib) or plotly ``<div>``."""
     k = kind.lower()
     if k not in PLOT_KINDS:
         raise ValueError(f"unknown plot kind {kind!r}; expected one of {PLOT_KINDS}")
     if k == "qq" and (not series or len(series) < 2):  # qq compares TWO series (red-team H1)
         raise ValueError("plot kind 'qq' needs two named series to compare")
+    lines = [float(v) for v in vlines if v is not None]
     if backend == "matplotlib":
-        return _render_matplotlib(k, series, x, y, title, xlabel, ylabel, bins)
+        return _render_matplotlib(k, series, x, y, title, xlabel, ylabel, bins, lines)
     if backend == "plotly":
-        return _render_plotly(k, series, x, y, title, xlabel, ylabel, bins)
+        return _render_plotly(k, series, x, y, title, xlabel, ylabel, bins, lines)
     raise ValueError(f"unknown plot backend {backend!r}; expected 'matplotlib' or 'plotly'")
 
 
@@ -103,7 +116,7 @@ def _primary(series: Series | None, y: Sequence[float] | None) -> list[float]:
 
 def _render_matplotlib(
     kind: str, series: Series | None, x: Sequence[float] | None, y: Sequence[float] | None,
-    title: str, xlabel: str, ylabel: str, bins: int,
+    title: str, xlabel: str, ylabel: str, bins: int, vlines: Sequence[float],
 ) -> str:
     import matplotlib
 
@@ -132,6 +145,8 @@ def _render_matplotlib(
         ax.scatter(list(x or []), list(y or []))
     elif kind == "linear":
         ax.plot(list(x or []), list(y or []), marker="o")
+    for xv in vlines:  # red spec-limit lines (LLM/HLM on a histogram)
+        ax.axvline(xv, color="#d64545", linestyle="--", linewidth=1.4)
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -145,7 +160,7 @@ def _render_matplotlib(
 
 def _render_plotly(
     kind: str, series: Series | None, x: Sequence[float] | None, y: Sequence[float] | None,
-    title: str, xlabel: str, ylabel: str, bins: int,
+    title: str, xlabel: str, ylabel: str, bins: int, vlines: Sequence[float],
 ) -> str:
     import plotly.graph_objects as go
 
@@ -171,6 +186,8 @@ def _render_plotly(
         fig.add_scatter(x=list(x or []), y=list(y or []), mode="markers")
     elif kind == "linear":
         fig.add_scatter(x=list(x or []), y=list(y or []), mode="lines+markers")
+    for xv in vlines:  # red spec-limit lines
+        fig.add_vline(x=xv, line={"color": "#d64545", "dash": "dash", "width": 1.4})
     fig.update_layout(title=title, xaxis_title=xlabel, yaxis_title=ylabel, showlegend=bool(series))
     # Deterministic div id (default is a random UUID) so the same inputs render byte-identical HTML.
     import hashlib

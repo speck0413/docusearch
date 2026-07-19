@@ -75,6 +75,37 @@ def test_diff_tests_detects_limit_tnum_and_membership_changes() -> None:
     assert 'td class="chg"' in html  # the changed cells are highlighted
 
 
+def test_audit_dashboard_five_tabs_conditions_interactivity_and_capability() -> None:
+    def run(hi: float, cod: str, corner: str) -> stdf.StdfRun:
+        b = StdfBuilder().far().mir(lot_id="L", test_cod=cod)
+        for i, v in enumerate([0.71, 0.72, 0.90, 0.91]):
+            b.pir(site=1 if i < 2 else 2)
+            b.dtr(f"COND: corner={corner}, temp=125C")
+            b.ptr(1000, "VMIN", v, lo=0.70, hi=hi, units="V", site=1 if i < 2 else 2)
+            b.prr(part_id=str(i + 1), hard_bin=1, site=1 if i < 2 else 2)
+        b.mrr()
+        return stdf.parse_stdf_tests(b.to_bytes())
+
+    ra, rb = run(0.85, "WS1", "slow"), run(0.80, "WS2", "fast")
+
+    # plotly backend so the red limit-line colour is inspectable as text (matplotlib bakes a PNG)
+    html = stdf_analytics.audit_report_html(ra, rb, backend="plotly", label_a="WS1", label_b="WS2")
+    # five tabs on one page
+    for tab in ("Diff", "Q-Q", "Histograms", "Trend", "Site"):
+        assert f">{tab}<" in html
+    assert html.count('class="panel') == 5
+    # conditions appear in the diff table, old vs new, and the change is flagged
+    assert "old corner" in html and "new corner" in html
+    assert "slow" in html and "fast" in html and 'class="chg"' in html
+    # Excel-like interactivity: sortable headers, filter box, editable feedback cells, export
+    assert 'class="sortable"' in html and 'id="diff-filter"' in html and 'id="dl-fb"' in html
+    assert 'contenteditable="true"' in html
+    # histogram tab: red spec-limit lines + capability stats
+    assert "d64545" in html  # red LLM/HLM limit lines
+    assert "Cpl" in html and "Cpu" in html and "Cpk" in html
+    assert "median" in html and "std" in html
+
+
 def test_report_builders_produce_self_contained_html() -> None:
     run_a = _run([0.71, 0.72, 0.73, 0.74])
     run_b = _run([0.69, 0.72, 0.73, 0.74], add_extra=True)
