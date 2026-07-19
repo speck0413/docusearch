@@ -161,7 +161,7 @@ no_implicit_reexport = false  # __init__.py re-exports the public API (R-ARCH-2)
 [[tool.mypy.overrides]]
 module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "reportlab.*",
           "docx", "docx.*", "markdown_it", "markdown_it.*", "pptx", "pptx.*", "openpyxl",
-          "openpyxl.*", "pystdf", "pystdf.*", "matplotlib", "matplotlib.*"]
+          "openpyxl.*", "pystdf", "pystdf.*", "matplotlib", "matplotlib.*", "plotly", "plotly.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

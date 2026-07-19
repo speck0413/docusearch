@@ -91,6 +91,17 @@ SCHEMA: tuple[_Node, ...] = (
         "http://docs-server.local:8321",
         comment="Only used when mode: client.",
     ),
+    _Field(
+        "store_type",
+        "document",
+        comment=(
+            "What this store holds — routes search + which engine handles it (GATE 6).\n"
+            "  document : prose/docs (HTML/PDF/DOCX/MD/PPTX/XLSX) — full-text + hybrid search\n"
+            "  data     : primarily plottable data (STDF/WAT/tabular) — the analytics engine,\n"
+            "             tests still searchable but analysis (plots/audit/trend) is the point"
+        ),
+        choices=("document", "data"),
+    ),
     _Section(
         "paths",
         (
@@ -600,6 +611,7 @@ class Config:
 
     mode: str
     server_url: str
+    store_type: str
     paths: PathsConfig
     sources: list[SourceConfig]
     embed: EmbedConfig
@@ -620,6 +632,7 @@ class Config:
         return cls(
             mode=str(m["mode"]),
             server_url=str(m["server_url"]),
+            store_type=str(m["store_type"]),
             paths=PathsConfig(
                 staging_dir=str(p["staging_dir"]),
                 db_path=str(p["db_path"]),
