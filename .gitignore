@@ -42,3 +42,5 @@ corpora/models/
 # OS noise
 .DS_Store
 Thumbs.db
+tmp/gates/evidence-phase6/artifacts/
+tmp/gates/evidence-phase6/e2e/
