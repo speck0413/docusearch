@@ -152,6 +152,7 @@ def _enrich_on(tmp_path: Path, provider: str) -> Any:
     cfg = config.load(tmp_path / "docusearch.yaml")
     return cfg.enrich.__class__(
         preflight_sample=cfg.enrich.preflight_sample,
+        preflight_rules=cfg.enrich.preflight_rules,
         ai_summaries=cfg.enrich.ai_summaries,
         vision_images=True,
         vision_provider=provider,

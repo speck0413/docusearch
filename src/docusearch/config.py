@@ -243,6 +243,14 @@ SCHEMA: tuple[_Node, ...] = (
         "enrich",
         (
             _Field("preflight_sample", 150, inline="docs sampled for rule proposal (temp 0)"),
+            _Field(
+                "preflight_rules",
+                "preflight_rules.yaml",
+                comment=(
+                    "Where `docusearch preflight` writes proposed gotcha rules and where ingest\n"
+                    "reads them. Rules apply ONLY after you set `approved: true` in that file."
+                ),
+            ),
             _Field("ai_summaries", False, inline="Phase 5+ — off by default"),
             _Field(
                 "vision_images",
@@ -545,6 +553,7 @@ class ServeConfig:
 @dataclass(frozen=True)
 class EnrichConfig:
     preflight_sample: int
+    preflight_rules: str
     ai_summaries: bool
     vision_images: bool
     vision_provider: str
@@ -637,6 +646,7 @@ class Config:
             ),
             enrich=EnrichConfig(
                 preflight_sample=int(en["preflight_sample"]),
+                preflight_rules=str(en["preflight_rules"]),
                 ai_summaries=bool(en["ai_summaries"]),
                 vision_images=bool(en["vision_images"]),
                 vision_provider=str(en["vision_provider"]),

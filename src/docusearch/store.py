@@ -369,6 +369,55 @@ class Store:
         )
         self._maybe_commit()
 
+    def add_flag(
+        self,
+        *,
+        doc_id: int,
+        chunk_id: int | None,
+        kind: str,
+        source: str = "",
+        rule_id: str = "",
+        note: str = "",
+    ) -> int:
+        """Record a ``flags`` row (R-ING-8 gotcha, discrepancy, …) — the UI/report-filterable
+        half of dual-tagging. Returns the new id."""
+        cur = self._conn.execute(
+            "INSERT INTO flags(doc_id, chunk_id, kind, source, rule_id, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (doc_id, chunk_id, kind, source, rule_id, note, _utcnow_iso()),
+        )
+        self._maybe_commit()
+        return int(cur.lastrowid or 0)
+
+    def count_flags(self, kind: str | None = None) -> int:
+        if kind is None:
+            return int(self._conn.execute("SELECT COUNT(*) FROM flags").fetchone()[0])
+        return int(
+            self._conn.execute("SELECT COUNT(*) FROM flags WHERE kind=?", (kind,)).fetchone()[0]
+        )
+
+    def flags_for_document(self, doc_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT id, chunk_id, kind, source, rule_id, note FROM flags "
+            "WHERE doc_id=? ORDER BY id",
+            (doc_id,),
+        ).fetchall()
+
+    def flagged_chunks(self, kind: str, limit: int = 0) -> list[sqlite3.Row]:
+        """Flagged (chunk, doc, rule) rows for one ``kind`` — for report filters and precision
+        sampling at the gate. ``limit`` 0 means all, ordered deterministically by flag id."""
+        sql = (
+            "SELECT f.id AS flag_id, f.rule_id, f.note, d.id AS doc_id, d.path, d.title, "
+            "c.id AS chunk_id, c.ord, c.locator, c.text "
+            "FROM flags f JOIN documents d ON f.doc_id = d.id "
+            "LEFT JOIN chunks c ON f.chunk_id = c.id "
+            "WHERE f.kind=? ORDER BY f.id"
+        )
+        if limit > 0:
+            sql += " LIMIT ?"
+            return self._conn.execute(sql, (kind, limit)).fetchall()
+        return self._conn.execute(sql, (kind,)).fetchall()
+
     def chunk_ids_matching(self, query: str) -> list[int]:
         """Raw FTS5 rowid match for ``query`` (unranked). Ranking lands in search.py.
 

@@ -35,6 +35,7 @@ from selectolax.parser import HTMLParser, Node
 from . import embed, runlog
 from .config import Config, SourceConfig
 from .embed import EmbedProvider
+from .enrich import GotchaPattern, active_gotcha_patterns, gotcha_tag_text, match_gotcha
 from .store import Store
 
 # A progress sink: (phase, done, total). ``phase`` is "ingest" (files) or "embed"
@@ -897,6 +898,7 @@ class IngestResult:
     embedded: int = 0
     images: int = 0
     images_unresolved: int = 0  # referenced but not retained (missing on disk / remote)
+    gotchas: int = 0  # chunks dual-tagged [GOTCHA] + flags row (R-ING-8)
     relations_total: int = 0
     relations_resolved: int = 0
     relations_unresolved: int = 0
@@ -1033,8 +1035,32 @@ def _parse_file(task: _ParseTask) -> _ParseResult:
     )
 
 
+def _tag_gotchas(
+    chunks: Sequence[Chunk], patterns: Sequence[GotchaPattern]
+) -> tuple[list[tuple[int, str, str, str]], list[tuple[int, str]]]:
+    """Apply approved gotcha rules to a document's chunks (R-ING-8). Returns the ``add_chunks``
+    tuples (text prefixed with ``[GOTCHA]`` where a rule matched) plus ``(ord, label)`` for each
+    match so the caller can write the paired ``flags`` row. No patterns ⇒ chunks unchanged."""
+    tuples: list[tuple[int, str, str, str]] = []
+    matched: list[tuple[int, str]] = []
+    for c in chunks:
+        text = c.text
+        if patterns:
+            label = match_gotcha(text, list(patterns))
+            if label is not None:
+                text = gotcha_tag_text(text)
+                matched.append((c.ord, label))
+        tuples.append((c.ord, text, c.kind, c.locator))
+    return tuples, matched
+
+
 def _write_parsed(
-    res: _ParseResult, source: SourceConfig, config: Config, store: Store, result: IngestResult
+    res: _ParseResult,
+    source: SourceConfig,
+    config: Config,
+    store: Store,
+    result: IngestResult,
+    gotcha_patterns: Sequence[GotchaPattern] = (),
 ) -> None:
     """Main process: turn one parse result into DB rows (single writer, called in file order
     so doc/chunk ids are assigned deterministically)."""
@@ -1070,7 +1096,16 @@ def _write_parsed(
         status="active",
     )
     result.documents += 1
-    store.add_chunks(doc_id, [(c.ord, c.text, c.kind, c.locator) for c in res.chunks])
+    tagged, matched = _tag_gotchas(res.chunks, gotcha_patterns)
+    store.add_chunks(doc_id, tagged)
+    if matched:  # dual-tag: text prefix (done above) + a filterable flags row (R-ING-8)
+        by_ord = {int(r["ord"]): int(r["id"]) for r in store.chunks_for_document(doc_id)}
+        for ordv, label in matched:
+            store.add_flag(
+                doc_id=doc_id, chunk_id=by_ord.get(ordv), kind="gotcha",
+                source="preflight", rule_id=label,
+            )
+        result.gotchas += len(matched)
     image_chunks = _stage_images(
         doc, Path(res.path), Path(config.paths.staging_dir), store, doc_id, len(res.chunks), result
     )
@@ -1197,6 +1232,8 @@ def run_ingest(
     prov = embed.make_provider(config.embed) if provider is _FROM_CONFIG else provider
     result = IngestResult()
     start = time.perf_counter()
+    # Approved gotcha rules (R-ING-8) — empty unless preflight_rules.yaml exists AND approved.
+    gotcha_patterns = active_gotcha_patterns(config.enrich.preflight_rules)
     if reembed or force:
         # A full rebuild (--force) and an explicit --reembed both start vectors from a
         # clean slate. This is authoritative: it clears vectors that the per-document
@@ -1246,7 +1283,7 @@ def run_ingest(
         if n_workers <= 1:
             parsed: Iterator[_ParseResult] = (_parse_file(t) for t in tasks)
             for done, (res, source) in enumerate(zip(parsed, sources, strict=True), 1):
-                _write_parsed(res, source, config, store, result)
+                _write_parsed(res, source, config, store, result, gotcha_patterns)
                 store.commit()
                 if progress is not None:
                     progress("ingest", done, total_files)
@@ -1258,7 +1295,7 @@ def run_ingest(
             with _cf.ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
                 ordered = pool.map(_parse_file, tasks, chunksize=8)  # results stay in order
                 for done, (res, source) in enumerate(zip(ordered, sources, strict=True), 1):
-                    _write_parsed(res, source, config, store, result)
+                    _write_parsed(res, source, config, store, result, gotcha_patterns)
                     store.commit()
                     if progress is not None:
                         progress("ingest", done, total_files)
@@ -1331,6 +1368,7 @@ def render_ingest_audit(result: IngestResult, *, run_id: str = "") -> str:
         f"- chunks written: **{result.chunks}**",
         f"- chunks embedded: **{result.embedded}**",
         f"- images retained: **{result.images}**",
+        f"- gotchas dual-tagged (approved rules): **{result.gotchas}**",
         "",
         "## Relations (cross-references)",
         f"- total: **{result.relations_total}**",
@@ -1372,6 +1410,7 @@ def render_store_audit(store: Store) -> str:
         f"- documents: **{store.count_documents()}**",
         f"- chunks: **{store.count_chunks()}**",
         f"- images: **{store.count_images()}**",
+        f"- gotcha flags: **{store.count_flags('gotcha')}**",
         f"- relations: **{total_rel}** ({resolved} resolved, {total_rel - resolved} unresolved)",
         "",
         "## By format",

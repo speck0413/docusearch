@@ -186,6 +186,60 @@ def test_html_datauri_image_retained_and_missing_ref_surfaced(tmp_path: Path) ->
         assert store._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] == 1
 
 
+def test_gotcha_dual_tagging_applied_when_rules_approved(tmp_path: Path) -> None:
+    # R-ING-8: when preflight_rules.yaml is APPROVED, a chunk matching a gotcha regex gets a
+    # [GOTCHA] prefix in its text (BM25-visible) AND a flags row (kind=gotcha, filterable). An
+    # UNapproved file must change nothing.
+    from docusearch import enrich
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "warn.html").write_text(
+        "<body><h1>Reset</h1><p>Do NOT power off the tester during a calibration write.</p></body>",
+        encoding="utf-8",
+    )
+    (root / "plain.html").write_text(
+        "<body><h1>Intro</h1><p>The system boots normally and reports status.</p></body>",
+        encoding="utf-8",
+    )
+    rules_path = tmp_path / "preflight_rules.yaml"
+    path = tmp_path / "d.yaml"
+    path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 1\n'
+        f'embed:\n  model: "none"\nenrich:\n  preflight_rules: "{rules_path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(path)
+    rules = enrich.PreflightRules(
+        approved=False, gotcha_patterns=[enrich.GotchaPattern(r"do NOT", "warning")], sampled=1
+    )
+    enrich.write_preflight_rules(rules, rules_path)
+
+    # Unapproved: no tagging at all.
+    with Store.open(config.paths.db_path) as store:
+        result = ingest.run_ingest(config, store)
+        assert result.gotchas == 0
+        assert store.count_flags("gotcha") == 0
+        assert not store.chunk_ids_matching("GOTCHA")
+
+    # Approve, then a fresh index: the warning chunk is dual-tagged; the plain one is untouched.
+    rules_path.write_text(
+        rules_path.read_text(encoding="utf-8").replace("approved: false", "approved: true"),
+        encoding="utf-8",
+    )
+    Path(config.paths.db_path).unlink()
+    with Store.open(config.paths.db_path) as store:
+        result = ingest.run_ingest(config, store)
+        assert result.gotchas == 1
+        assert store.count_flags("gotcha") == 1
+        assert store.chunk_ids_matching("GOTCHA")  # prefix is BM25-visible
+        flagged = store.flagged_chunks("gotcha")
+        assert len(flagged) == 1 and flagged[0]["rule_id"] == "warning"
+        assert flagged[0]["text"].startswith("[GOTCHA]") and "power off" in flagged[0]["text"]
+
+
 def test_ingest_incremental_skip(corpus: tuple[Path, cfg.Config]) -> None:
     root, config = corpus
     with Store.open(config.paths.db_path) as store:
