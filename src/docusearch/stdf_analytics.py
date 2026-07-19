@@ -382,15 +382,15 @@ def _diff_table_interactive(rows: list[DiffRow], cond_keys: list[str], label_a: 
     toolbar = (
         '<div class="toolbar">'
         '<input type="text" class="rowfilter" placeholder="filter tests…">'
-        '<button class="dl-fb">⬇ Download feedback</button>'
+        '<button class="dl-fb">⬇ Download feedback</button>' + _EXPAND_BTN +
         f'<span class="hint">click a header to sort · type to filter · click a Feedback cell to '
         f'edit · {n["changed"]} changed · {n["added"]} added · {n["removed"]} removed · '
         f'{n["identical"]} identical</span></div>'
     )
     return (
-        '<h2>Test diff — revision to revision</h2>' + toolbar +
-        '<div class="scroll"><table class="grid"><thead><tr>' + thead +
-        f"</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+        '<h2>Test diff — revision to revision</h2><div class="tablepanel">' + toolbar +
+        '<div class="tablewrap"><table class="grid"><thead><tr>' + thead +
+        f"</tr></thead><tbody>{''.join(body)}</tbody></table></div></div>"
     )
 
 
@@ -461,8 +461,18 @@ _DASHBOARD_JS = """
   var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
   var a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download='stdf-audit-feedback.json';a.click();});});
+ // expand a table to a full-window overlay (and back); Esc also exits
+ function setFull(tp,on){tp.classList.toggle('full',on);var b=tp.querySelector('.expand-btn');
+  if(b)b.textContent=on?'\\u2715 Close':'\\u26f6 Full screen';}
+ document.querySelectorAll('.expand-btn').forEach(function(btn){btn.addEventListener('click',function(){
+  var tp=btn.closest('.tablepanel');if(tp)setFull(tp,!tp.classList.contains('full'));});});
+ document.addEventListener('keydown',function(e){if(e.key==='Escape')
+  document.querySelectorAll('.tablepanel.full').forEach(function(tp){setFull(tp,false);});});
 })();
 """
+
+# a shared "expand this table to full window" button (wired in _DASHBOARD_JS)
+_EXPAND_BTN = '<button class="expand-btn">⛶ Full screen</button>'
 
 # distribution shape → the coarse flag/chip it contributes (normal/skewed/sparse contribute none)
 _SHAPE_FLAG = {
@@ -572,14 +582,15 @@ def _explore_table_html(analyses: list[TestAnalysis], label_a: str, label_b: str
         )
     toolbar = (
         '<div class="toolbar"><input type="text" class="rowfilter" placeholder="filter tests…">'
-        '<button class="dl-fb">⬇ Download feedback</button>'
+        '<button class="dl-fb">⬇ Download feedback</button>' + _EXPAND_BTN +
         '<span class="hint">chips + column headers + the box all filter/sort · '
         f"{len(analyses)} tests · click a Feedback cell to annotate</span></div>"
     )
     return (
-        "<h2>Explore — every test classified on the CPU</h2>" + _chipbar() + toolbar
-        + '<div class="scroll"><table class="grid"><thead><tr>' + thead
-        + f"</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+        "<h2>Explore — every test classified on the CPU</h2>"
+        '<div class="tablepanel">' + _chipbar() + toolbar
+        + '<div class="tablewrap"><table class="grid"><thead><tr>' + thead
+        + f"</tr></thead><tbody>{''.join(body)}</tbody></table></div></div>"
     )
 
 

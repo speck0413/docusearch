@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from harness.stdf_synth import sample_conditioned_run
 
 from docusearch import stdf
@@ -69,3 +70,39 @@ def test_parse_mpr_expands_pins_and_ftr_functional() -> None:
     ftr = {t.test_txt: t for t in by_rec["FTR"]}
     assert ftr["SCAN_pass"].result is None and ftr["SCAN_pass"].passed
     assert not ftr["SCAN_fail"].passed
+
+
+def test_optional_fields_inherited_from_first_record_by_test_number() -> None:
+    """STDF v4: a test's name/limits/units live on its FIRST record; later records omit them or flag
+    them invalid and inherit by test number (R-STDF-1)."""
+    from harness.stdf_synth import StdfBuilder
+
+    b = StdfBuilder().far().mir(lot_id="L", test_cod="WS1")
+    # part 1 — first record for each test carries the static fields
+    b.pir()
+    b.ptr(1000, "VMIN", 0.71, lo=0.70, hi=0.85, units="V")
+    b.ptr(1001, "IREF", 5.0, lo=1.0, hi=9.0, units="mA")
+    b.prr(part_id="1", hard_bin=1)
+    # part 2 — later records omit / flag the static fields
+    b.pir()
+    b.ptr(1000, "", 0.72)                              # bare: no name, no limits → inherit all
+    b.ptr(1001, "", 6.0, lo=999.0, hi=9.0, opt_flag=0x10)  # OPT_FLAG bit4: LO_LIMIT invalid → inherit
+    b.prr(part_id="2", hard_bin=1)
+    # part 3 — explicit "no low limit"
+    b.pir()
+    b.ptr(1001, "", 7.0, lo=999.0, hi=9.0, opt_flag=0x40)  # OPT_FLAG bit6: no low limit at all
+    b.prr(part_id="3", hard_bin=1)
+    b.mrr()
+    run = stdf.parse_stdf_tests(b.to_bytes())
+
+    vmin = [t for t in run.tests if t.test_num == 1000]
+    iref = [t for t in run.tests if t.test_num == 1001]
+    # bare later VMIN inherits name + both limits + units from the first record (float32 approx)
+    assert vmin[1].test_txt == "VMIN" and vmin[1].units == "V"
+    assert vmin[1].lo_limit == pytest.approx(0.70, abs=1e-5)
+    assert vmin[1].hi_limit == pytest.approx(0.85, abs=1e-5)
+    # IREF part 2: name inherited; LO invalid→inherited 1.0 (NOT the bogus 999); HI kept
+    assert iref[1].test_txt == "IREF"
+    assert iref[1].lo_limit == pytest.approx(1.0) and iref[1].hi_limit == pytest.approx(9.0)
+    # IREF part 3: bit6 → genuinely no low limit
+    assert iref[2].lo_limit is None and iref[2].hi_limit == pytest.approx(9.0)

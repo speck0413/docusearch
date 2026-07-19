@@ -104,6 +104,9 @@ def test_audit_dashboard_six_tabs_explore_conditions_and_capability() -> None:
     # Excel-like interactivity: sortable headers, class-based filter/export, editable feedback cells
     assert 'class="sortable"' in html and 'class="rowfilter"' in html and 'class="dl-fb"' in html
     assert 'contenteditable="true"' in html
+    # fixed-size scrollable table (frozen header) + full-window expand
+    assert 'class="tablewrap"' in html and 'class="tablepanel"' in html
+    assert 'class="expand-btn"' in html and "position:sticky" in html
     # histogram tab: red spec-limit lines + capability stats
     assert "d64545" in html  # red LLM/HLM limit lines
     assert "Cpl" in html and "Cpu" in html and "Cpk" in html

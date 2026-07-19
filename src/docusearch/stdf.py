@@ -195,16 +195,55 @@ def _as_seq(v: object) -> list[object]:
     return [v]
 
 
-def _tests_from_record(name: str, f: dict[str, object], conditions: dict[str, str]) -> list[StdfTest]:
+@dataclass
+class _StaticFields:
+    """The descriptive fields the STDF spec puts on only the FIRST P/M/F-TR for a test number."""
+
+    test_txt: str
+    units: str
+    lo: float | None
+    hi: float | None
+
+
+def _resolve_static(
+    f: dict[str, object], tnum: int, defaults: dict[int, _StaticFields]
+) -> _StaticFields:
+    """Resolve TEST_TXT / LO_LIMIT / HI_LIMIT / UNITS for a P/M/FTR honoring the STDF v4 rule that a
+    test's descriptive fields are carried only by its **first** record (looked up **by test number**);
+    later records omit them, or flag them invalid via ``OPT_FLAG``, and inherit the first record's
+    values (R-STDF-1). ``OPT_FLAG`` bits (PTR/MPR): ``0x40`` = no low limit, ``0x10`` = LO_LIMIT
+    invalid→inherit; ``0x80`` = no high limit, ``0x20`` = HI_LIMIT invalid→inherit. A missing
+    ``OPT_FLAG`` (trailing field omitted) means inherit any absent limit."""
+    d = defaults.get(tnum)
+    txt = str(f.get("TEST_TXT") or "").strip() or (d.test_txt if d else "")
+    units = str(f.get("UNITS") or "").strip() or (d.units if d else "")
+    lo_rec, hi_rec = _as_float(f.get("LO_LIMIT")), _as_float(f.get("HI_LIMIT"))
+    opt = _as_int(f.get("OPT_FLAG"), -1)  # -1 ⇒ OPT_FLAG absent (limits omitted → inherit)
+    if opt < 0:
+        lo = lo_rec if lo_rec is not None else (d.lo if d else None)
+        hi = hi_rec if hi_rec is not None else (d.hi if d else None)
+    else:
+        lo = None if opt & 0x40 else ((d.lo if d else None) if opt & 0x10 else lo_rec)
+        hi = None if opt & 0x80 else ((d.hi if d else None) if opt & 0x20 else hi_rec)
+    resolved = _StaticFields(txt, units, lo, hi)
+    if d is None:  # first record for this test number sets the defaults every later one inherits
+        defaults[tnum] = resolved
+    return resolved
+
+
+def _tests_from_record(
+    name: str, f: dict[str, object], conditions: dict[str, str],
+    defaults: dict[int, _StaticFields],
+) -> list[StdfTest]:
     """Turn one PTR / FTR / MPR record into StdfTests. PTR → one; FTR → one functional (result None);
-    MPR → **one per pin** (``TEST_TXT[pin]``), so each pin is analyzed as its own distribution."""
+    MPR → **one per pin** (``TEST_TXT[pin]``), so each pin is analyzed as its own distribution.
+    Static fields (name/limits/units) are resolved via first-record lookup (:func:`_resolve_static`)."""
     flg = _as_int(f.get("TEST_FLG"))
     passed = not (flg & 0x80)
     tnum = _as_int(f.get("TEST_NUM"))
-    txt = str(f.get("TEST_TXT") or "").strip()
+    static = _resolve_static(f, tnum, defaults)
+    txt, units, lo, hi = static.test_txt, static.units, static.lo, static.hi
     head, site = _as_int(f.get("HEAD_NUM")), _as_int(f.get("SITE_NUM"))
-    lo, hi = _as_float(f.get("LO_LIMIT")), _as_float(f.get("HI_LIMIT"))
-    units = str(f.get("UNITS") or "").strip()
 
     def make(result: float | None, *, rec: str, pin: int | None, suffix: str = "") -> StdfTest:
         return StdfTest(
@@ -265,6 +304,7 @@ def parse_stdf_tests(
     wafer_id = ""
     part_index = 0
     pending: list[StdfTest] = []
+    defaults: dict[int, _StaticFields] = {}  # first-record static fields per test number (run-scoped)
     for name, f in collected:
         if name == "Mir":
             run.lot_id = str(f.get("LOT_ID") or "")
@@ -279,7 +319,7 @@ def parse_stdf_tests(
         elif name == "Pir":
             part_index += 1
         elif name in ("Ptr", "Ftr", "Mpr"):
-            pending.extend(_tests_from_record(name, f, tracker.snapshot()))
+            pending.extend(_tests_from_record(name, f, tracker.snapshot(), defaults))
         elif name == "Prr":
             part_id = str(f.get("PART_ID") or part_index)
             part_flg = _as_int(f.get("PART_FLG"))

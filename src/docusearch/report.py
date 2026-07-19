@@ -572,6 +572,17 @@ padding:5px 13px;cursor:pointer;font:inherit;font-size:12.5px;font-weight:600;}
 .chip.chip-active{background:var(--accent-dim);color:#eaf6ff;border-color:var(--accent2);}
 td .tag,.tag{display:inline-block;background:var(--card2);border:1px solid var(--border);
 color:var(--accent2);border-radius:6px;padding:0 6px;margin:1px 2px;font-size:10.5px;font-weight:600;}
+/* fixed-size, self-scrolling table with a frozen header row; expand toggles a full-window overlay */
+.tablepanel{margin:.3em 0;}
+.tablepanel.full{position:fixed;inset:0;z-index:1000;background:var(--bg);padding:14px 16px;
+display:flex;flex-direction:column;overflow:hidden;box-shadow:0 0 0 100vmax var(--bg);}
+.tablewrap{overflow:auto;max-height:60vh;border:1px solid var(--border);border-radius:10px;
+-webkit-overflow-scrolling:touch;}
+.tablepanel.full .tablewrap{max-height:none;flex:1;}
+.tablewrap table.grid thead th{position:sticky;top:0;z-index:3;}
+.expand-btn{background:var(--card2);border:1px solid var(--accent2);color:var(--accent);
+border-radius:8px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer;}
+.expand-btn:hover{background:var(--accent2);color:#062033;}
 """
 
 
