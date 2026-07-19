@@ -1022,6 +1022,7 @@ class IngestResult:
     images: int = 0
     images_unresolved: int = 0  # referenced but not retained (missing on disk / remote)
     gotchas: int = 0  # chunks dual-tagged [GOTCHA] + flags row (R-ING-8)
+    stdf_tests: int = 0  # test chunks written from STDF files (R-STDF-1)
     relations_total: int = 0
     relations_resolved: int = 0
     relations_unresolved: int = 0
@@ -1175,6 +1176,46 @@ def _tag_gotchas(
                 matched.append((c.ord, label))
         tuples.append((c.ord, text, c.kind, c.locator))
     return tuples, matched
+
+
+def _write_stdf(
+    path: Path, source: SourceConfig, config: Config, store: Store, result: IngestResult
+) -> None:
+    """Ingest one STDF v4 file (R-STDF-1): parse tests + their active conditions, then write a
+    document plus one **searchable chunk per test** — the test's name/number/result/pass-fail and
+    ``COND k=v`` tokens in the text (BM25), each active condition also a filterable ``condition``
+    flag (``rule_id`` = key, ``note`` = value). Not routed through the document chunker; a test is
+    already a chunk-sized unit."""
+    from . import stdf as stdf_mod  # lazy: the [stdf] extra is only loaded for an STDF file
+
+    old = store.document_id_for_path(str(path))
+    if old is not None:
+        store.delete_document(old)
+    try:
+        run = stdf_mod.parse_stdf_tests(path.read_bytes(), scope=config.stdf.cond_scope)
+    except Exception as exc:  # noqa: BLE001 - a corrupt STDF is reported, not fatal to the run
+        result.parse_errors += 1
+        result.errors.append((str(path), f"STDF parse failed: {type(exc).__name__}: {exc}"))
+        return
+    title = " / ".join(x for x in (run.lot_id, run.job_nam) if x) or path.name
+    doc_id = store.add_document(
+        path=str(path), source=source.name, source_version=source.version, title=title,
+        content_hash=content_hash(path), content_type="test-data", fmt="stdf",
+        audience=source.audience, mtime=path.stat().st_mtime, status="active",
+    )
+    result.documents += 1
+    for ordv, test in enumerate(run.tests):
+        chunk_id = store.add_chunk(
+            document_id=doc_id, ord=ordv, text=stdf_mod.stdf_test_text(test), kind="test",
+            locator=f"test {test.test_num} part {test.part_id}",
+        )
+        for key, value in test.conditions.items():
+            store.add_flag(
+                doc_id=doc_id, chunk_id=chunk_id, kind="condition", source="stdf",
+                rule_id=key, note=value,
+            )
+    result.chunks += len(run.tests)
+    result.stdf_tests += len(run.tests)
 
 
 def _write_parsed(
@@ -1378,10 +1419,27 @@ def run_ingest(
         result.other_files += other
         worklist += [(path, source) for path in included]
 
-    total_files = len(worklist)
+    # STDF test-data files take a dedicated writer (a test is already a chunk-sized unit, not a
+    # document to parse+chunk); the rest go through the format extractors + chunker.
+    stdf_work = [(p, s) for p, s in worklist if p.suffix.lower() in (".stdf", ".std")]
+    worklist = [(p, s) for p, s in worklist if p.suffix.lower() not in (".stdf", ".std")]
+
+    total_files = len(worklist) + len(stdf_work)
     # Build one picklable parse task per file (the DB's current hashes let workers decide
     # skip-vs-reparse without touching the DB).
     stored = store.document_hashes()
+    if stdf_work:
+        with store.deferred_commits():
+            for path, source in stdf_work:
+                key = path.resolve().as_posix()
+                if not force and stored.get(key) == content_hash(path):
+                    result.skipped_unchanged += 1
+                else:
+                    _write_stdf(path, source, config, store, result)
+                    result.per_extension[path.suffix.lstrip(".").lower()] = (
+                        result.per_extension.get(path.suffix.lstrip(".").lower(), 0) + 1
+                    )
+                store.commit()
     tasks = [
         _ParseTask(
             path=path.resolve().as_posix(),
@@ -1492,6 +1550,7 @@ def render_ingest_audit(result: IngestResult, *, run_id: str = "") -> str:
         f"- chunks embedded: **{result.embedded}**",
         f"- images retained: **{result.images}**",
         f"- gotchas dual-tagged (approved rules): **{result.gotchas}**",
+        f"- STDF test chunks: **{result.stdf_tests}**",
         "",
         "## Relations (cross-references)",
         f"- total: **{result.relations_total}**",

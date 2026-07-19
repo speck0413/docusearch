@@ -286,6 +286,24 @@ SCHEMA: tuple[_Node, ...] = (
         comment="Enrichment — all off by default.",
     ),
     _Section(
+        "stdf",
+        (
+            _Field(
+                "cond_scope",
+                "part",
+                inline="COND reset scope: part (reset each part/PRR) | run (persist until cleared)",
+                choices=("part", "run"),
+            ),
+            _Field(
+                "granularity",
+                "test",
+                inline="STDF chunk granularity: test | part | both",
+                choices=("test", "part", "both"),
+            ),
+        ),
+        comment="STDF v4 test-data ingest (GATE 6). DTR COND engine reset scope + chunk granularity.",
+    ),
+    _Section(
         "logging",
         (
             _Field(
@@ -561,6 +579,12 @@ class EnrichConfig:
 
 
 @dataclass(frozen=True)
+class StdfConfig:
+    cond_scope: str
+    granularity: str
+
+
+@dataclass(frozen=True)
 class LoggingConfig:
     level: str
     jsonl: bool
@@ -584,6 +608,7 @@ class Config:
     serve: ServeConfig
     access: AccessConfig
     enrich: EnrichConfig
+    stdf: StdfConfig
     logging: LoggingConfig
     federation: list[FederationMemberConfig]
 
@@ -591,6 +616,7 @@ class Config:
     def _from_mapping(cls, m: Mapping[str, Any]) -> Config:
         p, e, ix = m["paths"], m["embed"], m["index"]
         se, sv, en, lg = m["search"], m["serve"], m["enrich"], m["logging"]
+        st = m["stdf"]
         return cls(
             mode=str(m["mode"]),
             server_url=str(m["server_url"]),
@@ -651,6 +677,10 @@ class Config:
                 vision_images=bool(en["vision_images"]),
                 vision_provider=str(en["vision_provider"]),
                 vision_model=str(en["vision_model"]),
+            ),
+            stdf=StdfConfig(
+                cond_scope=str(st["cond_scope"]),
+                granularity=str(st["granularity"]),
             ),
             logging=LoggingConfig(
                 level=str(lg["level"]),
