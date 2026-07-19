@@ -94,9 +94,12 @@ def test_audit_dashboard_six_tabs_explore_conditions_and_capability() -> None:
     for tab in ("Explore", "Diff", "Q-Q", "Histograms", "Trend", "Site"):
         assert f">{tab}<" in html
     assert html.count('class="panel') == 6
-    # Explore surface: algorithmic columns + chip filters
+    # Explore surface: algorithmic columns (incl Cpk + correlation/shift metadata to sort by)
     assert "shape" in html and "Q-Q R²" in html and "shift %" in html
-    assert 'class="chipbar"' in html and 'data-flag="uncorrelated"' in html
+    assert "shift σ" in html and "site Δσ" in html and ">Cpk</th>" in html
+    # multi-select chips: relevant to the data (this run only has a 'changed' test) + Any/All + Clear
+    assert 'class="chipbar"' in html and 'data-flag="changed"' in html
+    assert 'class="chipmode"' in html and 'class="chipclear"' in html
     assert 'data-flags="' in html  # rows/cards carry the filter tokens
     # conditions appear in the diff table, old vs new, and the change is flagged
     assert "old corner" in html and "new corner" in html

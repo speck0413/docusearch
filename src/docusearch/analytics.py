@@ -16,7 +16,7 @@ from __future__ import annotations
 import base64
 import io
 import statistics
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from html import escape
 from typing import Any
 
@@ -126,6 +126,24 @@ def classify_distribution(values: Sequence[float | None]) -> dict[str, Any]:
     return {**base, "shape": shape}
 
 
+def site_dispersion(groups: Mapping[int, Sequence[float]]) -> dict[str, Any]:
+    """Site-to-site agreement for one test: ``spread_sigma`` is the gap between the highest and
+    lowest site mean in pooled-σ units. ``site_shift`` True means the sites don't track each other
+    (a site-to-site mismatch) — the site analog of an uncorrelated run-to-run pair. The threshold is
+    **sample-size aware** (a real ≥0.5σ effect plus a per-site-mean noise allowance), so 4 sites of
+    small samples don't false-flag just from sampling scatter. None when there aren't ≥2 sites."""
+    valid = {s: [float(x) for x in v] for s, v in groups.items() if len(v) >= 2}
+    means = [statistics.fmean(v) for v in valid.values()]
+    allv = [x for v in valid.values() for x in v]
+    if len(means) < 2 or len(allv) < 8:
+        return {"n_sites": len(valid), "spread_sigma": None, "site_shift": None}
+    pooled = statistics.pstdev(allv) or 1.0
+    spread = (max(means) - min(means)) / pooled
+    n_min = min(len(v) for v in valid.values())
+    crit = 0.5 + 2.5 / (n_min ** 0.5)  # 0.5σ real effect + a few site-mean standard errors
+    return {"n_sites": len(means), "spread_sigma": spread, "site_shift": bool(spread > crit)}
+
+
 def compare_distributions(
     a: Sequence[float | None], b: Sequence[float | None]
 ) -> dict[str, Any]:
@@ -228,11 +246,25 @@ def render_plot(
     raise ValueError(f"unknown plot backend {backend!r}; expected 'matplotlib' or 'plotly'")
 
 
+# overlaid-histogram colours: first series (old/A) blue, second (new/B) green, then amber/violet
+_HIST_COLORS = ("#4c8dff", "#3cb371", "#e6a020", "#c060d0")
+
+
 def _primary(series: Series | None, y: Sequence[float] | None) -> list[float]:
     if y is not None:
         return [float(v) for v in y]
     if series:
         return [float(v) for v in series[0][1]]
+    return []
+
+
+def _hist_series(series: Series | None, y: Sequence[float] | None) -> list[tuple[str, list[float]]]:
+    """The datasets to draw on a histogram: every named ``series`` (overlaid, translucent) or, for a
+    single distribution, ``y`` alone."""
+    if series:
+        return [(str(lbl), [float(v) for v in data]) for lbl, data in series]
+    if y is not None:
+        return [("", [float(v) for v in y])]
     return []
 
 
@@ -247,7 +279,16 @@ def _render_matplotlib(
 
     fig, ax = plt.subplots(figsize=(6.0, 4.0))
     if kind == "histogram":
-        ax.hist(_primary(series, y), bins=bins)
+        hs = _hist_series(series, y)
+        allv = [v for _, vals in hs for v in vals]
+        edges: list[float] | int = (
+            [float(e) for e in np.histogram_bin_edges(allv, bins=bins)] if allv else bins
+        )
+        for i, (label, vals) in enumerate(hs):
+            ax.hist(vals, bins=edges, alpha=0.55 if len(hs) > 1 else 1.0, label=label or None,
+                    color=_HIST_COLORS[i % len(_HIST_COLORS)])
+        if len(hs) > 1:
+            ax.legend()
     elif kind == "whisker":
         data = [list(map(float, s[1])) for s in (series or [])]
         ax.boxplot(data, tick_labels=[s[0] for s in (series or [])])
@@ -297,7 +338,13 @@ def _render_plotly(
 
     fig = go.Figure()
     if kind == "histogram":
-        fig.add_histogram(x=_primary(series, y), nbinsx=bins)
+        hs = _hist_series(series, y)
+        for i, (label, vals) in enumerate(hs):
+            fig.add_histogram(x=vals, name=label or None, nbinsx=bins,
+                              opacity=0.55 if len(hs) > 1 else 1.0,
+                              marker_color=_HIST_COLORS[i % len(_HIST_COLORS)])
+        if len(hs) > 1:
+            fig.update_layout(barmode="overlay")
     elif kind == "whisker":
         for label, data in series or []:
             fig.add_box(y=list(map(float, data)), name=label)

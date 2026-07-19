@@ -565,11 +565,18 @@ table.grid td.fb{background:rgba(127,219,255,.05);min-width:120px;cursor:text;}
 table.grid td.fb:focus{outline:2px solid var(--accent2);background:rgba(127,219,255,.12);}
 .plotgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:16px;}
 @media(max-width:520px){.plotgrid{grid-template-columns:1fr;}}
-.chipbar{display:flex;gap:6px;flex-wrap:wrap;margin:14px 0 4px;}
+.chipbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:14px 0 4px;}
 .chip{background:var(--card2);border:1px solid var(--border);color:var(--muted);border-radius:20px;
 padding:5px 13px;cursor:pointer;font:inherit;font-size:12.5px;font-weight:600;}
 .chip:hover{color:var(--text);border-color:var(--accent2);}
-.chip.chip-active{background:var(--accent-dim);color:#eaf6ff;border-color:var(--accent2);}
+.chip.inc{background:var(--accent-dim);color:#eaf6ff;border-color:var(--accent2);}
+.chip.inc::before{content:"✓ ";}
+.chip.exc{background:#5c2626;color:#f7cccc;border-color:#c07;text-decoration:line-through;}
+.chip.exc::before{content:"✕ ";text-decoration:none;display:inline-block;}
+.chipmode,.chipclear{background:var(--code);border:1px solid var(--accent2);color:var(--accent);
+border-radius:20px;padding:5px 12px;cursor:pointer;font:inherit;font-size:12px;font-weight:700;}
+.chipmode:hover,.chipclear:hover{background:var(--accent2);color:#062033;}
+.chiphint{color:var(--muted);font-size:11.5px;margin-right:2px;}
 td .tag,.tag{display:inline-block;background:var(--card2);border:1px solid var(--border);
 color:var(--accent2);border-radius:6px;padding:0 6px;margin:1px 2px;font-size:10.5px;font-weight:600;}
 /* fixed-size, self-scrolling table with a frozen header row; expand toggles a full-window overlay */

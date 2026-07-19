@@ -105,3 +105,23 @@ def test_compare_distributions_correlated_shifted_uncorrelated() -> None:
 def test_compare_distributions_too_small() -> None:
     out = analytics.compare_distributions([1.0, 2.0], [3.0, 4.0])
     assert out["qq_r2"] is None and out["correlated"] is None
+
+
+def test_histogram_overlays_two_series() -> None:
+    r = _rng()
+    a, b = list(r.normal(0, 1, 200)), list(r.normal(1.5, 1, 200))
+    mpl = analytics.render_plot("histogram", series=[("old", a), ("new", b)], backend="matplotlib")
+    assert "data:image/png" in mpl  # overlaid translucent bars baked into the PNG
+    ply = analytics.render_plot("histogram", series=[("old", a), ("new", b)], backend="plotly",
+                                include_js=False)
+    assert "overlay" in ply and "old" in ply and "new" in ply  # two named traces, barmode overlay
+
+
+def test_site_dispersion_flags_site_to_site_shift() -> None:
+    r = _rng()
+    matched = {s: list(r.normal(0, 1, 40)) for s in (1, 2, 3, 4)}      # sites agree
+    assert analytics.site_dispersion(matched)["site_shift"] is False
+    offset = {s: list(r.normal((s - 1) * 1.0, 1, 40)) for s in (1, 2, 3, 4)}  # one site walks off
+    d = analytics.site_dispersion(offset)
+    assert d["site_shift"] is True and d["spread_sigma"] > 0.5 and d["n_sites"] == 4
+    assert analytics.site_dispersion({1: [1.0, 2.0, 3.0]})["site_shift"] is None  # single site
