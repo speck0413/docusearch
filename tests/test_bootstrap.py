@@ -91,3 +91,23 @@ def test_bootstrap_hints_html_and_notes_secondary(tmp_path: Path) -> None:
     assert 'store_type: "document"' in text
     assert "docusearch inspect" in text          # HTML selector hint
     assert "code" in text and "2" in text         # notes the secondary code files
+
+
+def test_bootstrap_pdf_font_hint(tmp_path: Path) -> None:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    repo = tmp_path / "manuals"
+    repo.mkdir()
+    c = canvas.Canvas(str(repo / "m.pdf"), pagesize=letter)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(72, 740, "Chapter")
+    c.setFont("Helvetica", 11)
+    for i, y in enumerate(range(700, 460, -20)):
+        c.drawString(72, y, f"Body line {i} at the ordinary size for this manual.")
+    c.showPage()
+    c.save()
+    _touch(repo, "index.html", "<html></html>")  # keep it a document store
+    text = bootstrap.bootstrap_config(repo, name="manuals")
+    assert 'store_type: "document"' in text
+    assert "PDF headings inferred from font size" in text and "H1" in text
