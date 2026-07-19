@@ -250,3 +250,58 @@ def test_stdf_cli_end_to_end_over_live_mcp(tmp_path: Path, capsys: pytest.Captur
     finally:
         server.should_exit = True
         thread.join(timeout=15)
+
+
+@pytest.mark.filterwarnings("default")
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+def test_data_cli_over_live_mcp(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`docusearch data ls/plot` drives the same live MCP server on a generic CSV data store."""
+    import uvicorn
+
+    from docusearch import ingest
+    from docusearch.cli import main
+    from docusearch.server import create_app
+    from docusearch.store import Store
+
+    port = _free_port()
+    d = tmp_path / "tables"
+    d.mkdir()
+    (d / "sensors.csv").write_text(
+        "vmin,site\n" + "".join(f"{0.70 + 0.002 * i},{1 + i % 2}\n" for i in range(30)),
+        encoding="utf-8")
+    config_path = tmp_path / "docusearch.yaml"
+    config_path.write_text(
+        f'store_type: "data"\npaths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'serve:\n  host: "127.0.0.1"\n  port: {port}\n  mcp_path: "/mcp"\n'
+        f'sources:\n  - name: data\n    location: "{d.as_posix()}"\n'
+        '    include: ["*.csv"]\n    min_content_chars: 1\n'
+        '    csv:\n      group: "site"\nembed:\n  model: "none"\n', encoding="utf-8")
+    config = cfg.load(config_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store)
+
+    server = uvicorn.Server(uvicorn.Config(
+        create_app(config), host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        _wait_port("127.0.0.1", port)
+        cn = ["--config", str(config_path)]
+
+        assert main(["data", "ls", *cn]) == 0
+        out = capsys.readouterr().out
+        assert "vmin" in out and "sensors" in out
+
+        assert main(["data", "plot", "vmin", "--kind", "histogram", *cn]) == 0
+        plot_out = capsys.readouterr().out
+        assert "Wrote" in plot_out
+        assert Path(plot_out.split("Wrote", 1)[1].split("(")[0].strip()).is_file()
+
+        # by-group whisker also works over the wire
+        assert main(["data", "plot", "sensors.vmin", "--kind", "whisker", "--by-group", *cn]) == 0
+        assert "Wrote" in capsys.readouterr().out
+    finally:
+        server.should_exit = True
+        thread.join(timeout=15)

@@ -1083,6 +1083,66 @@ def _add_stdf_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--user", default=None, help="requester (for a private store / attribution)")
 
 
+# ---- Generic data-store tools over the live MCP server (docusearch data ...) ---------------------
+# Any CSV/table's columns, not just STDF — mirrors `docusearch stdf`, same live-MCP-client transport.
+
+
+def _match_col(col: dict[str, Any], pattern: str) -> bool:
+    """Case-insensitive glob against a column's ``dataset.name`` or bare ``name``."""
+    import fnmatch
+    pat = pattern.lower()
+    name, dataset = str(col.get("name", "")).lower(), str(col.get("dataset", "")).lower()
+    return fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(f"{dataset}.{name}", pat)
+
+
+def _cmd_data_ls(args: argparse.Namespace) -> int:
+    _cfg, client = _stdf_client(args)
+    res = client.call("list_data", store=args.store, user=args.user or None)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    cols = [c for c in res.get("columns", []) if not args.glob or _match_col(c, args.glob)]
+    if not cols:
+        print("No data columns matched.")
+        return 0
+    print(f"{'id':>5}  {'dataset':<16} {'column':<20} {'kind':<11} {'n':>6}  limits")
+    for c in cols:
+        lim = "" if c["lo"] is None and c["hi"] is None else f"{c['lo']}..{c['hi']} {c['units']}"
+        print(f"{c['id']:>5}  {str(c['dataset'])[:16]:<16} {str(c['name'])[:20]:<20} "
+              f"{str(c['kind'])[:11]:<11} {c['n']:>6}  {lim}")
+    print(f"\n{len(cols)} column(s)")
+    return 0
+
+
+def _cmd_data_plot(args: argparse.Namespace) -> int:
+    cfg, client = _stdf_client(args)
+    res = client.call("list_data", store=args.store, user=args.user or None)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    cols = [c for c in res.get("columns", []) if _match_col(c, args.glob)]
+    if len(cols) != 1:
+        print(f"error: {args.glob!r} matched {len(cols)} columns; need exactly one (see `data ls`).",
+              file=sys.stderr)
+        return 2
+    col = cols[0]
+    res = client.call("data_plot", column_id=col["id"], kind=args.kind, backend=args.backend or "",
+                      by_group=args.by_group, store=args.store, user=args.user or None)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    out = _save_report(cfg, args.out, f"data_{col['dataset']}_{col['name']}_{args.kind}", res["html"])
+    s = res.get("stats", {})
+    print(f"Wrote {out}  ({col['dataset']}.{col['name']} · n={res.get('n')}"
+          + (f" · mean={s['mean']:.4g}" if s.get("n") else "") + ")")
+    runlog.log("cli.data_plot", column=col["name"], out=str(out))
+    runlog.flush()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="docusearch",
@@ -1301,6 +1361,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_aud.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
     _add_stdf_common(p_aud)
     p_aud.set_defaults(func=_cmd_stdf_audit)
+
+    p_data = sub.add_parser("data", help="generic data-store tools (any CSV/table) over the MCP server")
+    p_data.set_defaults(func=None)
+    data_sub = p_data.add_subparsers(dest="data_command")
+
+    p_dls = data_sub.add_parser("ls", help="list numeric columns in the data store")
+    p_dls.add_argument("glob", nargs="?", default="", help="filter columns by name / dataset.name glob")
+    _add_stdf_common(p_dls)
+    p_dls.set_defaults(func=_cmd_data_ls)
+
+    p_dpl = data_sub.add_parser("plot", help="plot one data column matched by name")
+    p_dpl.add_argument("glob", help="column selector: name or dataset.name glob (must match one)")
+    p_dpl.add_argument("--kind", default="histogram",
+                       help="histogram|whisker|quantile|qq|xy|linear")
+    p_dpl.add_argument("--by-group", action="store_true", help="one series per group (e.g. site)")
+    p_dpl.add_argument("--backend", default="", help="matplotlib|plotly (default from config)")
+    p_dpl.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
+    _add_stdf_common(p_dpl)
+    p_dpl.set_defaults(func=_cmd_data_plot)
 
     return parser
 
