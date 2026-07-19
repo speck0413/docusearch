@@ -219,6 +219,27 @@ SCHEMA: tuple[_Node, ...] = (
         ),
     ),
     _Section(
+        "access",
+        (
+            _Field(
+                "visibility",
+                "public",
+                comment=(
+                    "Who may search this document store:\n"
+                    "  public  : anyone on the server (the default)\n"
+                    "  private : only allowed_users / allowed_groups below, verified from the\n"
+                    "            X-Docusearch-User (and X-Docusearch-Groups) request headers"
+                ),
+                choices=("public", "private"),
+            ),
+            _Field("allowed_users", [], inline="usernames allowed when visibility: private"),
+            _Field(
+                "allowed_groups", [], inline="groups allowed when visibility: private"
+            ),
+        ),
+        comment="Access control for this store. Defaults to public (nothing defined = public).",
+    ),
+    _Section(
         "enrich",
         (
             _Field("preflight_sample", 150, inline="docs sampled for rule proposal (temp 0)"),
@@ -470,6 +491,25 @@ class FederationMemberConfig:
 
 
 @dataclass(frozen=True)
+class AccessConfig:
+    """Who may search this document store. ``public`` = anyone on the server. ``private`` = only
+    the whitelisted usernames / groups, verified from the request's username (the
+    ``X-Docusearch-User`` / ``X-Docusearch-Groups`` HTTP headers). Defaults to public."""
+
+    visibility: str  # "public" | "private"
+    allowed_users: list[str]
+    allowed_groups: list[str]
+
+    def permits(self, *, user: str | None, groups: set[str]) -> bool:
+        """True if a request from ``user`` (in ``groups``) may search this store."""
+        if self.visibility != "private":
+            return True
+        if user is not None and user in self.allowed_users:
+            return True
+        return bool(groups & set(self.allowed_groups))
+
+
+@dataclass(frozen=True)
 class EmbedConfig:
     model: str
     device: str
@@ -533,6 +573,7 @@ class Config:
     index: IndexConfig
     search: SearchConfig
     serve: ServeConfig
+    access: AccessConfig
     enrich: EnrichConfig
     logging: LoggingConfig
     federation: list[FederationMemberConfig]
@@ -588,6 +629,11 @@ class Config:
                 port=int(sv["port"]),
                 mcp_path=str(sv["mcp_path"]),
                 self_heal_minutes=int(sv["self_heal_minutes"]),
+            ),
+            access=AccessConfig(
+                visibility=str(m["access"]["visibility"]),
+                allowed_users=_strs(m["access"]["allowed_users"]),
+                allowed_groups=_strs(m["access"]["allowed_groups"]),
             ),
             enrich=EnrichConfig(
                 preflight_sample=int(en["preflight_sample"]),

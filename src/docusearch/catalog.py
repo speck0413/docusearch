@@ -228,18 +228,24 @@ def _open_member(name: str, member_config: Config) -> tuple[FederatedMember, Sto
 
 
 @contextmanager
-def open_federation(config: Config) -> Iterator[FederatedSearch]:
-    """Open every member store named in ``config.federation`` and yield a ``FederatedSearch`` over
+def open_federation(
+    config: Config, *, only: list[str] | None = None
+) -> Iterator[FederatedSearch]:
+    """Open the member stores named in ``config.federation`` and yield a ``FederatedSearch`` over
     them (R-TEST-3, §4f), closing all stores on exit. Each member is loaded from its own config
-    file, so members may use different embedding models. Scope a query to a subset by passing
-    ``stores=[...]`` to ``.search`` (e.g. only ACME). Member ``config`` paths are used as given
-    (absolute, or relative to the current working directory)."""
+    file, so members may use different embedding models. ``only`` restricts to those member names
+    (the server passes the caller's access-permitted subset; omit for all, e.g. the local CLI).
+    Scope a query further with ``stores=[...]`` on ``.search``. Member ``config`` paths are used as
+    given (absolute, or relative to the current working directory)."""
     if not config.federation:
         raise ConfigError("this config has no 'federation:' members to search")
+    wanted = None if only is None else set(only)
     members: list[FederatedMember] = []
     stores: list[Store] = []
     try:
         for member in config.federation:
+            if wanted is not None and member.name not in wanted:
+                continue
             member_config = load(Path(member.config))
             federated_member, store = _open_member(member.name, member_config)
             members.append(federated_member)

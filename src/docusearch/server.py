@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from . import citations, embed, report, runlog, search
 from ._version import __version__
 from .catalog import open_federation
-from .config import Config
+from .config import Config, load
 from .search import SearchHit
 from .store import Store
 
@@ -128,25 +128,41 @@ class Service:
         roles: set[str] | None = None,
         bm25_only: bool | None = None,
         stores: list[str] | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> tuple[list[list[SearchHit]], str, str]:
         """Return (per-query results, embed_model_used, search_mode). Text queries only;
         pre-computed vectors + the 409 mismatch path arrive with the client (Phase 3b).
 
         When the config declares a ``federation:``, the query fans out across its member stores
-        (R-TEST-3); ``stores`` scopes it to a named subset (e.g. ``["acme"]``)."""
+        (R-TEST-3); ``stores`` scopes it to a named subset (e.g. ``["acme"]``). ``user`` + ``groups``
+        (from the request's ``X-Docusearch-User`` / ``X-Docusearch-Groups`` headers) enforce store
+        **access control**: a private store the requester isn't whitelisted for is invisible — in a
+        federation it silently drops out; a private single store raises ``PermissionError``."""
         cfg = self.config
         k = top_k if top_k is not None else cfg.search.top_k_default
+        grp = groups or set()
         if cfg.federation:
-            with open_federation(cfg) as fed:
-                available = fed.store_names()
-                unknown = [s for s in (stores or []) if s not in available]
+            accessible = {
+                m.name for m in cfg.federation
+                if load(Path(m.config)).access.permits(user=user, groups=grp)
+            }
+            if stores:  # a forbidden store looks 'unknown' — never reveal a private store exists
+                unknown = [s for s in stores if s not in accessible]
                 if unknown:
-                    raise ValueError(f"unknown store(s) {unknown}; available: {sorted(available)}")
+                    raise ValueError(
+                        f"unknown store(s) {unknown}; available: {sorted(accessible)}"
+                    )
+                effective: list[str] = list(stores)
+            else:
+                effective = sorted(accessible)
+            with open_federation(cfg, only=effective) as fed:
                 fed_results = [
-                    fed.search(q, top_k=k, prefix=prefix, roles=roles, stores=stores or None)
-                    for q in query_texts
+                    fed.search(q, top_k=k, prefix=prefix, roles=roles) for q in query_texts
                 ]
             return fed_results, "(federation)", "federated"
+        if not cfg.access.permits(user=user, groups=grp):
+            raise PermissionError("access denied: this store is private")
         force_bm25 = cfg.search.bm25_only if bm25_only is None else bm25_only
         provider = None if force_bm25 else self._embed_provider()
         with Store.open(cfg.paths.db_path) as store:
@@ -411,6 +427,16 @@ def _public_base(config: Config) -> str:
     return f"http://localhost:{config.serve.port}"
 
 
+def _request_identity(request: Request) -> tuple[str | None, set[str]]:
+    """The requester's username + groups from the ``X-Docusearch-User`` / ``X-Docusearch-Groups``
+    headers (comma-separated groups). Used to enforce private-store access — a request with no
+    username can still see public stores, but no private ones."""
+    user = request.headers.get("X-Docusearch-User") or None
+    raw = request.headers.get("X-Docusearch-Groups") or ""
+    groups = {g.strip() for g in raw.split(",") if g.strip()}
+    return user, groups
+
+
 _MCP_HELP = """# docusearch — research + cited report (MCP)
 
 Answer the user's question ONLY from this document catalog, then (optionally) render a cited
@@ -490,12 +516,19 @@ def build_mcp(service: Service, config: Config) -> Any:
         stores: list[str] | None = None,
         bm25_only: bool = False,
         roles: list[str] | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Search the catalog (batch: pass a LIST). `stores` scopes to federation members."""
-        results, model_used, mode = service.search(
-            queries, top_k=top_k, prefix=prefix, bm25_only=bm25_only,
-            roles=set(roles) if roles else None, stores=stores,
-        )
+        """Search the catalog (batch: pass a LIST). `stores` scopes to federation members; `user`/
+        `groups` gate access to private stores (forward the authenticated user)."""
+        try:
+            results, model_used, mode = service.search(
+                queries, top_k=top_k, prefix=prefix, bm25_only=bm25_only,
+                roles=set(roles) if roles else None, stores=stores,
+                user=user, groups=set(groups) if groups else None,
+            )
+        except (ValueError, PermissionError) as err:
+            return {"error": "ACCESS", "message": str(err), "results": []}
         return {
             "results": [[_hit_dict(h, base) for h in lst] for lst in results],
             "embed_model_used": model_used,
@@ -556,6 +589,7 @@ def create_app(config: Config) -> FastAPI:
     @app.post("/v1/search")
     def search_route(req: SearchRequest, request: Request) -> dict[str, Any]:
         roles = set(req.roles) if req.roles else None
+        user, groups = _request_identity(request)
         if req.query_vectors is not None:
             if not req.embed_model:
                 raise HTTPException(status_code=400, detail="query_vectors require embed_model")
@@ -576,9 +610,13 @@ def create_app(config: Config) -> FastAPI:
                     roles=roles,
                     bm25_only=req.bm25_only,
                     stores=req.stores,
+                    user=user,
+                    groups=groups,
                 )
             except ValueError as err:  # unknown federation store name -> clean 400
                 raise HTTPException(status_code=400, detail=str(err)) from err
+            except PermissionError as err:  # private store, requester not whitelisted -> 403
+                raise HTTPException(status_code=403, detail=str(err)) from err
         base = str(request.base_url).rstrip("/")
         runlog.log("api.search", queries=len(results), mode=mode)
         return {
