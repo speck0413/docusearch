@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from html import escape
 
-from . import report
+from . import analytics, report
 from .stdf import StdfPart
 
 # a categorical palette for soft-bin colouring (bin 1 = pass green; others cycle)
@@ -127,3 +127,61 @@ def wafer_map_html(
     )
     return report.themed_page(f"Wafer map — {wafer}", body,
                               subtitle=f"{st.total} dies · {st.yield_pct:.1f}% yield")
+
+
+def _yield_table(rows: Sequence[tuple[str, int, int, float]]) -> str:
+    body = "".join(
+        f"<tr><td>{escape(label)}</td><td>{n}</td><td>{p}</td><td>{y:.1f}%</td></tr>"
+        for label, n, p, y in rows
+    )
+    return ('<div class="scroll"><table class="grid"><thead><tr><th>unit</th><th>dies</th>'
+            f"<th>pass</th><th>yield</th></tr></thead><tbody>{body}</tbody></table></div>")
+
+
+def mother_lot_html(parts: Sequence[StdfPart], *, backend: str = "matplotlib") -> str:
+    """A **mother-lot** view: every wafer's yield across the lot — a wafer-by-wafer yield trend plot
+    + a per-wafer table + the pooled lot yield. Highlights a low wafer against the lot."""
+    stats = wafer_stats(parts)
+    if not stats:
+        return report.themed_page("Mother lot", '<p class="stats">no wafer data</p>')
+    lot = next((p.lot_id for p in parts if p.lot_id), "")
+    ys = [s.yield_pct for s in stats]
+    total, passed = sum(s.total for s in stats), sum(s.passed for s in stats)
+    lot_y = 100.0 * passed / total if total else 0.0
+    plot = analytics.render_plot(
+        "linear", x=list(range(len(stats))), y=ys, title=f"Yield per wafer — lot {lot}",
+        xlabel="wafer #", ylabel="yield %", backend=backend, vlines=(),
+    )
+    table = _yield_table([(s.wafer, s.total, s.passed, s.yield_pct) for s in stats])
+    worst = min(stats, key=lambda s: s.yield_pct)
+    body = (
+        f'<section class="acard"><h2>Lot {escape(lot)} — {lot_y:.1f}% yield '
+        f'({passed}/{total} across {len(stats)} wafers)</h2>'
+        f'<p class="stats">lowest wafer: {escape(worst.wafer)} at {worst.yield_pct:.1f}%</p>'
+        f"{plot}{table}</section>"
+    )
+    return report.themed_page(f"Mother lot — {lot}", body,
+                              subtitle=f"{len(stats)} wafers · {lot_y:.1f}% lot yield")
+
+
+def production_trend_html(
+    lots: Sequence[tuple[str, Sequence[StdfPart]]], *, backend: str = "matplotlib"
+) -> str:
+    """A **long-term production trend**: yield across an ordered list of ``(label, parts)`` — one
+    point per lot/date — to spot drift over time. ``label`` is the lot id or a date."""
+    points = []
+    for label, parts in lots:
+        mapped = _mapped(parts)
+        n = len(mapped)
+        if n:
+            points.append((label, 100.0 * sum(1 for p in mapped if p.passed) / n, n))
+    if not points:
+        return report.themed_page("Production trend", '<p class="stats">no lots with wafer data</p>')
+    plot = analytics.render_plot(
+        "linear", x=list(range(len(points))), y=[y for _, y, _ in points],
+        title="Yield trend across lots", xlabel="lot (time →)", ylabel="yield %", backend=backend,
+    )
+    table = _yield_table([(lbl, n, round(n * y / 100), y) for lbl, y, n in points])
+    body = (f'<section class="acard"><h2>Production yield trend — {len(points)} lots</h2>'
+            f"{plot}{table}</section>")
+    return report.themed_page("Production trend", body, subtitle=f"{len(points)} lots over time")

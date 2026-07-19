@@ -1076,6 +1076,75 @@ def _cmd_stdf_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_one(client: MCPClient, args: argparse.Namespace) -> dict[str, Any] | None:
+    """Resolve an STDF glob to exactly one document (for the single-file wafer commands)."""
+    res = _stdf_list(client, args, args.glob)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return None
+    docs = res.get("documents", [])
+    if len(docs) != 1:
+        print(f"error: {args.glob!r} matched {len(docs)} STDF files; need exactly one.",
+              file=sys.stderr)
+        return None
+    return docs[0]  # type: ignore[no-any-return]
+
+
+def _cmd_stdf_wafermap(args: argparse.Namespace) -> int:
+    cfg, client = _stdf_client(args)
+    doc = _resolve_one(client, args)
+    if doc is None:
+        return 2
+    res = client.call("wafer_map", doc_id=doc["doc_id"], wafer_id=args.wafer,
+                      color_by=args.color_by, store=args.store, user=args.user or None)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    out = _save_report(cfg, args.out, f"wafermap_doc{doc['doc_id']}_{args.wafer or 'first'}", res["html"])
+    print(f"Wrote wafer map {out}")
+    return 0
+
+
+def _cmd_stdf_motherlot(args: argparse.Namespace) -> int:
+    cfg, client = _stdf_client(args)
+    doc = _resolve_one(client, args)
+    if doc is None:
+        return 2
+    res = client.call("mother_lot", doc_id=doc["doc_id"], backend=args.backend or "",
+                      store=args.store, user=args.user or None)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    out = _save_report(cfg, args.out, f"motherlot_doc{doc['doc_id']}", res["html"])
+    print(f"Wrote mother-lot view {out}")
+    return 0
+
+
+def _cmd_stdf_yieldtrend(args: argparse.Namespace) -> int:
+    cfg, client = _stdf_client(args)
+    res = _stdf_list(client, args, args.glob)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    ids = sorted(d["doc_id"] for d in res.get("documents", []))
+    if not ids:
+        print(f"error: no STDF files matched {args.glob!r}", file=sys.stderr)
+        return 2
+    res = client.call("production_trend", doc_ids=ids, backend=args.backend or "",
+                      store=args.store, user=args.user or None)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    out = _save_report(cfg, args.out, f"yieldtrend_{len(ids)}lots", res["html"])
+    print(f"Wrote yield trend {out}  ({len(ids)} lots)")
+    return 0
+
+
 def _add_stdf_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--config", default="docusearch.yaml", help="config path")
     p.add_argument("--url", default=None, help="MCP endpoint (default: from config's serve section)")
@@ -1361,6 +1430,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_aud.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
     _add_stdf_common(p_aud)
     p_aud.set_defaults(func=_cmd_stdf_audit)
+
+    p_wm = stdf_sub.add_parser("wafermap", help="wafer map (die grid) for one STDF file")
+    p_wm.add_argument("glob", help="glob selecting exactly one STDF file")
+    p_wm.add_argument("--wafer", default="", help="wafer id (default: the first wafer present)")
+    p_wm.add_argument("--color-by", default="pass", choices=("pass", "softbin"), help="die colouring")
+    p_wm.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
+    _add_stdf_common(p_wm)
+    p_wm.set_defaults(func=_cmd_stdf_wafermap)
+
+    p_ml = stdf_sub.add_parser("motherlot", help="per-wafer yield across a lot (one STDF file)")
+    p_ml.add_argument("glob", help="glob selecting exactly one STDF file")
+    p_ml.add_argument("--backend", default="", help="matplotlib|plotly (default from config)")
+    p_ml.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
+    _add_stdf_common(p_ml)
+    p_ml.set_defaults(func=_cmd_stdf_motherlot)
+
+    p_yt = stdf_sub.add_parser("yieldtrend", help="long-term yield trend across matched STDF files")
+    p_yt.add_argument("glob", help="glob selecting the STDF files (each a lot/date point)")
+    p_yt.add_argument("--backend", default="", help="matplotlib|plotly (default from config)")
+    p_yt.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
+    _add_stdf_common(p_yt)
+    p_yt.set_defaults(func=_cmd_stdf_yieldtrend)
 
     p_data = sub.add_parser("data", help="generic data-store tools (any CSV/table) over the MCP server")
     p_data.set_defaults(func=None)

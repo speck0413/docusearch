@@ -679,6 +679,41 @@ class Service:
         html = stdf_analytics.trend_html(runs, test_num, stat=stat, backend=self._backend(backend))
         return {"html": html}
 
+    def wafer_map(
+        self, doc_id: int, *, wafer_id: str = "", color_by: str = "pass",
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """A wafer map (die grid coloured by pass/fail or soft bin) from an STDF document's parts."""
+        from . import wafer
+
+        run = self._stdf_run(doc_id, store=store, user=user, groups=groups)
+        return {"html": wafer.wafer_map_html(run.parts, wafer_id=wafer_id, color_by=color_by)}
+
+    def mother_lot(
+        self, doc_id: int, *, backend: str = "", store: str | None = None,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Every wafer's yield across the lot in one STDF document (the mother-lot view)."""
+        from . import wafer
+
+        run = self._stdf_run(doc_id, store=store, user=user, groups=groups)
+        return {"html": wafer.mother_lot_html(run.parts, backend=self._backend(backend))}
+
+    def production_trend(
+        self, doc_ids: list[int], *, backend: str = "", store: str | None = None,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Long-term yield trend across an ordered list of STDF documents (one point per lot/date)."""
+        from . import wafer
+
+        if not doc_ids:
+            raise ValueError("production_trend needs at least one document id")
+        lots = []
+        for d in doc_ids:
+            run = self._stdf_run(d, store=store, user=user, groups=groups)
+            lots.append((run.lot_id or f"doc {d}", run.parts))
+        return {"html": wafer.production_trend_html(lots, backend=self._backend(backend))}
+
     def plot_data(
         self, *, kind: str, series: Any = None, x: Any = None, y: Any = None,
         title: str = "", xlabel: str = "", ylabel: str = "", backend: str = "",
@@ -1277,6 +1312,45 @@ def build_mcp(service: Service, config: Config) -> Any:
                                      store=store, user=user, groups=_grp(groups))
         except (PermissionError, ValueError) as err:
             return {"error": "DATA", "message": str(err)}
+
+    @mcp.tool()
+    def wafer_map(
+        doc_id: int, wafer_id: str = "", color_by: str = "pass",
+        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """A **wafer map** for an STDF document: a die grid at each part's (x,y), coloured by
+        `pass` (default) or `softbin`. `wafer_id` picks the wafer (else the first). Returns HTML."""
+        try:
+            return service.wafer_map(doc_id, wafer_id=wafer_id, color_by=color_by, store=store,
+                                     user=user, groups=_grp(groups))
+        except (PermissionError, ValueError) as err:
+            return {"error": "WAFER", "message": str(err)}
+
+    @mcp.tool()
+    def mother_lot(
+        doc_id: int, backend: str = "", store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """The **mother-lot** view for an STDF document: every wafer's yield across the lot + the
+        pooled lot yield, flagging the lowest wafer. Returns an HTML report."""
+        try:
+            return service.mother_lot(doc_id, backend=backend, store=store, user=user,
+                                      groups=_grp(groups))
+        except (PermissionError, ValueError) as err:
+            return {"error": "WAFER", "message": str(err)}
+
+    @mcp.tool()
+    def production_trend(
+        doc_ids: list[int], backend: str = "", store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Long-term **production yield trend** across an ordered list of STDF documents (one point
+        per lot/date) — drift detection over time. Returns an HTML report."""
+        try:
+            return service.production_trend(doc_ids, backend=backend, store=store, user=user,
+                                            groups=_grp(groups))
+        except (PermissionError, ValueError) as err:
+            return {"error": "WAFER", "message": str(err)}
 
     @mcp.tool()
     def stdf_plot(
