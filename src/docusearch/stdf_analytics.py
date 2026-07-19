@@ -483,6 +483,12 @@ def audit_report_html(
     )
     diff_panel = f'<div class="panel" data-p="diff"><section class="acard">{_diff_table_interactive(rows, cond_keys, label_a, label_b)}</section></div>'
 
+    # plotly inlines its ~3.5 MB library per call — render every plot WITHOUT it and inline the
+    # runtime once at the top of the page (see plotly_prefix below) so the page stays small and the
+    # library loads before any plot div. matplotlib ignores include_js.
+    def plot(kind: str, **kw: object) -> str:
+        return analytics.render_plot(kind, backend=backend, include_js=False, **kw)  # type: ignore[arg-type]
+
     qq, hist, trend, site = [], [], [], []
     for name in names[:max_plots]:
         va, vb = _results_by_name(run_a, name), _results_by_name(run_b, name)
@@ -490,18 +496,18 @@ def audit_report_html(
         lo, hi = (d.lo, d.hi) if d else (None, None)
         # Q-Q (A vs B)
         if len(va) >= 2 and len(vb) >= 2:
-            p = analytics.render_plot("qq", series=[(label_a, va), (label_b, vb)],
-                                      title=f"{name} — Q-Q ({label_a} vs {label_b})",
-                                      xlabel=label_a, ylabel=label_b, backend=backend)
+            p = plot("qq", series=[(label_a, va), (label_b, vb)],
+                     title=f"{name} — Q-Q ({label_a} vs {label_b})",
+                     xlabel=label_a, ylabel=label_b)
         else:
             p = "<p class='stats'>needs ≥2 points in each revision for a Q-Q</p>"
         qq.append(f'<section class="acard"><h3>{escape(name)}</h3>{p}</section>')
         # Histogram (current run) with limit lines + capability table
         vals = vb or va
         vlines = [x for x in (lo, hi) if x is not None]
-        hp = (analytics.render_plot("histogram", y=vals, title=f"{name} distribution",
-                                    xlabel=f"{name} result", ylabel="count", backend=backend,
-                                    vlines=vlines) if vals else "<p class='stats'>no data</p>")
+        hp = (plot("histogram", y=vals, title=f"{name} distribution",
+                   xlabel=f"{name} result", ylabel="count", vlines=vlines)
+              if vals else "<p class='stats'>no data</p>")
         cap_tbl = (
             '<div class="scroll"><table class="grid"><thead><tr><th>run</th><th>n</th><th>mean</th>'
             '<th>median</th><th>std</th><th>min</th><th>max</th><th>Cpl</th><th>Cpu</th><th>Cpk</th>'
@@ -513,9 +519,8 @@ def audit_report_html(
         # Trend (mean across the two runs)
         tp = [(lbl, analytics.summary_stats(v)["mean"]) for lbl, v in ((label_a, va), (label_b, vb)) if v]
         if tp:
-            tpl = analytics.render_plot("linear", x=list(range(len(tp))), y=[p2[1] for p2 in tp],
-                                        title=f"{name} mean trend", xlabel="revision",
-                                        ylabel=f"{name} mean", backend=backend)
+            tpl = plot("linear", x=list(range(len(tp))), y=[p2[1] for p2 in tp],
+                       title=f"{name} mean trend", xlabel="revision", ylabel=f"{name} mean")
             trend.append(f'<section class="acard"><h3>{escape(name)}</h3>{tpl}'
                          f'<p class="stats">{" → ".join(f"{lbl}: {v:.4g}" for lbl, v in tp)}</p></section>')
         # Site (current run)
@@ -524,15 +529,19 @@ def audit_report_html(
             if t.test_txt == name and t.result is not None:
                 groups[t.site].append(t.result)
         if len(groups) > 1:
-            sp = analytics.render_plot("whisker", series=[(f"site {s}", v) for s, v in sorted(groups.items())],
-                                       title=f"{name} by site", ylabel=name, backend=backend)
+            sp = plot("whisker", series=[(f"site {s}", v) for s, v in sorted(groups.items())],
+                      title=f"{name} by site", ylabel=name)
             site.append(f'<section class="acard"><h3>{escape(name)}</h3>{sp}</section>')
 
     def panel(pid: str, cards: list[str], empty: str) -> str:
         return f'<div class="panel hidden" data-p="{pid}"><div class="plotgrid">{"".join(cards) or empty}</div></div>'
 
+    # one copy of the plotly runtime at the top of the page (only when plotly plots were produced)
+    plotly_prefix = (
+        analytics.plotly_js_tag() if backend == "plotly" and any((qq, hist, trend, site)) else ""
+    )
     body = (
-        summary + tabbar + diff_panel
+        plotly_prefix + summary + tabbar + diff_panel
         + panel("qq", qq, '<p class="stats">no tests to compare</p>')
         + panel("hist", hist, '<p class="stats">no tests</p>')
         + panel("trend", trend, '<p class="stats">no trend data</p>')

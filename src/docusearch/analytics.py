@@ -88,11 +88,15 @@ def render_plot(
     backend: str = "matplotlib",
     bins: int = 20,
     vlines: Sequence[float] = (),
+    include_js: bool = True,
 ) -> str:
     """Render one chart to a **self-contained** HTML fragment. ``histogram``/``quantile`` use ``y``
     (or the first ``series``); ``whisker`` uses all named ``series``; ``qq`` compares the first two
-    ``series``; ``xy``/``linear`` use ``x`` + ``y``. ``vlines`` draws **red vertical limit lines**
-    (e.g. LLM/HLM on a histogram). Returns a ``data:`` PNG ``<img>`` (matplotlib) or plotly ``<div>``."""
+    ``series``; ``xy``/``linear`` use ``x`` + ``y``. ``vlines`` draws **red vertical limit lines``
+    (e.g. LLM/HLM on a histogram). ``include_js`` only matters for the plotly backend: it inlines the
+    ~3.5 MB plotly library — set it False on all-but-the-first plot of a multi-plot page (they share
+    the one runtime) so the page doesn't embed the library N times. Returns a ``data:`` PNG ``<img>``
+    (matplotlib, ``include_js`` ignored) or a plotly ``<div>``."""
     k = kind.lower()
     if k not in PLOT_KINDS:
         raise ValueError(f"unknown plot kind {kind!r}; expected one of {PLOT_KINDS}")
@@ -102,7 +106,7 @@ def render_plot(
     if backend == "matplotlib":
         return _render_matplotlib(k, series, x, y, title, xlabel, ylabel, bins, lines)
     if backend == "plotly":
-        return _render_plotly(k, series, x, y, title, xlabel, ylabel, bins, lines)
+        return _render_plotly(k, series, x, y, title, xlabel, ylabel, bins, lines, include_js)
     raise ValueError(f"unknown plot backend {backend!r}; expected 'matplotlib' or 'plotly'")
 
 
@@ -158,9 +162,18 @@ def _render_matplotlib(
     return f'<img class="plot" alt="{escape(title)}" src="data:image/png;base64,{b64}">'
 
 
+def plotly_js_tag() -> str:
+    """A single ``<script>`` carrying the whole plotly runtime — put it once at the top of a page,
+    then render every plot with ``include_js=False`` so the ~3.5 MB library is embedded exactly once
+    (and loads before any plot div, whatever panel order the plots sit in)."""
+    from plotly.offline import get_plotlyjs
+
+    return f"<script>{get_plotlyjs()}</script>"
+
+
 def _render_plotly(
     kind: str, series: Series | None, x: Sequence[float] | None, y: Sequence[float] | None,
-    title: str, xlabel: str, ylabel: str, bins: int, vlines: Sequence[float],
+    title: str, xlabel: str, ylabel: str, bins: int, vlines: Sequence[float], include_js: bool = True,
 ) -> str:
     import plotly.graph_objects as go
 
@@ -195,5 +208,8 @@ def _render_plotly(
     div_id = "plot-" + hashlib.sha256(
         f"{kind}|{title}|{xlabel}|{ylabel}|{series}|{x}|{y}".encode()
     ).hexdigest()[:16]
-    html: str = fig.to_html(full_html=False, include_plotlyjs="inline", div_id=div_id)
+    # inline the library only when asked (once per page); other plots on the page reuse that runtime.
+    html: str = fig.to_html(
+        full_html=False, include_plotlyjs=("inline" if include_js else False), div_id=div_id
+    )
     return html
