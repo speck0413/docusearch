@@ -185,6 +185,15 @@ SCHEMA: tuple[_Node, ...] = (
                     "Leave empty ({}) for a wide table (every numeric column is a metric) or a doc store."
                 ),
             ),
+            _Field(
+                "ref",
+                "",
+                comment=(
+                    "Code stores only: when `location` is a git URL (github.com/…, https://, git@,\n"
+                    "file://), pin a branch or tag to clone (blank = the repo's default branch).\n"
+                    "The repo is `git clone`d to a cache under staging_dir; auth is your git's own."
+                ),
+            ),
         ),
         comment="One entry per source folder. Copy the block to add more sources.",
     ),
@@ -597,6 +606,10 @@ class SourceConfig:
     csv_lo: str = ""
     csv_hi: str = ""
     csv_units: str = ""
+    # Source-code repos (Phase 9). When `location` is a git URL (github.com/…, https://, ssh, git@,
+    # file://) the repo is `git clone`d to a cache under staging_dir before ingest; `git_ref` pins a
+    # branch or tag (default: the repo's default branch). Auth is your git's (no token in docusearch).
+    git_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -759,6 +772,7 @@ class Config:
                     csv_lo=str(_csv_map(s).get("lo", "")),
                     csv_hi=str(_csv_map(s).get("hi", "")),
                     csv_units=str(_csv_map(s).get("units", "")),
+                    git_ref=str(s.get("ref", "")),
                 )
                 for s in m["sources"]
             ],

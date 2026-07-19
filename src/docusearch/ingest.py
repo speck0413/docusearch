@@ -29,7 +29,7 @@ import re
 import time
 import warnings
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from selectolax.parser import HTMLParser, Node
@@ -1565,10 +1565,28 @@ def run_ingest(
         # re-ingest cascade would miss — orphans, or docs whose path changed — instead of
         # relying on the cascade and then tripping the model-mismatch guard on stragglers.
         store.clear_embeddings()
+    # A source whose location is a git URL is cloned to a cache under staging_dir first, then treated
+    # exactly like a local folder ("GitHub sources treated the same"). Auth is the user's git.
+    from . import gitfetch
+
+    repos_dir = Path(config.paths.staging_dir) / "repos"
+    resolved_sources: list[SourceConfig] = []
+    for source in config.sources:
+        if not gitfetch.is_remote(source.location):
+            resolved_sources.append(source)
+            continue
+        runlog.log("ingest.git_fetch", url=source.location, ref=source.git_ref or "(default)")
+        try:
+            local = gitfetch.fetch_repo(source.location, repos_dir, ref=source.git_ref, refresh=force)
+        except gitfetch.GitFetchError as exc:
+            result.errors.append((source.location, f"git fetch failed: {exc}"))
+            continue
+        resolved_sources.append(replace(source, location=str(local)))
+
     # Classify every source up front so the file total (for progress) is known before we
     # start the slow parse loop.
     worklist: list[tuple[Path, SourceConfig]] = []
-    for source in config.sources:
+    for source in resolved_sources:
         root = Path(source.location)
         if not root.is_dir():
             result.errors.append((source.location, "source location not found"))
