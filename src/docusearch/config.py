@@ -152,6 +152,15 @@ SCHEMA: tuple[_Node, ...] = (
                     "Documented values: company | engineering | test-eng | finance."
                 ),
             ),
+            _Field(
+                "insertion",
+                "",
+                comment=(
+                    "STDF only: the test insertion/step these files belong to (WS1, WS1-RT, FT …).\n"
+                    "STDF may not record this reliably, so SET IT per source; blank falls back to\n"
+                    "MIR TEST_COD then the filename (a warning flags the guess)."
+                ),
+            ),
         ),
         comment="One entry per source folder. Copy the block to add more sources.",
     ),
@@ -317,8 +326,17 @@ SCHEMA: tuple[_Node, ...] = (
                 inline="analytics plot backend: matplotlib (static PNG) | plotly (interactive HTML)",
                 choices=("matplotlib", "plotly"),
             ),
+            _Field(
+                "part_key",
+                "lot,sublot,wafer,x,y",
+                comment=(
+                    "Fields that uniquely identify a part for cross-insertion traceability + yield.\n"
+                    "Comma list from: lot, sublot, wafer, x, y, part_id, site. Wafer default is\n"
+                    "lot,sublot,wafer,x,y; use part_id for packaged parts. No identity -> part_id."
+                ),
+            ),
         ),
-        comment="STDF v4 test-data ingest + analytics (GATE 6). COND scope, chunk granularity, plots.",
+        comment="STDF v4 test-data ingest + analytics (GATE 6). COND scope, granularity, plots, part id.",
     ),
     _Section(
         "logging",
@@ -523,6 +541,7 @@ class SourceConfig:
     strip_selectors: list[str]
     min_content_chars: int
     audience: list[str]
+    insertion: str = ""
 
 
 @dataclass(frozen=True)
@@ -600,6 +619,7 @@ class StdfConfig:
     cond_scope: str
     granularity: str
     plot_backend: str
+    part_key: str
 
 
 @dataclass(frozen=True)
@@ -657,6 +677,7 @@ class Config:
                     strip_selectors=_strs(s["strip_selectors"]),
                     min_content_chars=int(s["min_content_chars"]),
                     audience=_strs(s["audience"]),
+                    insertion=str(s.get("insertion", "")),
                 )
                 for s in m["sources"]
             ],
@@ -702,6 +723,7 @@ class Config:
                 cond_scope=str(st["cond_scope"]),
                 granularity=str(st["granularity"]),
                 plot_backend=str(st["plot_backend"]),
+                part_key=str(st["part_key"]),
             ),
             logging=LoggingConfig(
                 level=str(lg["level"]),

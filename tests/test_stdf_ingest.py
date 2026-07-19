@@ -18,7 +18,7 @@ def _config(tmp_path: Path, root: Path) -> cfg.Config:
         f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
         f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
         f'sources:\n  - name: ate\n    location: "{root.as_posix()}"\n'
-        '    include: ["*.stdf"]\n    min_content_chars: 1\n'
+        '    include: ["*.stdf"]\n    min_content_chars: 1\n    insertion: "WS1"\n'
         'embed:\n  model: "none"\n',
         encoding="utf-8",
     )

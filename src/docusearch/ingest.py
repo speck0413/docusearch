@@ -27,6 +27,7 @@ import io
 import os
 import re
 import time
+import warnings
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1192,11 +1193,23 @@ def _write_stdf(
     if old is not None:
         store.delete_document(old)
     try:
-        run = stdf_mod.parse_stdf_tests(path.read_bytes(), scope=config.stdf.cond_scope)
+        run = stdf_mod.parse_stdf_tests(
+            path.read_bytes(), scope=config.stdf.cond_scope, insertion=source.insertion,
+        )
     except Exception as exc:  # noqa: BLE001 - a corrupt STDF is reported, not fatal to the run
         result.parse_errors += 1
         result.errors.append((str(path), f"STDF parse failed: {type(exc).__name__}: {exc}"))
         return
+    if not run.insertion:  # neither operator nor MIR gave a label — fall back to the filename
+        run.insertion = path.stem
+        for prt in run.parts:
+            prt.insertion = path.stem
+    if not source.insertion:  # not operator-verified — the WS1/WS1-RT split may be wrong (Stephen)
+        warnings.warn(
+            f"STDF {path.name}: insertion {run.insertion!r} was not operator-provided — set "
+            "`insertion:` on the source to reliably separate WS1 / WS1-RT / FT.",
+            stacklevel=2,
+        )
     title = " / ".join(x for x in (run.lot_id, run.job_nam) if x) or path.name
     doc_id = store.add_document(
         path=str(path), source=source.name, source_version=source.version, title=title,

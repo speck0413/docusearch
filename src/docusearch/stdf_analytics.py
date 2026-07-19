@@ -6,11 +6,14 @@ tools — audit (two-file compare), site-to-site, trend across runs — built on
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from html import escape
 
 from . import analytics
-from .stdf import StdfRun, StdfTest
+from .stdf import StdfPart, StdfRun, StdfTest
+
+DEFAULT_PART_KEY = ("lot", "sublot", "wafer", "x", "y")
 
 
 def tests_by_num(run: StdfRun) -> dict[int, list[StdfTest]]:
@@ -104,6 +107,100 @@ def audit_runs(run_a: StdfRun, run_b: StdfRun) -> AuditReport:
             TestDelta(num, a_by[num][0].test_txt or b_by[num][0].test_txt, sa, sb, delta)
         )
     return rep
+
+
+# ------------------------------------------------------- part traceability + insertion yield
+
+
+def parse_part_key(spec: str) -> tuple[str, ...]:
+    """Turn a config ``part_key`` string (``"lot,sublot,wafer,x,y"``) into field tuple."""
+    fields = tuple(f.strip() for f in spec.split(",") if f.strip())
+    return fields or DEFAULT_PART_KEY
+
+
+def insertion_yield(
+    parts: Sequence[StdfPart], *, part_key: Sequence[str] = DEFAULT_PART_KEY
+) -> list[dict[str, object]]:
+    """First-pass and final yield **per insertion** (R-STDF-2). Within an insertion, a part touched
+    down more than once (same key → multiple PRRs) counts once: **first-pass** uses its first
+    touchdown, **final** uses its last (post-retest). Insertions keep first-seen order (WS1, WS1-RT,
+    WS2, FT …)."""
+    order: list[str] = []
+    grouped: dict[str, dict[tuple[str, ...], list[StdfPart]]] = {}
+    for p in parts:
+        if p.insertion not in grouped:
+            grouped[p.insertion] = {}
+            order.append(p.insertion)
+        grouped[p.insertion].setdefault(p.key(part_key), []).append(p)
+    out: list[dict[str, object]] = []
+    for ins in order:
+        keymap = grouped[ins]
+        total = len(keymap)
+        first_pass = sum(1 for touches in keymap.values() if touches[0].passed)
+        final_pass = sum(1 for touches in keymap.values() if touches[-1].passed)
+        retested = sum(1 for touches in keymap.values() if len(touches) > 1)
+        out.append({
+            "insertion": ins, "total": total, "first_pass": first_pass, "final_pass": final_pass,
+            "retested": retested,
+            "first_pass_yield": 100.0 * first_pass / total if total else 0.0,
+            "final_yield": 100.0 * final_pass / total if total else 0.0,
+        })
+    return out
+
+
+def trace_parts(
+    parts: Sequence[StdfPart], *, part_key: Sequence[str] = DEFAULT_PART_KEY
+) -> tuple[list[str], dict[tuple[str, ...], dict[str, StdfPart]]]:
+    """Every part's **final** touchdown at each insertion, for progression tracing initial → final
+    (R-STDF-2). Returns ``(insertion_order, {part_key: {insertion: StdfPart}})``."""
+    order: list[str] = []
+    seen: set[str] = set()
+    trace: dict[tuple[str, ...], dict[str, StdfPart]] = {}
+    for p in parts:
+        if p.insertion not in seen:
+            seen.add(p.insertion)
+            order.append(p.insertion)
+        trace.setdefault(p.key(part_key), {})[p.insertion] = p  # last per insertion = final touchdown
+    return order, trace
+
+
+def insertion_yield_html(
+    parts: Sequence[StdfPart], *, part_key: Sequence[str] = DEFAULT_PART_KEY
+) -> str:
+    """A yield-per-insertion table: first-pass vs final yield (WS1, WS1-RT, …)."""
+    rows = insertion_yield(parts, part_key=part_key)
+    body = "".join(
+        f"<tr><td>{escape(str(r['insertion']))}</td><td>{r['total']}</td>"
+        f"<td>{r['first_pass_yield']:.1f}% ({r['first_pass']}/{r['total']})</td>"
+        f"<td>{r['final_yield']:.1f}% ({r['final_pass']}/{r['total']})</td>"
+        f"<td>{r['retested']}</td></tr>"
+        for r in rows
+    )
+    return (
+        '<section class="stdf-yield"><h3>Yield per insertion</h3><table border="1">'
+        "<tr><th>insertion</th><th>parts</th><th>first-pass yield</th><th>final yield</th>"
+        f"<th>retested</th></tr>{body}</table></section>"
+    )
+
+
+def part_trace_html(
+    parts: Sequence[StdfPart], *, part_key: Sequence[str] = DEFAULT_PART_KEY, limit: int = 100
+) -> str:
+    """A part-progression table: each part (rows) × insertion (columns) → PASS/FAIL·bin, so you can
+    follow a die from initial to final touchdown."""
+    order, trace = trace_parts(parts, part_key=part_key)
+    head = "".join(f"<th>{escape(i)}</th>" for i in order)
+    body = []
+    for key in list(trace)[:limit]:
+        cells = []
+        for ins in order:
+            p = trace[key].get(ins)
+            cells.append(f"<td>{'PASS' if p.passed else 'FAIL'} · b{p.hard_bin}</td>" if p else "<td>—</td>")
+        body.append(f"<tr><td>{escape('/'.join(key))}</td>{''.join(cells)}</tr>")
+    return (
+        f'<section class="stdf-trace"><h3>Part progression ({"/".join(part_key)})</h3>'
+        f'<table border="1"><tr><th>part</th>{head}</tr>{"".join(body)}</table></section>'
+    )
 
 
 # ------------------------------------------------------- drill-down HTML report builders

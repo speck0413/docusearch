@@ -35,7 +35,7 @@ def _service(tmp_path: Path) -> tuple[Service, dict[str, int]]:
         f'store_type: "data"\npaths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
         f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
         f'sources:\n  - name: ate\n    location: "{root.as_posix()}"\n'
-        '    include: ["*.stdf"]\n    min_content_chars: 1\n'
+        '    include: ["*.stdf"]\n    min_content_chars: 1\n    insertion: "FT"\n'
         'embed:\n  model: "none"\n',
         encoding="utf-8",
     )
