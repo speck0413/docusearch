@@ -96,3 +96,16 @@ def test_syntax_errors_are_tolerated() -> None:
     src = 'def ok():\n    return 1\n\ndef broken(  :\n'
     syms = _by_qual(src, "python")
     assert "ok" in syms
+
+
+def test_deeply_nested_is_fast_and_complete() -> None:
+    # red-team #H2: qualname computation must be O(1) per symbol (scope carried during the walk),
+    # not an O(depth) ancestor re-walk — 400 nested functions used to take seconds and drop symbols
+    import time
+    src = "".join(f"function f{i}() {{" for i in range(400)) + "}" * 400
+    t0 = time.perf_counter()
+    syms = code_index.parse_symbols(src, "javascript", path="x")
+    assert time.perf_counter() - t0 < 2.0  # was multiple seconds under the O(n·depth) walk
+    assert len(syms) == 400  # every nested function still found
+    assert syms[0].qualname == "f0"  # outermost
+    assert any(s.qualname.endswith(".f399") for s in syms)  # deepest nesting preserved in qualname

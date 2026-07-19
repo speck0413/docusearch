@@ -847,6 +847,8 @@ class Store:
                 "(SELECT id FROM chunks WHERE document_id=?)",
                 (doc_id, doc_id),
             )
+            # code_symbols reference chunks(id), so clear them before the chunks they point at
+            c.execute("DELETE FROM code_symbols WHERE doc_id=?", (doc_id,))
             c.execute("DELETE FROM chunks WHERE document_id=?", (doc_id,))
             c.execute("DELETE FROM relations WHERE src_doc=?", (doc_id,))
             c.execute("UPDATE relations SET dst_doc=NULL WHERE dst_doc=?", (doc_id,))

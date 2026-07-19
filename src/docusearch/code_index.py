@@ -120,20 +120,6 @@ def _name(node: Node) -> str | None:
     return field_node.text.decode("utf-8", "replace") if field_node and field_node.text else None
 
 
-def _ancestors(node: Node, kinds: dict[str, str]) -> list[tuple[str, str]]:
-    """Named enclosing definitions, outermost→innermost, as (name, node_type)."""
-    out: list[tuple[str, str]] = []
-    parent = node.parent
-    while parent is not None:
-        if parent.type in kinds:
-            name = _name(parent)
-            if name:
-                out.append((name, parent.type))
-        parent = parent.parent
-    out.reverse()
-    return out
-
-
 def _signature(node: Node, src: bytes) -> str:
     body_start = node.end_byte
     for child in node.children:
@@ -194,17 +180,19 @@ def parse_symbols(text: str, language: str, *, path: str = "") -> list[Symbol]:
     root = _parser(language).parse(src).root_node
 
     out: list[Symbol] = []
-    stack: list[Node] = [root]
+    # DFS carrying the enclosing named-definition scope as (parent_qualname, class_like) — computed
+    # once as we descend, so a symbol's qualname/parent is O(1), not an O(depth) re-walk per symbol
+    # (which was O(n·depth) tree-sitter FFI calls overall on deeply nested files — red-team #H2).
+    stack: list[tuple[Node, str, bool]] = [(root, "", False)]
     while stack:
-        node = stack.pop()
+        node, parent, parent_class_like = stack.pop()
+        child_parent, child_class_like = parent, parent_class_like
         if node.type in spec.kinds:
             name = _name(node)
             if name:
-                ancestors = _ancestors(node, spec.kinds)
-                parent = ".".join(n for n, _ in ancestors)
                 qualname = f"{parent}.{name}" if parent else name
                 kind = spec.kinds[node.type]
-                if kind == "function" and ancestors and spec.kinds[ancestors[-1][1]] in _CLASS_LIKE:
+                if kind == "function" and parent_class_like:
                     kind = "method"
                 doc = _python_docstring(node, src) if language == "python" \
                     else _comment_docstring(node, src)
@@ -214,7 +202,9 @@ def parse_symbols(text: str, language: str, *, path: str = "") -> list[Symbol]:
                     start_line=node.start_point[0] + 1, end_line=node.end_point[0] + 1,
                     parent=parent, path=path,
                 ))
-        stack.extend(reversed(node.children))  # DFS, preserving source order on emit
+                child_parent, child_class_like = qualname, spec.kinds[node.type] in _CLASS_LIKE
+        for child in reversed(node.children):  # DFS, preserving source order on emit
+            stack.append((child, child_parent, child_class_like))
 
     out.sort(key=lambda s: (s.start_line, s.qualname))
     return out

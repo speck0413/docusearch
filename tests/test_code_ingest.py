@@ -85,3 +85,19 @@ def test_document_store_does_not_treat_code_as_symbols(tmp_path: Path) -> None:
         result = ingest.run_ingest(config, store)
         assert result.code_symbols == 0 and store.count_code_symbols() == 0
         assert result.documents == 1  # still ingested, just as a plain-text document
+
+
+def test_reingest_changed_code_file_does_not_crash(tmp_path: Path) -> None:
+    # red-team #H1: delete_document must cascade to code_symbols (which reference chunks) or a
+    # re-ingest of a changed code file raises FOREIGN KEY constraint failed
+    d = tmp_path / "repo"
+    d.mkdir()
+    (d / "a.py").write_text("def one():\n    return 1\n", encoding="utf-8")
+    config = _cfg(tmp_path, d)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store)
+        assert store.count_code_symbols() == 1
+        (d / "a.py").write_text("def one():\n    return 1\n\n\ndef two():\n    return 2\n",
+                                encoding="utf-8")
+        result = ingest.run_ingest(config, store, force=True)  # was: sqlite3.IntegrityError
+        assert result.documents == 1 and store.count_code_symbols() == 2  # rebuilt, not duplicated

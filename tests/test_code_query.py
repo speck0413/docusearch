@@ -69,3 +69,19 @@ def test_code_style_guide(tmp_path: Path) -> None:
 
     one = svc.code_style_guide(language="python")
     assert one["languages"] == ["python"]
+
+
+def test_list_code_absurd_doc_id_is_clean(tmp_path: Path) -> None:
+    # red-team #M1: an out-of-int64 doc_id must return empty, not raise OverflowError (which would
+    # escape the MCP tool's except (PermissionError, ValueError) wrapper)
+    svc = _svc(tmp_path)
+    assert svc.list_code(doc_id=2**64) == {"symbols": [], "count": 0}
+    assert svc.list_code(doc_id=-(2**70)) == {"symbols": [], "count": 0}
+
+
+def test_cli_code_ls_strips_terminal_escapes() -> None:
+    # red-team #M2: file-derived text printed by `code ls` must not carry ANSI escape bytes that
+    # spoof the reviewer's terminal
+    from docusearch.cli import _safe_term
+    assert _safe_term("a\x1b[31mERROR\x1b[0m/x.py") == "a[31mERROR[0m/x.py"
+    assert "\x1b" not in _safe_term("\x1b]0;title\x07evil") and "\x07" not in _safe_term("\x07")

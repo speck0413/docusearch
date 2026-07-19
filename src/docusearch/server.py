@@ -870,6 +870,8 @@ class Service:
         """Symbols in a **code store** (functions/classes/methods/…), optionally filtered by language,
         kind, name glob (SQL LIKE, e.g. ``open%``), or document — the catalog the ``code`` CLI/MCP
         lists and an agent browses to find a snippet to code against. Gated for a private store."""
+        if doc_id is not None and not _fits_i64(doc_id):  # absurd id -> no symbols, not OverflowError
+            return {"symbols": [], "count": 0}
         with Store.open(self._db_for_read(store, user, groups)) as db:
             rows = db.code_symbols_query(language=language, kind=kind, name_like=name_like,
                                          doc_id=doc_id, limit=limit)

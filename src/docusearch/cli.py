@@ -1224,6 +1224,12 @@ def _cmd_data_plot(args: argparse.Namespace) -> int:
     return 0
 
 
+def _safe_term(s: str) -> str:
+    """Strip control/escape characters so untrusted, file-derived text (a symbol name or path from an
+    arbitrary repo) can't inject ANSI sequences that spoof the reviewer's terminal."""
+    return "".join(ch for ch in s if ch.isprintable())
+
+
 def _cmd_code_ls(args: argparse.Namespace) -> int:
     _cfg, client = _stdf_client(args)
     res = client.call("list_code", language=args.language or None, kind=args.kind or None,
@@ -1238,8 +1244,9 @@ def _cmd_code_ls(args: argparse.Namespace) -> int:
         return 0
     print(f"{'kind':<9} {'language':<11} {'qualname':<40} location")
     for s in syms:
-        loc = f"{s['path']}:{s['start_line']}"
-        print(f"{s['kind'][:9]:<9} {s['language'][:11]:<11} {s['qualname'][:40]:<40} {loc}")
+        loc = _safe_term(f"{s['path']}:{s['start_line']}")
+        print(f"{_safe_term(s['kind'])[:9]:<9} {_safe_term(s['language'])[:11]:<11} "
+              f"{_safe_term(s['qualname'])[:40]:<40} {loc}")
     print(f"\n{len(syms)} symbol(s)")
     return 0
 
