@@ -365,7 +365,8 @@ def test_mcp_is_mounted_at_configured_path(tmp_path: Path) -> None:
         tool_names = {t.name for t in build_mcp(Service(config), config)._tool_manager.list_tools()}
     assert config.serve.mcp_path in {getattr(r, "path", None) for r in app.routes}
     assert {
-        "search_docs", "get_document", "related_documents", "catalog_stats", "check_discrepancies"
+        "search_docs", "get_document", "related_documents", "catalog_stats", "check_discrepancies",
+        "stdf_plot", "stdf_audit", "stdf_site_compare", "stdf_trend", "plot_data",
     } <= tool_names
 
 

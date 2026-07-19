@@ -475,6 +475,82 @@ class Service:
         path = Path(str(doc["path"]))
         return path if path.is_file() else None
 
+    def _stdf_run(
+        self, doc_id: int, *, store: str | None, user: str | None, groups: set[str] | None
+    ) -> Any:
+        """Resolve an STDF document id to its parsed run (access-gated via document_path)."""
+        from . import stdf
+
+        path = self.document_path(doc_id, store=store, user=user, groups=groups)
+        if path is None:
+            raise ValueError(f"no readable STDF document with id {doc_id}")
+        return stdf.parse_stdf_tests(path.read_bytes(), scope=self.config.stdf.cond_scope)
+
+    def _backend(self, backend: str) -> str:
+        return backend or self.config.stdf.plot_backend
+
+    def stdf_plot(
+        self, doc_id: int, test_num: int, *, kind: str = "histogram", backend: str = "",
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Distribution plot + stats for one test in an STDF document (R-STDF-2)."""
+        from . import stdf_analytics
+
+        run = self._stdf_run(doc_id, store=store, user=user, groups=groups)
+        html = stdf_analytics.plot_test_html(run, test_num, kind=kind, backend=self._backend(backend))
+        return {"html": html, "backend": self._backend(backend)}
+
+    def stdf_audit(
+        self, doc_a: int, doc_b: int, *, backend: str = "",
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Drill-down audit comparing two STDF documents (yield/alignment/condition-diff/per-test)."""
+        from . import stdf_analytics
+
+        ra = self._stdf_run(doc_a, store=store, user=user, groups=groups)
+        rb = self._stdf_run(doc_b, store=store, user=user, groups=groups)
+        html = stdf_analytics.audit_report_html(
+            ra, rb, backend=self._backend(backend), label_a=f"doc {doc_a}", label_b=f"doc {doc_b}"
+        )
+        return {"html": html}
+
+    def stdf_site_compare(
+        self, doc_id: int, test_num: int, *, backend: str = "",
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Site-to-site box comparison of one test in an STDF document."""
+        from . import stdf_analytics
+
+        run = self._stdf_run(doc_id, store=store, user=user, groups=groups)
+        return {"html": stdf_analytics.site_compare_html(run, test_num, backend=self._backend(backend))}
+
+    def stdf_trend(
+        self, doc_ids: list[int], test_num: int, *, stat: str = "mean", backend: str = "",
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Long-run trend of a test's ``stat`` across an ordered list of STDF documents."""
+        from . import stdf_analytics
+
+        runs = [
+            (f"doc {d}", self._stdf_run(d, store=store, user=user, groups=groups)) for d in doc_ids
+        ]
+        html = stdf_analytics.trend_html(runs, test_num, stat=stat, backend=self._backend(backend))
+        return {"html": html}
+
+    def plot_data(
+        self, *, kind: str, series: Any = None, x: Any = None, y: Any = None,
+        title: str = "", xlabel: str = "", ylabel: str = "", backend: str = "",
+    ) -> dict[str, Any]:
+        """General plot of caller-supplied data (any engine): the agent charts a column from a text
+        or Excel file for embedding in a report. Returns a self-contained HTML fragment."""
+        from . import analytics
+
+        html = analytics.render_plot(
+            kind, series=series, x=x, y=y, title=title, xlabel=xlabel, ylabel=ylabel,
+            backend=self._backend(backend),
+        )
+        return {"html": html, "backend": self._backend(backend)}
+
     def relations(
         self, doc_id: int, direction: str = "both", *, depth: int = 1,
         store: str | None = None, user: str | None = None, groups: set[str] | None = None,
@@ -809,6 +885,84 @@ def build_mcp(service: Service, config: Config) -> Any:
         except PermissionError as err:
             return {"error": "ACCESS", "message": str(err)}
         return service.health()
+
+    def _grp(groups: list[str] | None) -> set[str] | None:
+        return set(groups) if groups else None
+
+    @mcp.tool()
+    def stdf_plot(
+        doc_id: int, test_num: int, kind: str = "histogram", backend: str = "",
+        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Plot one test's distribution from an STDF data document. kind: histogram | whisker |
+        quantile | qq | xy | linear. backend: matplotlib (PNG) | plotly (interactive); default from
+        config. Returns a self-contained HTML fragment + stats — embed it in a report."""
+        try:
+            return service.stdf_plot(
+                doc_id, test_num, kind=kind, backend=backend, store=store, user=user,
+                groups=_grp(groups),
+            )
+        except (PermissionError, ValueError) as err:
+            return {"error": "STDF", "message": str(err)}
+
+    @mcp.tool()
+    def stdf_audit(
+        doc_a: int, doc_b: int, backend: str = "", store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Compare two STDF data documents: yield delta, test alignment, condition diff, and a
+        collapsible per-test Q-Q drill-down. Returns a navigable HTML report to dig through."""
+        try:
+            return service.stdf_audit(
+                doc_a, doc_b, backend=backend, store=store, user=user, groups=_grp(groups)
+            )
+        except (PermissionError, ValueError) as err:
+            return {"error": "STDF", "message": str(err)}
+
+    @mcp.tool()
+    def stdf_site_compare(
+        doc_id: int, test_num: int, backend: str = "", store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Site-to-site distribution comparison of one test in an STDF document."""
+        try:
+            return service.stdf_site_compare(
+                doc_id, test_num, backend=backend, store=store, user=user, groups=_grp(groups)
+            )
+        except (PermissionError, ValueError) as err:
+            return {"error": "STDF", "message": str(err)}
+
+    @mcp.tool()
+    def stdf_trend(
+        doc_ids: list[int], test_num: int, stat: str = "mean", backend: str = "",
+        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Trend a test's stat (mean/median/std/min/max) across an ordered list of STDF documents —
+        long-run drift detection across loop runs."""
+        try:
+            return service.stdf_trend(
+                doc_ids, test_num, stat=stat, backend=backend, store=store, user=user,
+                groups=_grp(groups),
+            )
+        except (PermissionError, ValueError) as err:
+            return {"error": "STDF", "message": str(err)}
+
+    @mcp.tool()
+    def plot_data(
+        kind: str, series: list | None = None, x: list | None = None, y: list | None = None,  # type: ignore[type-arg]
+        title: str = "", xlabel: str = "", ylabel: str = "", backend: str = "",
+    ) -> dict[str, Any]:
+        """General-purpose plot of data YOU supply (any engine): chart a column pulled from a text
+        or Excel document for embedding in a report. kind: histogram | whisker | quantile | qq | xy
+        | linear. `y` (or `series` of [name, values]) for distributions; `x`+`y` for xy/linear."""
+        try:
+            tuples = [(str(s[0]), list(s[1])) for s in series] if series else None
+            return service.plot_data(
+                kind=kind, series=tuples, x=x, y=y, title=title, xlabel=xlabel,
+                ylabel=ylabel, backend=backend,
+            )
+        except (ValueError, TypeError, IndexError) as err:
+            return {"error": "PLOT", "message": str(err)}
 
     @mcp.tool()
     def ingest_docs(

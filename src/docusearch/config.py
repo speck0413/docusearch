@@ -311,8 +311,14 @@ SCHEMA: tuple[_Node, ...] = (
                 inline="STDF chunk granularity: test | part | both",
                 choices=("test", "part", "both"),
             ),
+            _Field(
+                "plot_backend",
+                "matplotlib",
+                inline="analytics plot backend: matplotlib (static PNG) | plotly (interactive HTML)",
+                choices=("matplotlib", "plotly"),
+            ),
         ),
-        comment="STDF v4 test-data ingest (GATE 6). DTR COND engine reset scope + chunk granularity.",
+        comment="STDF v4 test-data ingest + analytics (GATE 6). COND scope, chunk granularity, plots.",
     ),
     _Section(
         "logging",
@@ -593,6 +599,7 @@ class EnrichConfig:
 class StdfConfig:
     cond_scope: str
     granularity: str
+    plot_backend: str
 
 
 @dataclass(frozen=True)
@@ -694,6 +701,7 @@ class Config:
             stdf=StdfConfig(
                 cond_scope=str(st["cond_scope"]),
                 granularity=str(st["granularity"]),
+                plot_backend=str(st["plot_backend"]),
             ),
             logging=LoggingConfig(
                 level=str(lg["level"]),
