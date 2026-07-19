@@ -549,6 +549,21 @@ class Store:
     def count_stdf_results(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM stdf_results").fetchone()[0])
 
+    def stdf_documents(self) -> list[sqlite3.Row]:
+        """Every STDF document with its SKU (the ``source`` label = part SKU/name it was filed under),
+        lot, distinct insertions, and result/part counts — the file catalog behind ``stdf ls``.
+        Glob / SKU filtering happens above this in the service layer."""
+        return self._conn.execute(
+            "SELECT d.id AS doc_id, d.path, d.title, d.source AS sku, d.status, "
+            "(SELECT COUNT(*) FROM stdf_results r WHERE r.doc_id = d.id) AS n_results, "
+            "(SELECT COUNT(*) FROM stdf_parts p WHERE p.doc_id = d.id) AS n_parts, "
+            "(SELECT p.lot FROM stdf_parts p WHERE p.doc_id = d.id AND p.lot IS NOT NULL LIMIT 1) "
+            "  AS lot, "
+            "(SELECT GROUP_CONCAT(x.insertion) FROM "
+            "  (SELECT DISTINCT p.insertion FROM stdf_parts p WHERE p.doc_id = d.id) x) AS insertions "
+            "FROM documents d WHERE d.fmt = 'stdf' ORDER BY d.id"
+        ).fetchall()
+
     def chunk_ids_matching(self, query: str) -> list[int]:
         """Raw FTS5 rowid match for ``query`` (unranked). Ranking lands in search.py.
 

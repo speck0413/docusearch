@@ -297,6 +297,7 @@ class Service:
         uploaded_by: str = "",
         groups: set[str] | None = None,
         min_content_chars: int = 1,
+        insertion: str = "",
     ) -> dict[str, Any]:
         """Ingest a **folder** or an uploaded **.zip/.tar.gz** (uncompressed into the target store's
         staging) as a labelled source, into the chosen store (R-ING write path). ``label`` tags the
@@ -325,7 +326,7 @@ class Service:
         source = SourceConfig(
             type="fs", name=label, version=uploaded_by, location=str(location),
             include=[], exclude=[], content_selector="", strip_selectors=[],
-            min_content_chars=min_content_chars, audience=[],
+            min_content_chars=min_content_chars, audience=[], insertion=insertion,
         )
         result = Catalog(replace(target, sources=[source])).ingest()
         runlog.log("api.ingest", store=store or "default", label=label, docs=result.documents,
@@ -495,6 +496,67 @@ class Service:
 
     def _backend(self, backend: str) -> str:
         return backend or self.config.stdf.plot_backend
+
+    def list_stdf_documents(
+        self, *, glob: str = "", sku: str = "", store: str | None = None,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """The STDF file catalog for a store, optionally narrowed by ``sku`` (the part SKU/name the
+        file was filed under — its ``source`` label) and/or a ``glob`` on the file path/name
+        (``lotZ_*``, ``*run2.stdf``). Returns the matching documents plus every distinct SKU present,
+        so ``stdf ls`` can show the buckets to upload into. Access-gated for a private store."""
+        with Store.open(self._db_for_read(store, user, groups)) as db:
+            rows = db.stdf_documents()
+        docs, skus = [], set()
+        for r in rows:
+            doc_sku = str(r["sku"] or "")
+            skus.add(doc_sku)
+            path = str(r["path"])
+            if sku and doc_sku != sku:
+                continue
+            if glob and not _match_glob(path, glob):
+                continue
+            docs.append({
+                "doc_id": int(r["doc_id"]), "path": path, "title": str(r["title"] or ""),
+                "sku": doc_sku, "lot": str(r["lot"] or ""),
+                "insertions": str(r["insertions"] or ""), "status": str(r["status"] or ""),
+                "tests": int(r["n_results"]), "parts": int(r["n_parts"]),
+            })
+        return {"documents": docs, "skus": sorted(s for s in skus if s)}
+
+    def upload_archive(
+        self, *, data: bytes, filename: str, sku: str, insertion: str = "",
+        store: str | None = None, user: str = "", groups: set[str] | None = None,
+        max_bytes: int = 512 * 1024 * 1024,
+    ) -> dict[str, Any]:
+        """Receive an uploaded ``.zip``/``.tar.gz`` bundle (bytes) and ingest it into ``store`` under
+        the part **SKU** (``sku`` becomes the ``source`` label — the STDF equivalent of a document
+        category). ``sku`` is required so a file is never filed into an unnamed bucket. ``insertion``
+        (WS1 / WS1-RT / FT …) is the operator's insertion label for these files — passed through so
+        the yield engine separates first-pass from retest correctly instead of guessing (Stephen).
+        Bytes are written to the store's own ``uploads`` staging and extracted through the same
+        traversal-safe path as a server-side archive (red-team H4). Refuses an over-cap payload."""
+        if not sku.strip():
+            raise ValueError("a part SKU/name is required — pick which bucket to upload into")
+        if len(data) > max_bytes:
+            raise ValueError(
+                f"upload is {len(data) / 1e6:.0f} MB; over the {max_bytes / 1e6:.0f} MB cap"
+            )
+        if not _is_archive(Path(filename)):
+            raise ValueError("upload must be a .zip or .tar.gz bundle")
+        target = self._target_config(store)
+        if not target.access.permits(user=user or None, groups=groups or set()):
+            raise PermissionError(f"access denied: cannot write to store {store or 'default'!r}")
+        uploads = Path(target.paths.staging_dir) / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        tmp = uploads / f"_incoming-{runlog.RUN_ID}{_archive_suffix(filename)}"
+        tmp.write_bytes(data)
+        try:
+            return self.ingest_from_path(
+                tmp, store=store, label=sku, uploaded_by=user, groups=groups, insertion=insertion,
+            )
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def stdf_plot(
         self, doc_id: int, test_num: int, *, kind: str = "histogram", backend: str = "",
@@ -744,6 +806,19 @@ _ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar")
 _MAX_EXTRACT_BYTES = 2 * 1024**3  # 2 GB decompressed cap — zip-bomb guard (red-team M5)
 
 
+def _match_glob(path: str, pattern: str) -> bool:
+    """Case-insensitive glob (``*``/``?``/``[seq]``) against an STDF document's path — matches on the
+    **basename** (``lotZ_run2.stdf``) or the full posix path, so ``*run2*`` and ``ate/lot*/*`` both
+    work. Path separators are normalised so a stored Windows path still matches a posix pattern."""
+    import fnmatch
+    from pathlib import PurePosixPath
+
+    norm = path.replace("\\", "/")
+    name = PurePosixPath(norm).name
+    pat = pattern.replace("\\", "/")
+    return fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(norm, pat)
+
+
 def _is_archive(path: Path) -> bool:
     return path.suffix.lower() == ".zip" or path.name.lower().endswith(_ARCHIVE_SUFFIXES)
 
@@ -950,6 +1025,47 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     def _grp(groups: list[str] | None) -> set[str] | None:
         return set(groups) if groups else None
+
+    @mcp.tool()
+    def list_stdf(
+        glob: str = "", sku: str = "", store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """List the STDF data files in a store, optionally narrowed by `sku` (the part SKU/name they
+        were filed under) and/or a `glob` on the file name/path. Returns each file's doc_id, SKU, lot,
+        insertions, and test/part counts, plus every SKU bucket present. Gated for a private store."""
+        try:
+            return service.list_stdf_documents(
+                glob=glob, sku=sku, store=store, user=user, groups=_grp(groups)
+            )
+        except (PermissionError, ValueError) as err:
+            return {"error": "STDF", "message": str(err), "documents": []}
+
+    @mcp.tool()
+    def upload_archive(
+        filename: str, data_b64: str, sku: str, insertion: str = "", store: str | None = None,
+        user: str = "", groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Upload a base64 `.zip`/`.tar.gz` bundle (e.g. a set of STDF files) and ingest it into
+        `store` under the part **`sku`** (required — the STDF equivalent of a document category; it
+        becomes the files' `source` label). `insertion` is the operator's insertion label
+        (WS1 / WS1-RT / FT …) for these files, so yield separates first-pass from retest correctly.
+        Traversal-safe extraction; refuses an oversized payload. Writing a private store requires
+        `user`/`groups` be whitelisted."""
+        import base64
+        import binascii
+
+        try:
+            data = base64.b64decode(data_b64, validate=True)
+        except (binascii.Error, ValueError):
+            return {"error": "UPLOAD", "message": "data_b64 is not valid base64"}
+        try:
+            return service.upload_archive(
+                data=data, filename=filename, sku=sku, insertion=insertion, store=store,
+                user=user, groups=_grp(groups),
+            )
+        except (ValueError, FileNotFoundError, PermissionError) as err:
+            return {"error": "UPLOAD", "message": str(err)}
 
     @mcp.tool()
     def stdf_plot(

@@ -35,6 +35,7 @@ from . import config, embed, enrich, ingest, report, runlog
 from ._version import __version__
 from .catalog import Catalog, open_federation
 from .config import Config, ConfigError
+from .mcp_client import MCPClient, MCPError
 from .search import SearchHit, roles_from_env
 from .store import Store, StoreError
 from .vision import VisionError
@@ -868,6 +869,220 @@ Notes:
 """
 
 
+# ---- STDF tools over the LIVE MCP server (docusearch stdf ...) -----------------------------------
+# These four commands are MCP clients: they drive the same `docusearch serve` an agent connects to,
+# so every use is a wire-level CLIunicode-MCP parity check. Nothing here touches the store directly.
+
+
+def _mcp_url(cfg: Config, override: str | None) -> str:
+    """The MCP endpoint to call: an explicit --url, else derived from the config's serve section.
+    A wildcard bind host (0.0.0.0/::) is dialled back to loopback for the client."""
+    if override:
+        return override
+    host = cfg.serve.host
+    if host in ("0.0.0.0", "::", ""):  # noqa: S104 - bind address, not a client dial address
+        host = "127.0.0.1"
+    path = cfg.serve.mcp_path if cfg.serve.mcp_path.startswith("/") else "/" + cfg.serve.mcp_path
+    return f"http://{host}:{cfg.serve.port}{path}"
+
+
+def _stdf_client(args: argparse.Namespace) -> tuple[Config, MCPClient]:
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    return cfg, MCPClient(_mcp_url(cfg, args.url))
+
+
+def _bundle_globs(patterns: list[str]) -> tuple[bytes, list[str]]:
+    """Collect the local files matching ``patterns`` (recursive globs) and pack them into an
+    in-memory ``.tar.gz`` with flat, de-duplicated basenames — the bytes ``stdf upload`` sends."""
+    import glob as globmod
+    import io
+    import tarfile
+
+    matched: list[Path] = []
+    seen: set[str] = set()
+    for pat in patterns:
+        # user patterns can be absolute or carry a base dir (`ate/**/lot*.stdf`) — glob.glob, not
+        # Path.glob which can't take a rooted pattern.
+        for m in sorted(globmod.glob(pat, recursive=True)):  # noqa: PTH207
+            p = Path(m)
+            key = str(p.resolve())
+            if p.is_file() and key not in seen:
+                seen.add(key)
+                matched.append(p)
+    buf = io.BytesIO()
+    used: set[str] = set()
+    names: list[str] = []
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for p in matched:
+            arc, i = p.name, 1
+            while arc in used:  # two dirs, same basename → disambiguate so neither is lost
+                arc = f"{p.stem}-{i}{p.suffix}"
+                i += 1
+            used.add(arc)
+            names.append(arc)
+            tar.add(str(p), arcname=arc)
+    return buf.getvalue(), names
+
+
+def _save_report(cfg: Config, out: str | None, title: str, html: str) -> Path:
+    """Write a generated report under the config's tmp_dir (or an explicit --out), returning path."""
+    path = Path(out) if out else Path(cfg.paths.tmp_dir) / "reports" / f"{title}.html"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
+def _tool_error(res: Any) -> str | None:
+    return str(res["message"]) if isinstance(res, dict) and res.get("error") else None
+
+
+def _cmd_stdf_upload(args: argparse.Namespace) -> int:
+    import base64
+
+    cfg, client = _stdf_client(args)
+    data, names = _bundle_globs(args.glob)
+    if not names:
+        print(f"error: no files matched {args.glob}", file=sys.stderr)
+        return 2
+    print(
+        f"Uploading {len(names)} file(s) → SKU {args.sku!r} ({len(data) / 1e6:.1f} MB) via {client.url}…",
+        file=sys.stderr,
+    )
+    res = client.call(
+        "upload_archive", filename="upload.tar.gz",
+        data_b64=base64.b64encode(data).decode("ascii"),
+        sku=args.sku, insertion=args.insertion, user=args.user or "", store=args.store,
+    )
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(
+        f"Uploaded to SKU {args.sku!r}: {res.get('documents')} document(s), "
+        f"{res.get('chunks')} chunk(s)."
+    )
+    runlog.log("cli.stdf_upload", sku=args.sku, files=len(names), docs=res.get("documents"))
+    runlog.flush()
+    return 0
+
+
+def _stdf_list(client: MCPClient, args: argparse.Namespace, glob: str) -> Any:
+    return client.call(
+        "list_stdf", glob=glob, sku=getattr(args, "sku", "") or "",
+        store=args.store, user=args.user or None,
+    )
+
+
+def _cmd_stdf_ls(args: argparse.Namespace) -> int:
+    _cfg, client = _stdf_client(args)
+    res = _stdf_list(client, args, args.glob or "")
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    docs = res.get("documents", [])
+    skus = res.get("skus", [])
+    if not docs:
+        hint = f"  Known SKUs: {', '.join(skus)}" if skus else "  (no STDF files uploaded yet)"
+        print("No STDF files matched.\n" + hint)
+        return 0
+    print(f"{'id':>5}  {'SKU':<16} {'lot':<10} {'insertions':<14} {'tests':>6} {'parts':>6}  file")
+    for d in docs:
+        print(
+            f"{d['doc_id']:>5}  {d['sku'][:16]:<16} {d['lot'][:10]:<10} "
+            f"{d['insertions'][:14]:<14} {d['tests']:>6} {d['parts']:>6}  {Path(d['path']).name}"
+        )
+    print(f"\n{len(docs)} file(s) · SKUs present: {', '.join(skus) or '—'}")
+    return 0
+
+
+def _cmd_stdf_report(args: argparse.Namespace) -> int:
+    cfg, client = _stdf_client(args)
+    res = _stdf_list(client, args, args.glob)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    docs = res.get("documents", [])
+    if not docs:
+        print(f"error: no STDF files matched {args.glob!r}", file=sys.stderr)
+        return 2
+    ids = [d["doc_id"] for d in docs]
+    if args.test is None:
+        print(f"{len(docs)} file(s) matched {args.glob!r}:")
+        for d in docs:
+            print(f"  doc {d['doc_id']}  SKU {d['sku']}  lot {d['lot']}  "
+                  f"{d['tests']} tests  {d['parts']} parts  {Path(d['path']).name}")
+        print("\nPass --test N to render a plot (1 file → distribution, many → trend across runs).")
+        return 0
+    if len(ids) == 1:
+        res = client.call("stdf_plot", doc_id=ids[0], test_num=args.test, kind=args.kind,
+                          backend=args.backend or "", store=args.store)
+        title = f"stdf_plot_doc{ids[0]}_test{args.test}_{args.kind}"
+    else:
+        res = client.call("stdf_trend", doc_ids=ids, test_num=args.test, stat=args.stat,
+                          backend=args.backend or "", store=args.store)
+        title = f"stdf_trend_test{args.test}_{args.stat}"
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    out = _save_report(cfg, args.out, title, res["html"])
+    print(f"Wrote {out}  (test {args.test} across {len(ids)} file(s))")
+    runlog.log("cli.stdf_report", test=args.test, files=len(ids), out=str(out))
+    runlog.flush()
+    return 0
+
+
+def _cmd_stdf_audit(args: argparse.Namespace) -> int:
+    cfg, client = _stdf_client(args)
+    if args.glob_b:
+        a = _stdf_list(client, args, args.glob_a)
+        b = _stdf_list(client, args, args.glob_b)
+        for res in (a, b):
+            err = _tool_error(res)
+            if err:
+                print(f"error: {err}", file=sys.stderr)
+                return 1
+        da, db = a.get("documents", []), b.get("documents", [])
+        if len(da) != 1 or len(db) != 1:
+            print(f"error: each glob must match exactly one STDF file "
+                  f"({args.glob_a!r}→{len(da)}, {args.glob_b!r}→{len(db)})", file=sys.stderr)
+            return 2
+        ids = [da[0]["doc_id"], db[0]["doc_id"]]
+    else:
+        res = _stdf_list(client, args, args.glob_a)
+        err = _tool_error(res)
+        if err:
+            print(f"error: {err}", file=sys.stderr)
+            return 1
+        docs = res.get("documents", [])
+        if len(docs) != 2:
+            print(f"error: audit needs exactly two STDF files; {args.glob_a!r} matched {len(docs)}. "
+                  "Give two globs, or tighten the pattern.", file=sys.stderr)
+            return 2
+        ids = sorted(d["doc_id"] for d in docs)
+    res = client.call("stdf_audit", doc_a=ids[0], doc_b=ids[1],
+                      backend=args.backend or "", store=args.store)
+    err = _tool_error(res)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    out = _save_report(cfg, args.out, f"stdf_audit_doc{ids[0]}_vs_doc{ids[1]}", res["html"])
+    print(f"Wrote audit dashboard {out}  (doc {ids[0]} vs doc {ids[1]})")
+    runlog.log("cli.stdf_audit", doc_a=ids[0], doc_b=ids[1], out=str(out))
+    runlog.flush()
+    return 0
+
+
+def _add_stdf_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--config", default="docusearch.yaml", help="config path")
+    p.add_argument("--url", default=None, help="MCP endpoint (default: from config's serve section)")
+    p.add_argument("--store", default=None, help="federation member to target (default: single store)")
+    p.add_argument("--user", default=None, help="requester (for a private store / attribution)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="docusearch",
@@ -1047,6 +1262,46 @@ def build_parser() -> argparse.ArgumentParser:
     p_gate.add_argument("--config", default="docusearch.yaml", help="config path")
     p_gate.set_defaults(func=_cmd_gate)
 
+    p_stdf = sub.add_parser("stdf", help="STDF data tools over the running MCP server (serve)")
+    p_stdf.set_defaults(func=None)
+    stdf_sub = p_stdf.add_subparsers(dest="stdf_command")
+
+    p_up = stdf_sub.add_parser("upload", help="bundle local STDF files and upload them under a SKU")
+    p_up.add_argument("sku", help="part SKU/name to file these under (the upload bucket — required)")
+    p_up.add_argument("glob", nargs="+", help="local file glob(s), e.g. 'ate/*.stdf' '**/lot*.stdf'")
+    p_up.add_argument("--insertion", required=True,
+                      help="operator insertion label for these files (WS1 | WS1-RT | FT | …) — "
+                           "required so yield separates first-pass from retest correctly")
+    _add_stdf_common(p_up)
+    p_up.set_defaults(func=_cmd_stdf_upload)
+
+    p_ls = stdf_sub.add_parser("ls", help="list uploaded STDF files (SKU + glob filtering)")
+    p_ls.add_argument("glob", nargs="?", default="", help="filter by file name/path glob")
+    p_ls.add_argument("--sku", default="", help="filter to one part SKU/name")
+    _add_stdf_common(p_ls)
+    p_ls.set_defaults(func=_cmd_stdf_ls)
+
+    p_rep = stdf_sub.add_parser("report", help="analyze/plot uploaded STDF(s) matched by glob")
+    p_rep.add_argument("glob", help="file name/path glob selecting the STDF(s) to analyze")
+    p_rep.add_argument("--sku", default="", help="also constrain to one part SKU/name")
+    p_rep.add_argument("--test", type=int, default=None, help="test number to plot (else list matches)")
+    p_rep.add_argument("--kind", default="histogram",
+                       help="plot kind for a single file: histogram|whisker|quantile|qq|xy|linear")
+    p_rep.add_argument("--stat", default="mean", help="trend stat across many files: mean|median|std|min|max")
+    p_rep.add_argument("--backend", default="", help="matplotlib|plotly (default from config)")
+    p_rep.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
+    _add_stdf_common(p_rep)
+    p_rep.set_defaults(func=_cmd_stdf_report)
+
+    p_aud = stdf_sub.add_parser("audit", help="Beyond-Compare audit of two uploaded STDFs")
+    p_aud.add_argument("glob_a", help="glob for the first file (or a glob matching exactly two)")
+    p_aud.add_argument("glob_b", nargs="?", default="", help="glob for the second file (optional)")
+    p_aud.add_argument("--sku", default="", help="constrain matches to one part SKU/name")
+    p_aud.add_argument("--backend", default="", help="matplotlib|plotly (default from config)")
+    p_aud.add_argument("--out", default=None, help="output HTML path (default under tmp_dir/reports)")
+    _add_stdf_common(p_aud)
+    p_aud.set_defaults(func=_cmd_stdf_audit)
+
     return parser
 
 
@@ -1058,9 +1313,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         result: int = args.func(args)
-    except (embed.EmbedError, config.ConfigError, StoreError, VisionError, enrich.EnrichError) as err:
+    except (embed.EmbedError, config.ConfigError, StoreError, VisionError, enrich.EnrichError,
+            MCPError) as err:
         # Known, user-actionable failures (model mismatch, bad config, unusable DB, malformed
-        # preflight rules): print just the guidance, not a Python traceback the user can't act on.
+        # preflight rules, an unreachable/erroring MCP server): print just the guidance, not a
+        # Python traceback the user can't act on.
         print(f"error: {err}", file=sys.stderr)
         return 1
     return result
