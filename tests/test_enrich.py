@@ -114,3 +114,45 @@ def test_propose_rules_raises_on_cli_failure() -> None:
 
     with pytest.raises(enrich.EnrichError):
         enrich.propose_rules(["doc"], model="m", runner=failing)
+
+
+def test_run_preflight_writes_unapproved_rules_from_sampled_source(tmp_path: Path) -> None:
+    import json
+
+    from docusearch import config as cfg
+
+    root = tmp_path / "docs"
+    for folder in ("a", "b"):
+        d = root / folder
+        d.mkdir(parents=True)
+        for i in range(4):
+            (d / f"{i}.html").write_text(
+                f"<body><h1>Doc {folder}{i}</h1><p>Do NOT power off during a write.</p></body>",
+                encoding="utf-8",
+            )
+    config_path = tmp_path / "d.yaml"
+    config_path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 1\n'
+        'embed:\n  model: "none"\nenrich:\n  preflight_sample: 4\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(config_path)
+
+    seen_prompt: dict[str, str] = {}
+
+    def fake_runner(argv: list[str]) -> tuple[int, str, str]:
+        seen_prompt["p"] = argv[argv.index("-p") + 1]
+        reply = json.dumps(
+            {"gotcha_patterns": [{"pattern": r"do NOT", "label": "warning"}], "notes": "H1 headings."}
+        )
+        return 0, json.dumps({"result": reply, "is_error": False}), ""
+
+    out = tmp_path / "preflight_rules.yaml"
+    rules = enrich.run_preflight(config, out_path=out, model="m", runner=fake_runner, seed=1)
+    assert out.is_file()
+    assert rules.approved is False and rules.sampled == 4  # capped at preflight_sample
+    assert rules.gotcha_patterns == [enrich.GotchaPattern(r"do NOT", "warning")]
+    assert "Do NOT power off" in seen_prompt["p"]  # real sampled text reached the model
+    assert enrich.active_gotcha_patterns(out) == []  # still needs approval

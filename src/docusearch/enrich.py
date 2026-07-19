@@ -14,8 +14,12 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
+
+if TYPE_CHECKING:
+    from .config import Config, SourceConfig
 
 GOTCHA_PREFIX = "[GOTCHA]"
 
@@ -189,6 +193,44 @@ def _strip_code_fence(text: str) -> str:
         if t.endswith("```"):
             t = t[: t.rfind("```")]
     return t.strip()
+
+
+def run_preflight(
+    config: Config,
+    *,
+    out_path: Path | str,
+    model: str = "claude-opus-4-8",
+    runner: Runner | None = None,
+    cli: str = "claude",
+    seed: int = 0,
+) -> PreflightRules:
+    """Pre-flight classification end to end (R-ING-7): sample the configured sources stratified by
+    folder (``enrich.preflight_sample`` docs), extract their text, ask Claude to propose rules, and
+    write an **unapproved** ``preflight_rules.yaml`` — nothing takes effect until Stephen reviews the
+    file and sets ``approved: true``."""
+    from .ingest import extract_document, iter_files  # lazy: keeps enrich import light
+
+    by_path: dict[Path, SourceConfig] = {}
+    for source in config.sources:
+        for p in iter_files(source.location, source.include, source.exclude):
+            by_path.setdefault(p, source)
+    sample = stratified_sample(sorted(by_path), config.enrich.preflight_sample, seed=seed)
+
+    texts: list[str] = []
+    for p in sample:
+        source = by_path[p]
+        try:
+            doc = extract_document(
+                p, p.suffix.lstrip(".").lower(),
+                content_selector=source.content_selector,
+                strip_selectors=source.strip_selectors,
+            )
+            texts.append("\n".join(s.text for s in doc.segments))
+        except Exception:  # noqa: BLE001 - one bad file must not abort the whole proposal
+            continue
+    rules = propose_rules(texts, model=model, runner=runner, cli=cli)
+    write_preflight_rules(rules, out_path)
+    return rules
 
 
 def stratified_sample(paths: list[Path], n: int, *, seed: int) -> list[Path]:
