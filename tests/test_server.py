@@ -272,6 +272,37 @@ def test_relations_endpoint(client: TestClient) -> None:
     assert isinstance(resp.json(), list)
 
 
+def test_relations_nhop_endpoint(tmp_path: Path) -> None:
+    # A -> B -> C chain; depth=2 must surface both the direct (hops 1) and 2-hop neighbour.
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "a.html").write_text(
+        '<body><h1>A</h1><p>Alpha overview page.</p><a href="b.html">to B</a></body>', "utf-8"
+    )
+    (root / "b.html").write_text(
+        '<body><h1>B</h1><p>Beta details page.</p><a href="c.html">to C</a></body>', "utf-8"
+    )
+    (root / "c.html").write_text("<body><h1>C</h1><p>Gamma reference page.</p></body>", "utf-8")
+    config_path = tmp_path / "docusearch.yaml"
+    config_path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(config_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store)
+        a = store.document_id_for_path((root / "a.html").resolve().as_posix())
+    client = TestClient(create_app(config))
+    depth1 = client.get(f"/v1/relations/{a}", params={"direction": "out", "depth": 1}).json()
+    assert [(r["hops"], r["title"]) for r in depth1] == [(1, "B")]
+    depth2 = client.get(f"/v1/relations/{a}", params={"direction": "out", "depth": 2}).json()
+    assert [(r["hops"], r["title"]) for r in depth2] == [(1, "B"), (2, "C")]
+    assert depth2[0]["neighbor"] == depth2[0]["doc_id"]  # legacy key preserved for agents
+
+
 def test_404s(client: TestClient) -> None:
     assert client.get("/v1/documents/9999").status_code == 404
     assert client.get("/v1/images/deadbeef").status_code == 404

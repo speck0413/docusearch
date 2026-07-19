@@ -726,6 +726,70 @@ class Store:
             (doc_id,),
         ).fetchall()
 
+    def related_documents(
+        self, doc_id: int, direction: str = "both", depth: int = 1
+    ) -> list[dict[str, object]]:
+        """Documents reachable from ``doc_id`` over the resolved relations graph (R-ING-5, §17
+        N-hop), walked up to ``depth`` hops via a recursive CTE. direction: ``out`` (docs this one
+        links to), ``in`` (docs that link to this one), ``both``. Returns one row per reachable
+        doc — its SHORTEST hop count, path, title, and (for direct hops) link_type — ordered
+        (hops, doc_id). Self is excluded; the depth cap bounds the walk so cycles can't spin."""
+        depth = max(1, depth)
+        wanted = ("out", "in") if direction == "both" else (direction,)
+        reach: dict[int, tuple[int, str]] = {}  # doc -> (shortest hops, direction)
+        for d in wanted:
+            nxt = "r.dst_doc" if d == "out" else "r.src_doc"
+            edge = "r.src_doc = w.doc" if d == "out" else "r.dst_doc = w.doc"
+            rows = self._conn.execute(
+                "WITH RECURSIVE walk(doc, hops) AS ("
+                "  SELECT ?, 0 "
+                "  UNION "
+                f"  SELECT {nxt}, w.hops + 1 FROM walk w JOIN relations r ON {edge} "
+                f"  WHERE {nxt} IS NOT NULL AND w.hops < ?"
+                ") SELECT doc, MIN(hops) FROM walk WHERE doc != ? GROUP BY doc",
+                (doc_id, depth, doc_id),
+            ).fetchall()
+            for r in rows:
+                doc, hops = int(r[0]), int(r[1])
+                if doc in reach:
+                    prev_hops, prev_dir = reach[doc]
+                    reach[doc] = (min(prev_hops, hops), "both" if prev_dir != d else d)
+                else:
+                    reach[doc] = (hops, d)
+        if not reach:
+            return []
+        # link_type only for direct (1-hop) neighbours — ambiguous once you chain edges.
+        direct: dict[tuple[int, str], str] = {}
+        for row in self.relations_out(doc_id):
+            if row["dst_doc"] is not None:
+                direct.setdefault((int(row["dst_doc"]), "out"), str(row["link_type"] or ""))
+        for row in self.relations_in(doc_id):
+            if row["src_doc"] is not None:
+                direct.setdefault((int(row["src_doc"]), "in"), str(row["link_type"] or ""))
+        meta = {
+            int(m["id"]): m
+            for m in self._conn.execute(
+                "SELECT id, path, title FROM documents WHERE id IN "
+                f"({','.join('?' * len(reach))})",
+                tuple(reach),
+            ).fetchall()
+        }
+        out: list[dict[str, object]] = []
+        for doc in sorted(reach, key=lambda d: (reach[d][0], d)):
+            hops, dirn = reach[doc]
+            m = meta.get(doc)
+            out.append(
+                {
+                    "doc_id": doc,
+                    "path": str(m["path"]) if m else "",
+                    "title": str(m["title"]) if m else "",
+                    "hops": hops,
+                    "direction": dirn,
+                    "link_type": direct.get((doc, dirn), "") if hops == 1 else "",
+                }
+            )
+        return out
+
     def fmt_histogram(self) -> dict[str, int]:
         rows = self._conn.execute(
             "SELECT fmt, COUNT(*) FROM documents GROUP BY fmt ORDER BY fmt"

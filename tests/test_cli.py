@@ -496,6 +496,38 @@ def test_preflight_writes_rules_and_reports(
     assert "warning" in (combined.out + combined.err) and str(out) in combined.out
 
 
+def test_related_cli_walks_nhop(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    from docusearch import config as cfg
+    from docusearch import ingest
+    from docusearch.store import Store
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "a.html").write_text(
+        '<body><h1>A</h1><p>Alpha overview.</p><a href="b.html">B</a></body>', encoding="utf-8"
+    )
+    (root / "b.html").write_text(
+        '<body><h1>B</h1><p>Beta details.</p><a href="c.html">C</a></body>', encoding="utf-8"
+    )
+    (root / "c.html").write_text("<body><h1>C</h1><p>Gamma reference.</p></body>", encoding="utf-8")
+    cfg_path = tmp_path / "d.yaml"
+    cfg_path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: d\n    location: "{root.as_posix()}"\n    min_content_chars: 5\n'
+        'embed:\n  model: "none"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load(cfg_path)
+    with Store.open(config.paths.db_path) as store:
+        ingest.run_ingest(config, store)
+        a = store.document_id_for_path((root / "a.html").resolve().as_posix())
+    assert cli.main(["related", str(a), "--direction", "out", "--depth", "2", "--config", str(cfg_path)]) == 0
+    out = capsys.readouterr().out
+    assert "1·out" in out and "B" in out  # direct neighbour
+    assert "2·out" in out and "C" in out  # 2-hop neighbour
+
+
 def test_preflight_refuses_to_clobber_approved_rules(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

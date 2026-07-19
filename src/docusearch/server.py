@@ -437,33 +437,18 @@ class Service:
         return path if path.is_file() else None
 
     def relations(
-        self, doc_id: int, direction: str = "out", *, store: str | None = None,
-        user: str | None = None, groups: set[str] | None = None,
+        self, doc_id: int, direction: str = "both", *, depth: int = 1,
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Linked / linking documents (R-ING-5 graph). direction: out | in | both."""
-        out: list[dict[str, Any]] = []
+        """Cross-referenced documents over the relations graph (R-ING-5, N-hop §17). direction:
+        out | in | both; ``depth`` walks N hops. Each row carries the neighbor's id, path, title,
+        shortest hop count, direction, and (for direct hops) link_type."""
+        if direction not in ("out", "in", "both"):
+            raise ValueError(f"direction must be out|in|both, got {direction!r}")
         with Store.open(self._db_for_read(store, user, groups)) as store_db:
-            if direction in ("out", "both"):
-                for r in store_db.relations_out(doc_id):
-                    out.append(
-                        {
-                            "neighbor": r["dst_doc"],
-                            "raw": r["dst_raw"],
-                            "link_type": r["link_type"],
-                            "direction": "out",
-                        }
-                    )
-            if direction in ("in", "both"):
-                for r in store_db.relations_in(doc_id):
-                    out.append(
-                        {
-                            "neighbor": r["src_doc"],
-                            "raw": r["dst_raw"],
-                            "link_type": r["link_type"],
-                            "direction": "in",
-                        }
-                    )
-        return out
+            rows = store_db.related_documents(doc_id, direction, depth=depth)
+        # keep the legacy `neighbor` key (agents depend on it) alongside the richer fields
+        return [{**r, "neighbor": r["doc_id"]} for r in rows]
 
     def image(
         self, sha256: str, *, store: str | None = None, user: str | None = None,
@@ -643,7 +628,8 @@ knowledge of the domain.
   all. `prefix` = partial-term matching; `bm25_only` = skip vectors; `roles` = cooperative filter.
 - `get_document(doc_id, chunk=None)` -> full chunk text — use it to fill a card with real code / a
   full procedure, not just a snippet.
-- `related_documents(doc_id, direction="both")` -> cross-referenced docs (follow leads).
+- `related_documents(doc_id, direction="both", depth=1)` -> cross-referenced docs (follow leads);
+  `depth` walks N hops, each result carries its shortest `hops`.
 - `catalog_stats()` -> counts + embedding model (sanity-check the catalog is populated).
 - `build_report(spec, fmt="md")` -> a themed, cited report. VERIFIES every citation against your
   evidence and refuses hallucinated ones. `fmt` is "md" or "html".
@@ -744,13 +730,15 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def related_documents(
-        doc_id: int, direction: str = "both", store: str | None = None,
+        doc_id: int, direction: str = "both", depth: int = 1, store: str | None = None,
         user: str | None = None, groups: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Documents linked from / to this one (direction: out | in | both). Gated for a private store."""
+        """Documents cross-referenced from / to this one over the relations graph. direction:
+        out (this doc links to) | in (links to this doc) | both; `depth` walks N hops (each row
+        carries its shortest `hops`). Gated for a private store."""
         try:
             return service.relations(
-                doc_id, direction, store=store, user=user,
+                doc_id, direction, depth=depth, store=store, user=user,
                 groups=set(groups) if groups else None,
             )
         except (PermissionError, ValueError):
@@ -931,11 +919,14 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/v1/relations/{doc_id}")
     def relations(
-        doc_id: int, request: Request, direction: str = "both", store: str | None = None
+        doc_id: int, request: Request, direction: str = "both", depth: int = 1,
+        store: str | None = None,
     ) -> list[dict[str, Any]]:
         user, groups = _read_identity(request)
         try:
-            return service.relations(doc_id, direction, store=store, user=user, groups=groups)
+            return service.relations(
+                doc_id, direction, depth=depth, store=store, user=user, groups=groups
+            )
         except PermissionError as err:
             raise HTTPException(status_code=403, detail=str(err)) from err
         except ValueError as err:

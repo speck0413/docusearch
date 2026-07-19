@@ -660,6 +660,29 @@ def _cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_related(args: argparse.Namespace) -> int:
+    """Documents cross-referenced from / to a doc over the relations graph (N-hop, §17)."""
+    cfg = config.load(Path(args.config))
+    _configure_logging(cfg)
+    with Store.open(cfg.paths.db_path) as store:
+        if store.get_document(args.doc_id) is None:
+            print(f"No document with id {args.doc_id}")
+            return 1
+        rows = store.related_documents(args.doc_id, args.direction, depth=args.depth)
+    if not rows:
+        print(
+            f"No related documents for doc {args.doc_id} "
+            f"(direction={args.direction}, depth={args.depth})."
+        )
+        return 0
+    for r in rows:
+        lt = f" [{r['link_type']}]" if r["link_type"] else ""
+        print(f"{r['hops']}·{str(r['direction']):<4} doc {r['doc_id']}: {r['title']}{lt}  ({r['path']})")
+    runlog.log("cli.related", doc_id=args.doc_id, direction=args.direction, depth=args.depth)
+    runlog.flush()
+    return 0
+
+
 def _self_heal_loop(cat: Catalog, minutes: int) -> None:  # pragma: no cover - lifetime loop
     """Periodically prune orphaned documents for the life of a long-running server."""
     while True:
@@ -882,6 +905,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_show.add_argument("--config", default="docusearch.yaml", help="config path")
     p_show.set_defaults(func=_cmd_show)
+
+    p_related = sub.add_parser(
+        "related", help="documents cross-referenced from/to a doc over the relations graph (N-hop)"
+    )
+    p_related.add_argument("doc_id", type=int, help="document id")
+    p_related.add_argument(
+        "--direction", choices=("out", "in", "both"), default="both",
+        help="out=this doc links to · in=links to this doc · both",
+    )
+    p_related.add_argument("--depth", type=int, default=1, help="walk N hops (default 1)")
+    p_related.add_argument("--config", default="docusearch.yaml", help="config path")
+    p_related.set_defaults(func=_cmd_related)
 
     p_serve = sub.add_parser("serve", help="run the REST + MCP server (Phase 3)")
     p_serve.add_argument("--config", default="docusearch.yaml", help="config path")
