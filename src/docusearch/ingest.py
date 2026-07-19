@@ -21,6 +21,7 @@ Public surface (grows through Phase 1):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import os
@@ -788,6 +789,74 @@ def extract_md(data: bytes) -> ExtractedDoc:
     return ExtractedDoc(title=title, segments=segments, links=links, images=images)
 
 
+def _linearize_pptx_table(table: object) -> str:
+    """Linearize a PPTX table to pipe-delimited rows (matching the HTML/DOCX table shape)."""
+    rows: list[str] = []
+    for row in table.rows:  # type: ignore[attr-defined]
+        cells = [_clean(cell.text) for cell in row.cells]
+        if any(cells):
+            rows.append(" | ".join(cells))
+    return "\n".join(rows)
+
+
+def _pptx_add_image(shape: object, heading_path: str, images: list[ImageRef]) -> None:
+    """Retain a picture shape's bytes (R-ING-6). Alt text comes from the shape's descr / name."""
+    try:
+        img = shape.image  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - non-picture or unreadable blob: skip, don't abort the slide
+        return
+    alt = ""
+    with contextlib.suppress(Exception):
+        descr = shape._element.xpath(".//p:cNvPr/@descr")  # type: ignore[attr-defined] # noqa: SLF001
+        alt = _clean(descr[0]) if descr else _clean(getattr(shape, "name", "") or "")
+    images.append(
+        ImageRef(src="", alt=alt, caption="", heading_path=heading_path,
+                 data=img.blob, ext=(img.ext or "png")),
+    )
+
+
+def extract_pptx(data: bytes) -> ExtractedDoc:
+    """Extract slides from a PPTX (§7.3, Phase 6 / GATE 6): each slide's title → a level-1 heading,
+    body text frames → ``body``, **speaker notes** → ``body``, tables → ``table`` (linearized), and
+    pictures retained with their bytes (R-ING-6). The slide number anchors the heading path so a
+    citation points at the right slide. python-pptx is the ``[pptx]`` extra, imported lazily."""
+    from pptx import Presentation  # lazy: only when a PPTX is parsed
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    prs = Presentation(io.BytesIO(data))
+    segments: list[Segment] = []
+    images: list[ImageRef] = []
+    for idx, slide in enumerate(prs.slides, start=1):
+        title_shape = slide.shapes.title
+        title = _clean(title_shape.text) if title_shape is not None else ""
+        hp = _heading_path([(1, f"Slide {idx}: {title}" if title else f"Slide {idx}")])
+        if title:
+            segments.append(Segment("body", title, hp))
+        for shape in slide.shapes:
+            if title_shape is not None and shape == title_shape:
+                continue
+            if getattr(shape, "has_table", False):
+                table_text = _linearize_pptx_table(shape.table)
+                if table_text:
+                    segments.append(Segment("table", table_text, hp))
+            elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                _pptx_add_image(shape, hp, images)
+            elif getattr(shape, "has_text_frame", False):
+                text = _clean(shape.text_frame.text)
+                if text:
+                    segments.append(Segment("body", text, hp))
+        if slide.has_notes_slide:
+            notes = _clean(slide.notes_slide.notes_text_frame.text)
+            if notes:
+                nhp = _heading_path([(1, f"Slide {idx}: {title}" if title else f"Slide {idx}"),
+                                     (2, "Speaker notes")])
+                segments.append(Segment("body", notes, nhp))
+    title = _clean(str(prs.core_properties.title or ""))
+    if not title and segments:
+        title = _clean(segments[0].text.splitlines()[0])[:200]
+    return ExtractedDoc(title=title, segments=segments, images=images)
+
+
 def extract_document(
     path: Path,
     ext: str,
@@ -809,6 +878,8 @@ def extract_document(
         return extract_docx(path.read_bytes())
     if fmt in ("md", "markdown"):
         return extract_md(path.read_bytes())
+    if fmt == "pptx":
+        return extract_pptx(path.read_bytes())
     html = path.read_bytes().decode("utf-8", errors="replace")
     return extract_html(
         html, content_selector=content_selector, strip_selectors=list(strip_selectors)
