@@ -857,6 +857,52 @@ def extract_pptx(data: bytes) -> ExtractedDoc:
     return ExtractedDoc(title=title, segments=segments, images=images)
 
 
+def extract_xlsx(data: bytes) -> ExtractedDoc:
+    """Extract every sheet of an XLSX (§7.3, Phase 6 / GATE 6): each sheet → a level-1 heading and
+    its rows linearized to pipe-delimited ``table`` text (matching the HTML/DOCX/PPTX table shape),
+    with **merged cells expanded** from their top-left value, **cell comments** captured, and
+    **cached values** used for formulas (``data_only``). The locator is ``Sheet!A1`` (the sheet's
+    first populated cell) so a citation points at the sheet. Indexes **all** sheets — specs,
+    schedules, data, bump/ball maps. openpyxl is the ``[xlsx]`` extra, imported lazily."""
+    from openpyxl import load_workbook  # lazy: only when an XLSX is parsed
+
+    wb = load_workbook(io.BytesIO(data), data_only=True)
+    segments: list[Segment] = []
+    comments: list[str] = []
+    for ws in wb.worksheets:
+        sheet = ws.title
+        merged: dict[tuple[int, int], object] = {}
+        for rng in ws.merged_cells.ranges:  # fill each merged range from its top-left value
+            top_left = ws.cell(rng.min_row, rng.min_col).value
+            for r in range(rng.min_row, rng.max_row + 1):
+                for c in range(rng.min_col, rng.max_col + 1):
+                    merged[(r, c)] = top_left
+        rows_text: list[str] = []
+        anchor = ""
+        for row in ws.iter_rows():
+            cells: list[str] = []
+            for cell in row:
+                value = merged.get((cell.row, cell.column), cell.value)
+                text = "" if value is None else str(value).strip()  # trim every cell value
+                cells.append(text)
+                if cell.comment is not None:
+                    comments.append(f"{sheet}!{cell.coordinate}: {_clean(cell.comment.text)}")
+                if text and not anchor:
+                    anchor = f"{sheet}!{cell.coordinate}"
+            while cells and cells[-1] == "":  # drop trailing empty cells
+                cells.pop()
+            if cells:
+                rows_text.append(" | ".join(cells))
+        if rows_text:
+            segments.append(Segment("table", "\n".join(rows_text), anchor or f"{sheet}!A1"))
+    if comments:
+        segments.append(Segment("body", "\n".join(comments), "comments"))
+    title = _clean(str(wb.properties.title or ""))
+    if not title and wb.worksheets:
+        title = _clean(wb.worksheets[0].title)
+    return ExtractedDoc(title=title, segments=segments)
+
+
 def extract_document(
     path: Path,
     ext: str,
@@ -880,6 +926,8 @@ def extract_document(
         return extract_md(path.read_bytes())
     if fmt == "pptx":
         return extract_pptx(path.read_bytes())
+    if fmt == "xlsx":
+        return extract_xlsx(path.read_bytes())
     html = path.read_bytes().decode("utf-8", errors="replace")
     return extract_html(
         html, content_selector=content_selector, strip_selectors=list(strip_selectors)
