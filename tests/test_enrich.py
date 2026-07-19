@@ -88,3 +88,29 @@ def test_gotcha_tag_prefixes_text_bm25_visible() -> None:
     tagged = enrich.gotcha_tag_text("do NOT power off mid-write")
     assert tagged.startswith("[GOTCHA]") and "power off" in tagged  # prefix + original text
     assert enrich.gotcha_tag_text("[GOTCHA] already tagged") == "[GOTCHA] already tagged"  # idempotent
+
+
+def test_propose_rules_parses_claude_json() -> None:
+    import json
+
+    def fake_runner(argv: list[str]) -> tuple[int, str, str]:
+        assert "-p" in argv and "--output-format" in argv  # a headless JSON claude call
+        reply = json.dumps(
+            {"gotcha_patterns": [{"pattern": r"do NOT", "label": "warning"}], "notes": "H1>H2."}
+        )
+        return 0, json.dumps({"result": reply, "is_error": False}), ""
+
+    rules = enrich.propose_rules(["doc one", "doc two"], model="m", runner=fake_runner)
+    assert rules.approved is False and rules.sampled == 2
+    assert rules.gotcha_patterns == [enrich.GotchaPattern(r"do NOT", "warning")]
+    assert "H1>H2" in rules.notes
+
+
+def test_propose_rules_raises_on_cli_failure() -> None:
+    import pytest
+
+    def failing(argv: list[str]) -> tuple[int, str, str]:
+        return 1, "", "claude: not found"
+
+    with pytest.raises(enrich.EnrichError):
+        enrich.propose_rules(["doc"], model="m", runner=failing)

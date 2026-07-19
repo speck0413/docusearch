@@ -8,14 +8,22 @@ the temperature-0 Claude backend from ``vision.py``.
 
 from __future__ import annotations
 
+import json
 import random
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 GOTCHA_PREFIX = "[GOTCHA]"
+
+Runner = Callable[[list[str]], tuple[int, str, str]]  # argv -> (returncode, stdout, stderr)
+
+
+class EnrichError(Exception):
+    """Pre-flight / enrichment failure with a one-line, actionable message."""
 
 
 @dataclass(frozen=True)
@@ -100,6 +108,87 @@ def match_gotcha(text: str, patterns: list[GotchaPattern]) -> str | None:
 def gotcha_tag_text(text: str) -> str:
     """Prefix a chunk's text with the BM25-visible ``[GOTCHA]`` marker (R-ING-8). Idempotent."""
     return text if text.startswith(GOTCHA_PREFIX) else f"{GOTCHA_PREFIX} {text}"
+
+
+_PROPOSE_PROMPT = """You are proposing pre-flight ingestion rules for a documentation corpus. Below
+are excerpts from a stratified sample of the documents. Study them and propose:
+1. GOTCHA regexes — patterns that mark a passage as a caution/pitfall/deprecation an engineer must
+   not miss (e.g. warnings, "do not", deprecations, known-issues). Prefer a few precise regexes over
+   many loose ones. Each needs a short lowercase `label`.
+2. NOTES — brief observations about the document structure (heading depth, code blocks, tables) that
+   would help chunking. Plain text, a few sentences.
+
+Reply with ONLY a JSON object: {"gotcha_patterns": [{"pattern": "<regex>", "label": "<label>"}, ...],
+"notes": "<text>"} and no other prose.
+
+--- SAMPLED DOCUMENT EXCERPTS ---
+%s
+"""
+
+
+def propose_rules(
+    doc_texts: list[str],
+    *,
+    model: str = "claude-opus-4-8",
+    runner: Runner | None = None,
+    cli: str = "claude",
+    timeout: float = 300.0,
+    excerpt_chars: int = 2000,
+) -> PreflightRules:
+    """Ask Claude to propose gotcha regexes + chunking notes from the sampled document text
+    (R-ING-7). Returns an **unapproved** ``PreflightRules`` (Stephen reviews + approves the file
+    before it runs). ``runner`` is injectable for tests; by default it shells out to the ``claude``
+    CLI headless (``-p … --output-format json``) — the operator's Claude Code login, no API key."""
+    excerpts = "\n\n---\n\n".join(t[:excerpt_chars] for t in doc_texts)
+    argv = [cli, "-p", _PROPOSE_PROMPT % excerpts, "--model", model, "--output-format", "json"]
+
+    def _default_runner(a: list[str]) -> tuple[int, str, str]:
+        import subprocess  # lazy: only when actually calling Claude
+
+        proc = subprocess.run(a, capture_output=True, text=True, timeout=timeout)  # noqa: S603
+        return proc.returncode, proc.stdout, proc.stderr
+
+    run = runner or _default_runner
+    try:
+        code, out, err = run(argv)
+    except Exception as exc:  # noqa: BLE001 - missing binary / timeout / OSError
+        raise EnrichError(f"claude CLI invocation failed: {type(exc).__name__}: {exc}") from exc
+    if code != 0:
+        raise EnrichError(f"claude CLI failed (exit {code}): {(err or out).strip()[:200]}")
+
+    import contextlib
+
+    text = out.strip()
+    env = None
+    with contextlib.suppress(json.JSONDecodeError):  # `--output-format json` -> result envelope
+        env = json.loads(text)
+    if isinstance(env, dict) and "result" in env:
+        if env.get("is_error"):
+            raise EnrichError(f"claude CLI returned an error: {str(env['result'])[:200]}")
+        text = str(env["result"])
+    try:
+        payload = json.loads(_strip_code_fence(text))
+    except json.JSONDecodeError as exc:
+        raise EnrichError(f"could not parse rule proposal as JSON: {text[:200]}") from exc
+    patterns = [
+        GotchaPattern(str(g["pattern"]), str(g.get("label", "")))
+        for g in (payload.get("gotcha_patterns") or [])
+        if isinstance(g, dict) and g.get("pattern")
+    ]
+    return PreflightRules(
+        approved=False, gotcha_patterns=patterns,
+        notes=str(payload.get("notes", "")), sampled=len(doc_texts),
+    )
+
+
+def _strip_code_fence(text: str) -> str:
+    """Peel a ```json … ``` fence if the model wrapped its JSON in one."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[-1] if "\n" in t else t
+        if t.endswith("```"):
+            t = t[: t.rfind("```")]
+    return t.strip()
 
 
 def stratified_sample(paths: list[Path], n: int, *, seed: int) -> list[Path]:
