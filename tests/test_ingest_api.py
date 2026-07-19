@@ -93,3 +93,17 @@ def test_zip_slip_is_rejected(tmp_path: Path) -> None:
         headers={"X-Docusearch-User": "mallory"},
     )
     assert r.status_code == 400 and "unsafe" in r.json()["detail"].lower()
+
+
+def test_feedback_is_recorded(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    r = client.post(
+        "/v1/feedback",
+        json={"text": "the SPI result was spot on", "doc_id": 1, "rating": 5},
+        headers={"X-Docusearch-User": "alice"},
+    )
+    assert r.status_code == 200 and r.json()["recorded"] is True
+    log = tmp_path / "t" / "feedback" / "feedback.jsonl"
+    assert log.is_file() and "spot on" in log.read_text() and "alice" in log.read_text()
+    # feedback also requires a username
+    assert client.post("/v1/feedback", json={"text": "anon"}).status_code == 401

@@ -199,6 +199,26 @@ class Service:
             "stores": [m.name for m in self.config.federation],
         }
 
+    def submit_feedback(
+        self, *, user: str, text: str, doc_id: int | None = None,
+        chunk_id: int | None = None, rating: int | None = None,
+    ) -> dict[str, Any]:
+        """Record a user's feedback as an append-only JSONL line under the config's ``tmp_dir``
+        (``feedback/feedback.jsonl``) — lightweight, persistent, reviewable."""
+        import json
+        from datetime import UTC, datetime
+
+        entry = {
+            "ts": datetime.now(UTC).isoformat(), "user": user, "text": text,
+            "doc_id": doc_id, "chunk_id": chunk_id, "rating": rating,
+        }
+        fb_dir = Path(self.config.paths.tmp_dir) / "feedback"
+        fb_dir.mkdir(parents=True, exist_ok=True)
+        with (fb_dir / "feedback.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        runlog.log("api.feedback", user=user, rating=rating)
+        return {"recorded": True, **entry}
+
     def _target_config(self, store: str | None) -> Config:
         """Resolve which store to ingest into: a named federation member (vendor / internal / user
         / acme …) or, with no name, this config's own single store."""
@@ -447,6 +467,13 @@ class IngestRequest(BaseModel):
     min_content_chars: int = 1
 
 
+class FeedbackRequest(BaseModel):
+    text: str  # the user's feedback
+    doc_id: int | None = None  # optional: which document/result it's about
+    chunk_id: int | None = None
+    rating: int | None = None  # optional thumbs / 1-5
+
+
 class EmbedRequest(BaseModel):
     texts: list[str] = []
 
@@ -644,6 +671,16 @@ def build_mcp(service: Service, config: Config) -> Any:
             return {"error": "INGEST", "message": str(err)}
 
     @mcp.tool()
+    def submit_feedback(
+        text: str, user: str, doc_id: int | None = None, chunk_id: int | None = None,
+        rating: int | None = None,
+    ) -> dict[str, Any]:
+        """Record a user's feedback (attributed to `user`)."""
+        return service.submit_feedback(
+            user=user, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating
+        )
+
+    @mcp.tool()
     def build_report(spec: dict[str, Any], fmt: str = "md") -> dict[str, Any]:
         """Render a cited report from an answer spec; verifies citations, refuses hallucinated ones."""
         try:
@@ -782,6 +819,14 @@ def create_app(config: Config) -> FastAPI:
         if not user:
             raise HTTPException(status_code=401, detail="X-Docusearch-User header required to ingest")
         return user
+
+    @app.post("/v1/feedback")
+    def feedback_route(req: FeedbackRequest, request: Request) -> dict[str, Any]:
+        """Record user feedback (attributed to X-Docusearch-User)."""
+        user = _require_user(request)
+        return service.submit_feedback(
+            user=user, text=req.text, doc_id=req.doc_id, chunk_id=req.chunk_id, rating=req.rating
+        )
 
     @app.post("/v1/ingest")
     def ingest_route(req: IngestRequest, request: Request) -> dict[str, Any]:
