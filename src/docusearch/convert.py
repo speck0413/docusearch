@@ -32,7 +32,7 @@ from .ingest import ImageRef, Segment, extract_html
 if TYPE_CHECKING:
     from .config import SourceConfig
 
-_SUPPORTED = ("pdf", "docx", "md")
+_SUPPORTED = ("pdf", "docx", "md", "pptx", "xlsx")
 # Max embedded-image box on a US-letter page (612x792 pt) inside 1" margins, with headroom so a
 # tall diagram (e.g. 450x990) is scaled down to fit instead of raising reportlab's LayoutError.
 _PDF_IMG_MAX_W = 450.0
@@ -297,7 +297,89 @@ def _render_bytes(
         return html_to_docx_bytes(html, **kw)  # type: ignore[arg-type]
     if fmt == "md":
         return html_to_md_bytes(html, **kw)  # type: ignore[arg-type]
+    if fmt == "pptx":
+        return html_to_pptx_bytes(html, **kw)  # type: ignore[arg-type]
+    if fmt == "xlsx":
+        return html_to_xlsx_bytes(html, **kw)  # type: ignore[arg-type]
     raise ValueError(f"unsupported target format {fmt!r}; supported: {_SUPPORTED}")
+
+
+def html_to_pptx_bytes(
+    html: str, *, content_selector: str = "", strip_selectors: Sequence[str] = (),
+    base_path: Path | str | None = None,
+) -> bytes:
+    """Render one HTML document to a PPTX (python-pptx) — the derived-corpus writer for the
+    format-equivalence suite. Each heading path becomes a slide (title + its segment text as body);
+    tables + image alt/caption are emitted so the needle channel survives the round-trip."""
+    from pptx import Presentation
+
+    doc = extract_html(html, content_selector=content_selector, strip_selectors=list(strip_selectors))
+    prs = Presentation()
+    if doc.title:
+        prs.core_properties.title = doc.title
+        cover = prs.slides.add_slide(prs.slide_layouts[0])
+        cover.shapes.title.text = doc.title
+    buckets: dict[str, list[str]] = {}
+    order: list[str] = []
+    for kind, item in _doc_blocks(doc):
+        head = item.heading_path or doc.title or "Slide"  # type: ignore[attr-defined]
+        if head not in buckets:
+            buckets[head] = []
+            order.append(head)
+        if kind == "seg":
+            buckets[head].append(cast(Segment, item).text.replace("\n", " "))
+        else:
+            img = cast(ImageRef, item)
+            cap = " ".join(t for t in (img.alt, img.caption) if t).strip()
+            if cap:
+                buckets[head].append(cap)
+    for head in order:
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = head
+        slide.placeholders[1].text = "\n".join(buckets[head]) or " "
+    if not order:
+        prs.slides.add_slide(prs.slide_layouts[1]).shapes.title.text = doc.title or "(no text)"
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def html_to_xlsx_bytes(
+    html: str, *, content_selector: str = "", strip_selectors: Sequence[str] = (),
+    base_path: Path | str | None = None,
+) -> bytes:
+    """Render one HTML document to an XLSX (openpyxl) — the derived-corpus writer for the
+    format-equivalence suite. One sheet; heading paths + segment text become rows; image alt/caption
+    emitted so the needle channel survives."""
+    from openpyxl import Workbook
+
+    doc = extract_html(html, content_selector=content_selector, strip_selectors=list(strip_selectors))
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "content"
+    if doc.title:
+        wb.properties.title = doc.title
+        ws.append([doc.title])
+    last_heading: str | None = None
+    for kind, item in _doc_blocks(doc):
+        head = item.heading_path  # type: ignore[attr-defined]
+        if head and head != last_heading:
+            ws.append([head])
+            last_heading = head
+        if kind == "seg":
+            for line in cast(Segment, item).text.splitlines() or [""]:
+                if line.strip():
+                    ws.append([line.strip()])
+        else:
+            img = cast(ImageRef, item)
+            cap = " ".join(t for t in (img.alt, img.caption) if t).strip()
+            if cap:
+                ws.append([cap])
+    if ws.max_row == 0:
+        ws.append([doc.title or "(no text)"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 @dataclass
