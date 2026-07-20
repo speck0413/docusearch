@@ -19,9 +19,11 @@ from pathlib import Path
 
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
-# A format whose file extension differs from its name. `html-slide` is a slide deck rendered as
-# one self-contained HTML file, so it must land as .html or a browser will not open it.
-EXTENSIONS = {"html-slide": "html"}
+# A format whose filename cannot be derived from its name alone: (extension, name discriminator).
+# `html-slide` is a deck rendered as one self-contained HTML file, so it must land as .html or a
+# browser will not open it — but then it would collide with the plain html report of the same
+# spec and silently overwrite it, so the stem carries a marker too.
+_FILENAMES = {"html-slide": ("html", "-slides")}
 _KEEP_FOREVER = -1
 
 
@@ -31,6 +33,15 @@ def slug(title: str, *, max_len: int = 60) -> str:
     folded = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
     stem = _SLUG_STRIP.sub("-", folded.lower()).strip("-")[:max_len].strip("-")
     return stem or "report"
+
+
+def filename(title: str, run_id: str, fmt: str) -> str:
+    """The file a report of this title/run/format is written as.
+
+    Two formats that share an extension must never share a name: rendering the same spec to both
+    `html` and `html-slide` has to leave two files, not one silently overwritten."""
+    ext, marker = _FILENAMES.get(fmt, (fmt, ""))
+    return f"{slug(title)}-{run_id}{marker}.{ext}"
 
 
 def reports_dir(tmp_dir: Path | str) -> Path:

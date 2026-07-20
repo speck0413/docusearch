@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import re
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from . import citations
@@ -278,7 +279,7 @@ def html_to_pdf(html: str) -> bytes:
             "PDF export needs the [export] extra: pip install 'docusearch[export]' "
             "&& python -m playwright install chromium"
         ) from err
-    try:
+    def render() -> bytes:
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
             try:
@@ -297,6 +298,14 @@ def html_to_pdf(html: str) -> bytes:
                 )
             finally:
                 browser.close()
+
+    try:
+        # Playwright's SYNC api refuses to run inside a running asyncio loop, and the server is
+        # async — calling it on the request thread fails with a bare "Error" that says nothing.
+        # A worker thread has no loop of its own, so this works from both the async server and a
+        # plain synchronous caller like the CLI.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(render).result()
     except ExportDependencyError:
         raise
     except Exception as err:  # a missing browser download is the common case
