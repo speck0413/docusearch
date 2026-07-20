@@ -15,7 +15,6 @@ Public surface:
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -954,124 +953,60 @@ class Service:
         return path, _MEDIA_TYPES.get(ext, "application/octet-stream")
 
 
-def _hit_dict(hit: SearchHit, base_url: str) -> dict[str, Any]:
-    store_q = f"&store={hit.store}" if hit.store else ""
-    return {
-        "doc_id": hit.doc_id,
-        "chunk_id": hit.chunk_id,
-        "title": hit.title,
-        "path": hit.path,
-        "fmt": hit.fmt,
-        "locator": hit.locator,
-        "snippet": hit.snippet,
-        "score": hit.score,
-        "kind": hit.kind,
-        "images": hit.images,
-        "citation": hit.citation,
-        "store": hit.store,
-        "url": f"{base_url}/v1/documents/{hit.doc_id}?chunk={hit.chunk_id}{store_q}",
-        "embed_model_used": hit.embed_model_used,
-        "search_mode": hit.search_mode,
-    }
-
-
-# The MCP tool-output ceiling. A flat list of self-describing hits costs ~0.65 KB each, so the
-# batched searching the skill asks for (8 queries x top_k=10) overran the client's cap, which then
-# spilled the result to a temp file and burned the agent's run parsing it. Hits are compacted below
-# and the payload is trimmed to fit this budget no matter the top_k or snippet length.
-_MCP_PAYLOAD_BUDGET = 24_000  # bytes of compact JSON
-# Batched searching is what overruns the cap, so a wide batch buys depth per query back down.
+# `search_docs` replies are read by a model through a tool-output cap, so the shape is optimised
+# for density: a flat list of self-describing hits cost ~0.65 KB each and a normal batched search
+# (8 queries x top_k=10) overran the cap at 52 KB, which spilled the reply to a temp file and burned
+# the agent's run parsing it. The cost was duplication, not content — 80 hits spanned 16 documents.
+# Three things collapse it, with no information lost and nothing truncated:
+#   * per-document title/path/fmt are stated once in `documents`, not on every hit;
+#   * hits are rows under a declared `hit_fields` header, so no key name repeats per hit;
+#   * anything derivable is stated once — the URL prefix, the embed model, the search mode.
+# `cite` leads every row rather than a (doc_id, chunk_id) pair: it is the exact string the model
+# must emit, so it cannot be mis-paired the way two positional integers can (R-CIT-1).
 _MCP_BATCH_QUERIES = 4  # above this many queries in one call…
-_MCP_BATCH_TOP_K = 5  # …top_k is clamped to this
-_MCP_SNIPPET_FLOOR = 600  # last-resort snippet clamp, only when trimming hits isn't enough
+_MCP_BATCH_TOP_K = 5  # …top_k clamps to this: a wide batch trades depth for breadth
 
 
-def _compact_hit(hit: SearchHit, snippet_cap: int | None = None) -> dict[str, Any]:
-    """One hit minus everything hoisted to the response or the ``documents`` map. The snippet is
-    normally kept whole — it averages ~145 B and is the one field the model actually reads;
-    ``snippet_cap`` is a last resort for a runaway snippet that alone overruns the budget."""
-    snippet = hit.snippet
-    if snippet_cap is not None and len(snippet) > snippet_cap:
-        snippet = snippet[:snippet_cap] + " …"
-    out: dict[str, Any] = {
-        "doc_id": hit.doc_id,
-        "chunk_id": hit.chunk_id,
-        "citation": hit.citation,
-        "locator": hit.locator,
-        "kind": hit.kind,
-        "snippet": snippet,
-        "score": hit.score,
-    }
-    if hit.store:  # federation only — omitted rather than repeated as ""
-        out["store"] = hit.store
-    if hit.images:
-        out["images"] = hit.images
-    return out
+def _doc_key(hit: SearchHit) -> str:
+    """Key into the ``documents`` map. Federated members have independent doc_id sequences, so a
+    bare id would collide across stores and mis-attribute a title; the store qualifies it."""
+    return f"{hit.store}:{hit.doc_id}" if hit.store else str(hit.doc_id)
 
 
-def _compact_search_payload(
+def _search_payload(
     results: Sequence[Sequence[SearchHit]], base_url: str, model_used: str, mode: str,
 ) -> dict[str, Any]:
-    """The MCP ``search_docs`` response: per-document fields deduplicated into ``documents``,
-    per-response fields at the top level, and a hard ceiling of ``_MCP_PAYLOAD_BUDGET``
-    bytes. Over budget, every query keeps the same number of its best hits so no query
-    loses its slot, and ``truncated`` tells the agent to lower ``top_k`` (R-API-1)."""
+    """The `search_docs` reply: ranked rows plus a document table to join them against.
 
-    def build(keep: int | None, snippet_cap: int | None = None) -> dict[str, Any]:
-        kept = [list(lst if keep is None else lst[:keep]) for lst in results]
-        documents: dict[str, Any] = {}
-        for lst in kept:
-            for hit in lst:
-                key = str(hit.doc_id)
-                if key not in documents:
-                    store_q = f"?store={hit.store}" if hit.store else ""
-                    documents[key] = {
-                        "title": hit.title,
-                        "path": hit.path,
-                        "fmt": hit.fmt,
-                        "url": f"{base_url}/v1/documents/{hit.doc_id}{store_q}",
-                    }
-        return {
-            "documents": documents,
-            "results": [[_compact_hit(h, snippet_cap) for h in lst] for lst in kept],
-            "embed_model_used": model_used,
-            "search_mode": mode,
-        }
+    ``score`` is dropped — rows are already ranked best-first, so it is rank stated twice — and so
+    is ``images``, which the search path never populates."""
+    federated = any(hit.store for lst in results for hit in lst)
+    documents: dict[str, list[str]] = {}
+    for lst in results:
+        for hit in lst:
+            documents.setdefault(_doc_key(hit), [hit.title, hit.path, hit.fmt])
 
-    def size(payload: dict[str, Any]) -> int:
-        return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    def row(hit: SearchHit) -> list[str]:
+        cells = [hit.citation, _doc_key(hit), hit.locator, hit.kind, hit.snippet]
+        return cells if federated else cells[:1] + cells[2:]
 
-    payload = build(None)
-    if size(payload) <= _MCP_PAYLOAD_BUDGET:
-        return payload
-
-    total = sum(len(lst) for lst in results)
-    longest = max(len(lst) for lst in results)
-    low, high = 1, longest  # largest per-query keep that still fits
-    while low < high:
-        mid = (low + high + 1) // 2
-        if size(build(mid)) <= _MCP_PAYLOAD_BUDGET:
-            low = mid
-        else:
-            high = mid - 1
-    payload = build(low)
-    note: dict[str, Any] = {}
-    if size(payload) > _MCP_PAYLOAD_BUDGET:  # one hit per query, and the snippets alone overrun it
-        cap = _MCP_SNIPPET_FLOOR
-        while cap > 80 and size(build(low, cap)) > _MCP_PAYLOAD_BUDGET:
-            cap //= 2
-        payload = build(low, cap)
-        note["snippet_chars"] = cap
-    note.update(
-        kept_per_query=low,
-        dropped=total - sum(len(lst) for lst in payload["results"]),
-        hint=(
-            f"payload capped at {_MCP_PAYLOAD_BUDGET // 1000} KB; lower top_k or send fewer "
-            "queries per call to see more per query"
+    fields = ["cite", "doc", "locator", "kind", "snippet"]
+    return {
+        "hit_fields": fields if federated else [f for f in fields if f != "doc"],
+        "results": [[row(hit) for hit in lst] for lst in results],
+        "doc_fields": ["title", "path", "fmt"],
+        "documents": documents,
+        "reading": (
+            "Each row is one hit, ranked best-first, with the columns named by `hit_fields`. "
+            "`cite` is the citation to quote verbatim as [D:doc#chunk]; join a row to its document "
+            + ("via its `doc` column" if federated else "on the doc part of `cite`")
+            + " -> `documents[key]`, whose columns are named by `doc_fields`. "
+            "Full text: get_document(doc_id). Open in a browser: url_base + doc_id."
         ),
-    )
-    payload["truncated"] = note
-    return payload
+        "url_base": f"{base_url}/v1/documents/",
+        "embed_model_used": model_used,
+        "search_mode": mode,
+    }
 
 
 class SearchRequest(BaseModel):
@@ -1258,13 +1193,19 @@ knowledge of the domain.
 - `list_stores()` -> the document stores you can search. In a FEDERATION (e.g. python / rust /
   internal) you may scope any search to a subset by name. Call this first if the user names a store.
 - `search_docs(queries, top_k=10, prefix=False, stores=None, bm25_only=False, roles=None)` ->
-  `{documents, results, embed_model_used, search_mode}`. ALWAYS pass a LIST of query phrasings
-  (batched). Each per-query hit is {doc_id, chunk_id, citation, locator, kind, snippet, score};
-  **title/path/fmt/url live once per document in `documents` — look them up by `doc_id`** (that
-  deduplication is what keeps a batched reply inside your tool-output cap). Batches over 4 queries
-  clamp top_k to 5; if `truncated` is present the reply hit its byte budget — narrow the batch.
-  `stores=["internal"]` searches only those members; omit for all. `prefix` = partial-term matching;
-  `bm25_only` = skip vectors; `roles` = cooperative filter.
+  ALWAYS pass a LIST of query phrasings (batched). The reply is a table, stated once rather than
+  repeated per hit — read it like this:
+    * `results[i]` = the rows for query i, ranked best-first. Each row's columns are named by
+      `hit_fields` (normally `cite, locator, kind, snippet`).
+    * `cite` is the citation — quote it verbatim as `[D:doc#chunk]`, never rebuild it by hand.
+    * A row's document: take the doc part of `cite` (`D:12#5` -> `12`) and look up
+      `documents["12"]`, whose columns are named by `doc_fields` (`title, path, fmt`). In a
+      federation each row also has a `doc` column — use that as the key instead, because member
+      stores number their documents independently.
+    * Full chunk text: `get_document(doc_id)`. Browser link: `url_base` + doc_id.
+  Batches over 4 queries clamp top_k to 5. `stores=["internal"]` searches only those members; omit
+  for all. `prefix` = partial-term matching; `bm25_only` = skip vectors; `roles` = cooperative
+  filter.
 - `get_document(doc_id, chunk=None)` -> full chunk text — use it to fill a card with real code / a
   full procedure, not just a snippet.
 - `related_documents(doc_id, direction="both", depth=1)` -> cross-referenced docs (follow leads);
@@ -1350,7 +1291,7 @@ def build_mcp(service: Service, config: Config) -> Any:
             )
         except (ValueError, PermissionError) as err:
             return {"error": "ACCESS", "message": str(err), "results": []}
-        return _compact_search_payload(results, base, model_used, mode)
+        return _search_payload(results, base, model_used, mode)
 
     @mcp.tool()
     def get_document(
@@ -1755,12 +1696,8 @@ def create_app(config: Config) -> FastAPI:
                 raise HTTPException(status_code=403, detail=str(err)) from err
         base = str(request.base_url).rstrip("/")
         runlog.log("api.search", queries=len(results), mode=mode)
-        return {
-            "results": [[_hit_dict(h, base) for h in lst] for lst in results],
-            "embed_model_used": model_used,
-            "search_mode": mode,
-            "run_id": runlog.RUN_ID,
-        }
+        # one shape for REST and MCP — the gate has to prove the two paths agree (R-API-1)
+        return {**_search_payload(results, base, model_used, mode), "run_id": runlog.RUN_ID}
 
     @app.post("/v1/embed")
     def embed_route(req: EmbedRequest) -> dict[str, Any]:
