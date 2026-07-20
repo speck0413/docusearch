@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import re
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 from . import citations
 
@@ -69,6 +70,7 @@ def export_report(
     classification: str = "Confidential",
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None = None,
     html: str = "",  # the rendered HTML report - required for fmt="pdf", ignored otherwise
+    pptx_template: str = "",  # a .pptx/.potx whose theme + layouts the deck inherits
 ) -> bytes:
     """Render the report to ``fmt`` bytes. Raises ``CitationError`` if any citation references a
     ``(doc_id, chunk_id)`` outside ``evidence`` (R-CIT-1)."""
@@ -83,7 +85,7 @@ def export_report(
             f"report cites {len(violations)} chunk(s) outside its evidence set: "
             + ", ".join(f"D:{c.doc_id}#{c.chunk_id}" for c in violations[:10])
         )
-    refs = _reference_lines(evidence, ref_targets)
+    secs, refs = _numbered(title, subtitle, secs, ref_targets, evidence)
     meta = [x for x in (f"Request: {request}" if request else "",
                         f"For: {requested_by}" if requested_by else "",
                         f"Model: {model}" if model else "",
@@ -91,7 +93,7 @@ def export_report(
     if fmt == "docx":
         return _to_docx(title, subtitle, secs, meta, refs)
     if fmt == "pptx":
-        return _to_pptx(title, subtitle, secs, meta, refs)
+        return _to_pptx(title, subtitle, secs, meta, refs, template=pptx_template)
     if fmt == "xlsx":
         return _to_xlsx(title, secs, meta, refs)
     if not html:
@@ -101,16 +103,47 @@ def export_report(
     return html_to_pdf(html)
 
 
-def _reference_lines(
-    evidence: set[tuple[int, int]], ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None
-) -> list[str]:
-    out: list[str] = []
-    for (doc_id, chunk_id) in sorted(evidence):
-        label = ""
-        if ref_targets and (doc_id, chunk_id) in ref_targets:
-            label = ref_targets[(doc_id, chunk_id)][1]
-        out.append(f"[D:{doc_id}#{chunk_id}] {label}".rstrip())
-    return out
+def _numbered(
+    title: str,
+    subtitle: str,
+    secs: list[tuple[str, str]],
+    ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None,
+    evidence: set[tuple[int, int]],
+    base_url: str = "",
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Bodies with inline citations turned into ``[1]`` markers, plus the numbered reference list.
+
+    Reuses the HTML/Markdown renderer's numbering so all six formats number identically
+    (R-REUSE-2). A reference names the real document — ``store - title - heading`` — and never a
+    bare ``D:<doc>#<chunk>``: that id is an internal key, and a report that shows one, or whose
+    references are ids instead of documents, is not acceptable output.
+    """
+    from . import report
+
+    numbering, ordered = report._collect_numbering([title, subtitle, *(b for _h, b in secs)])
+    bodies = [(head, report._cite_md(body, numbering)) for head, body in secs]
+    refs = [label for _href, label in report._references(ordered, base_url, ref_targets)]
+    # evidence that was supplied but never cited still belongs in the list, after the cited ones
+    cited = {(c.doc_id, c.chunk_id) for c in ordered}
+    for key in sorted(evidence - cited):
+        if ref_targets and key in ref_targets:
+            refs.append(ref_targets[key][1])
+    return bodies, [xml_safe(r) for r in refs]
+
+
+def _styled(paragraph: object, *names: str) -> None:
+    """Apply the first BUILT-IN style that exists in this document.
+
+    Reports are styled by NAME only — no hardcoded fonts, sizes or colours — so a corporate
+    .dotx or theme restyles the whole report on drop-in. A template need not define every
+    built-in and python-docx raises on an unknown style, so fall through and finally leave the
+    default rather than failing an export over cosmetics."""
+    for name in names:
+        try:
+            paragraph.style = name  # type: ignore[attr-defined]
+            return
+        except (KeyError, ValueError):
+            continue
 
 
 def _to_docx(
@@ -121,42 +154,84 @@ def _to_docx(
     doc = Document()
     doc.add_heading(xml_safe(title), 0)
     if subtitle:
-        doc.add_paragraph(xml_safe(subtitle))
-    doc.add_paragraph(_AI_WARNING)
+        _styled(doc.add_paragraph(xml_safe(subtitle)), "Subtitle", "Body Text")
+    _styled(doc.add_paragraph(_AI_WARNING), "Intense Quote", "Quote", "Body Text")
     for line in meta:
-        doc.add_paragraph(xml_safe(line))
+        _styled(doc.add_paragraph(xml_safe(line)), "Caption", "Body Text")
     for heading, bdy in secs:
         if heading:
             doc.add_heading(xml_safe(heading), level=1)
         for para in _paragraphs(bdy):
-            doc.add_paragraph(para)
+            _styled(doc.add_paragraph(para), "Body Text")
     if refs:
         doc.add_heading("References", level=1)
-        for r in refs:
-            doc.add_paragraph(xml_safe(r), style="List Bullet")
+        for i, r in enumerate(refs, 1):
+            _styled(doc.add_paragraph(f"{i}. {r}"), "Body Text")
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
 
 
+def _layout(prs: Any, *names: str, fallback: int) -> Any:
+    """A slide layout by NAME, falling back to an index.
+
+    Every template orders its layouts differently, so taking ``slide_layouts[1]`` and hoping is
+    how a themed deck comes out wrong. Match the standard names first."""
+    wanted = {n.lower() for n in names}
+    for layout in prs.slide_layouts:
+        if layout.name.lower() in wanted:
+            return layout
+    return prs.slide_layouts[fallback if fallback < len(prs.slide_layouts) else 0]
+
+
+def _body_placeholder(slide: Any) -> Any:
+    """The slide's content placeholder, found by TYPE not index.
+
+    ``placeholders[1]`` is the body only by convention; in a real template that index may be a
+    picture, a date, or absent entirely."""
+    from pptx.enum.shapes import PP_PLACEHOLDER
+
+    holders = [p for p in slide.placeholders if p != slide.shapes.title]
+    for kind in (PP_PLACEHOLDER.BODY, PP_PLACEHOLDER.OBJECT, PP_PLACEHOLDER.SUBTITLE):
+        for holder in holders:
+            if holder.placeholder_format.type == kind:
+                return holder
+    return holders[0] if holders else None
+
+
 def _to_pptx(
-    title: str, subtitle: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str]
+    title: str, subtitle: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str],
+    *, template: str = "",
 ) -> bytes:
+    """Build the deck from a template's LAYOUTS and PLACEHOLDERS only.
+
+    Nothing here sets a font, colour or position, so pointing ``reports.pptx_template`` at any
+    deck — or applying a different theme in PowerPoint afterwards — restyles the whole thing.
+    With no template configured, python-pptx's default gives a clean Office look out of the box."""
     from pptx import Presentation
 
-    prs = Presentation()
-    cover = prs.slides.add_slide(prs.slide_layouts[0])
-    cover.shapes.title.text = xml_safe(title)
-    if cover.slide_layout.placeholders and len(cover.placeholders) > 1:
-        cover.placeholders[1].text = xml_safe(subtitle) or _AI_WARNING
+    prs = Presentation(template) if template else Presentation()
+    cover = prs.slides.add_slide(_layout(prs, "Title Slide", fallback=0))
+    if cover.shapes.title is not None:
+        cover.shapes.title.text = xml_safe(title)
+    sub = _body_placeholder(cover)
+    if sub is not None:
+        sub.text = xml_safe(subtitle) or _AI_WARNING
+    body_layout = _layout(prs, "Title and Content", "Title and Body", fallback=1)
     for heading, bdy in secs:
-        slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = xml_safe(heading) or xml_safe(title)
-        slide.placeholders[1].text = "\n".join(_paragraphs(bdy)) or " "
+        slide = prs.slides.add_slide(body_layout)
+        if slide.shapes.title is not None:
+            slide.shapes.title.text = xml_safe(heading) or xml_safe(title)
+        holder = _body_placeholder(slide)
+        if holder is not None:
+            holder.text = "\n".join(_paragraphs(bdy)) or " "
     if refs:
-        ref_slide = prs.slides.add_slide(prs.slide_layouts[1])
-        ref_slide.shapes.title.text = "References"
-        ref_slide.placeholders[1].text = "\n".join(xml_safe(r) for r in refs)
+        slide = prs.slides.add_slide(body_layout)
+        if slide.shapes.title is not None:
+            slide.shapes.title.text = "References"
+        holder = _body_placeholder(slide)
+        if holder is not None:
+            holder.text = "\n".join(f"{i}. {r}" for i, r in enumerate(refs, 1))
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()

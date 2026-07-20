@@ -286,6 +286,17 @@ SCHEMA: tuple[_Node, ...] = (
                     "and after each report is written."
                 ),
             ),
+            _Field(
+                "pptx_template",
+                "",
+                comment=(
+                    "A .pptx/.potx whose THEME and LAYOUTS every generated deck inherits —\n"
+                    "drop in your corporate template and reports match it. Reports set no\n"
+                    "fonts, colours or positions of their own, so swapping this (or applying\n"
+                    "another theme in PowerPoint afterwards) restyles the whole deck.\n"
+                    "Empty = a clean default Office look."
+                ),
+            ),
         ),
     ),
     _Section(
@@ -698,6 +709,7 @@ class RankingConfig:
 @dataclass(frozen=True)
 class ReportsConfig:
     retain_days: int
+    pptx_template: str
 
 
 @dataclass(frozen=True)
@@ -827,7 +839,10 @@ class Config:
                 rrf_k=int(se["rrf_k"]),
                 bm25_only=bool(se["bm25_only"]),
             ),
-            reports=ReportsConfig(retain_days=int(m["reports"]["retain_days"])),
+            reports=ReportsConfig(
+                retain_days=int(m["reports"]["retain_days"]),
+                pptx_template=str(m["reports"]["pptx_template"]),
+            ),
             serve=ServeConfig(
                 host=str(sv["host"]),
                 port=int(sv["port"]),

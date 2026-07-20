@@ -499,6 +499,7 @@ class Service:
                 classification=str(spec.get("classification", "Confidential")),
                 ref_targets=report.reference_targets(cfg.paths.db_path, evidence, base_url=base_url),
                 html=str(html),
+                pptx_template=cfg.reports.pptx_template,
             )
         return report.render_report(
             title=str(spec.get("title", "Report")),
