@@ -1,6 +1,6 @@
 # ============================================================
 # docusearch configuration
-# Generated 2026-07-17 by docusearch v0.1.0 — edit freely.
+# Generated 2026-07-20 by docusearch v0.1.0 — edit freely.
 # Every field is documented. Options are copy-paste ready.
 # ============================================================
 
@@ -12,6 +12,14 @@ mode: "standalone"
 
 # Only used when mode: client.
 server_url: "http://docs-server.local:8321"
+
+# What this store holds — routes search + which engine handles it (GATE 6).
+#   document : prose/docs (HTML/PDF/DOCX/MD/PPTX/XLSX) — full-text + hybrid search
+#   data     : primarily plottable data (STDF/WAT/tabular) — the analytics engine,
+#              tests still searchable but analysis (plots/audit/trend) is the point
+#   code     : source repos (Python/JS/TS/Go/Rust/Java/C/C++/C#/VBA) — parsed into
+#              searchable symbols (functions/classes) + a derived style guide (GATE 9)
+store_type: "document"
 
 paths:
   staging_dir: "./staging"  # mirrored sources + extracted images live here
@@ -39,6 +47,26 @@ sources:
     # Documented values: company | engineering | test-eng | finance.
     audience:
       - "engineering"
+    # STDF only: the test insertion/step these files belong to (WS1, WS1-RT, FT …).
+    # STDF may not record this reliably, so SET IT per source; blank falls back to
+    # MIR TEST_COD then the filename (a warning flags the guess).
+    insertion: ""
+    # Authority tier for ranking (Phase 8): internal | vendor.
+    # A search re-ranks so feedback > internal > vendor — an `internal` source's hits
+    # get a boost over `vendor` ones (tune under `ranking:`); user feedback outranks both.
+    tier: "vendor"
+    # Data stores only: how to read a delimited/fixed-width table (CSV/TSV/…).
+    #   delimiter : override the by-extension default (csv->comma, tsv->tab);
+    #               or a name: tab | pipe | semicolon | comma
+    #   widths    : [8, 10, 12]  # read a FIXED-WIDTH file by these column widths
+    #   label/value        : for a long/tidy table (a metric-name column + a value column)
+    #   group/lo/hi/units  : optional column names for site / spec limits / units
+    # Leave empty ({}) for a wide table (every numeric column is a metric) or a doc store.
+    csv: {}
+    # Code stores only: when `location` is a git URL (github.com/…, https://, git@,
+    # file://), pin a branch or tag to clone (blank = the repo's default branch).
+    # The repo is `git clone`d to a cache under staging_dir; auth is your git's own.
+    ref: ""
 
 embed:
   # Embedding model. Options:
@@ -73,19 +101,103 @@ search:
   rrf_k: 60  # RRF constant for hybrid fusion
   bm25_only: false  # force-skip vectors at query time
 
+# Feedback-aware re-ranking (Phase 8). After the relevance search, each hit's score gets
+# +tier_boost (internal>vendor) and +feedback_weight×(net rating for the requesting user).
+# Defaults keep relevance dominant while realising feedback > internal > vendor at the
+# margin; raise the boosts to enforce the ordering harder. Set all to 0 to disable.
+ranking:
+  internal_boost: 0.02  # added to an `internal`-tier hit's score
+  vendor_boost: 0.0  # added to a `vendor`-tier hit's score (baseline)
+  feedback_weight: 0.03  # × a document's net feedback rating, added to score
+
+reports:
+  # How long a generated report file is kept under tmp_dir/reports/.
+  # A report always lives a minimum span, THEN dies at the next midnight,
+  # so one written just before midnight is never swept minutes later.
+  #   -1 : keep forever (default)
+  #    0 : at least 12 hours, then the next midnight
+  #    N : at least N x 24 hours, then the next midnight
+  # Midnight is the SERVER's local timezone. Swept when the server starts
+  # and after each report is written.
+  retain_days: -1
+  # The format reports are produced in unless the requester asks otherwise.
+  # An agent reads this (report_format tool) BEFORE writing, because content
+  # has to be authored for its target: a deck needs short bullets, a
+  # spreadsheet one fact per row, a document takes prose.
+  default_format: "html"
+  # A .pptx/.potx whose THEME and LAYOUTS every generated deck inherits —
+  # drop in your corporate template and reports match it. Reports set no
+  # fonts, colours or positions of their own, so swapping this (or applying
+  # another theme in PowerPoint afterwards) restyles the whole deck.
+  # Empty = a clean default Office look.
+  pptx_template: ""
+
 # Roles come from the DOCUSEARCH_ROLES env var on the client/agent process,
 # e.g. DOCUSEARCH_ROLES=engineering,test-eng
 serve:
   host: "0.0.0.0"  # bind address
   port: 8321  # HTTP port for REST + MCP
   mcp_path: "/mcp"  # MCP over streamable HTTP mounts here
+  self_heal_minutes: 60  # auto-prune orphaned docs every N min while serving (0 = off)
 
-# Phase 5+ enrichment — all off by default.
+# Access control for this store. Defaults to public (nothing defined = public).
+access:
+  # Who may search this document store:
+  #   public  : anyone on the server (the default)
+  #   private : only allowed_users / allowed_groups below, verified from the
+  #             X-Docusearch-User (and X-Docusearch-Groups) request headers
+  visibility: "public"
+  allowed_users: []  # usernames allowed when visibility: private
+  allowed_groups: []  # groups allowed when visibility: private
+
+# Enrichment — all off by default.
 enrich:
   preflight_sample: 150  # docs sampled for rule proposal (temp 0)
+  # Where `docusearch preflight` writes proposed gotcha rules and where ingest
+  # reads them. Rules apply ONLY after you set `approved: true` in that file.
+  preflight_rules: "preflight_rules.yaml"
   ai_summaries: false  # Phase 5+ — off by default
-  vision_images: false  # Phase 5+ — off by default
+  # Cloud image OCR + description. When true, `docusearch vision` sends each
+  # retained image ONCE to vision_model and stores the result (searchable +
+  # report-embeddable). Off by default: it calls a paid cloud API. Auth comes
+  # from the ANTHROPIC_API_KEY env var or an `ant auth login` profile — never
+  # put a key in this file.
+  vision_images: false
+  # Which vision backend `docusearch vision` uses:
+  #   claude-cli : shell out to the `claude` CLI — uses your Claude Code login,
+  #                NO API key (the natural path if you already run Claude Code)
+  #   anthropic  : Anthropic Messages API — needs ANTHROPIC_API_KEY or an `ant`
+  #                profile ([vision] extra)
+  #   local      : a local transformers model — offline, no key ([vision-local]
+  #                extra); set vision_model to a HF id, e.g. google/gemma-3-4b-it
+  vision_provider: "claude-cli"
+  vision_model: "claude-opus-4-8"  # model id — claude-cli/anthropic: claude-opus-4-8 | sonnet; local: HF id
+
+# STDF v4 test-data ingest + analytics (GATE 6). COND scope, granularity, plots, part id.
+stdf:
+  cond_scope: "part"  # COND reset scope: part (reset each part/PRR) | run (persist until cleared)
+  granularity: "test"  # STDF chunk granularity: test | part | both
+  # Analytics plot backend.
+  #   plotly     : interactive — zoom, pan, hover tooltips, click a series in
+  #                the legend to isolate it (default; self-contained HTML)
+  #   matplotlib : a static PNG, for a smaller file or a print-only workflow
+  plot_backend: "plotly"
+  # Fields that uniquely identify a part for cross-insertion traceability + yield.
+  # Comma list from: lot, sublot, wafer, x, y, part_id, site. Wafer default is
+  # lot,sublot,wafer,x,y; use part_id for packaged parts. No identity -> part_id.
+  part_key: "lot,sublot,wafer,x,y"
 
 logging:
   level: "info"  # debug | info | warning
   jsonl: true  # tmp/logs/<date>.jsonl (async, non-blocking)
+
+# OPTIONAL — federate several independent stores into one searchable set (R-TEST-3).
+# List each member's name + its own config file. `serve` and `search` then fan out
+# across all members (signal-level RRF merge, deduped by content hash) and rank as if
+# it were one store. Scope a query to a subset with --stores (CLI) or the search_docs
+# `stores` argument (MCP/AI), e.g. --stores internal to search ONLY that member.
+# Leave this out entirely for a normal single-store setup.
+federation:
+  - name: ""  # label for this member store, e.g. python | rust | internal
+    config: ""  # path to that store's docusearch.yaml
+    tier: "vendor"  # authority tier of this member: internal | vendor
