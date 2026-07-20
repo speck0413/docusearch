@@ -112,6 +112,24 @@ def _filter_roles(hits: list[SearchHit], roles: set[str] | None) -> list[SearchH
     return [hit for hit in hits if set(hit.audience) & roles]
 
 
+def _with_images(store: Store, hits: list[SearchHit]) -> list[SearchHit]:
+    """Attach the retained image an image-derived hit describes (R-ING-6).
+
+    Vision enrichment makes an image searchable by writing its description into an ``enrichment``
+    chunk, so an image can win a search on its own merits — but without the image ref the hit is
+    text about a picture nobody can look at. Carrying the sha lets a caller fetch and cite it.
+    Applied to the ranked page only, in one query."""
+    found = store.images_for_chunks([hit.chunk_id for hit in hits])
+    if not found:
+        return hits
+    return [
+        replace(hit, images=[str(row["sha256"]) for row in found[hit.chunk_id]])
+        if hit.chunk_id in found
+        else hit
+        for hit in hits
+    ]
+
+
 def _pool_size(top_k: int, roles: set[str] | None) -> int:
     # over-fetch when role-filtering so the filter runs before the cutoff (§9)
     return top_k if roles is None else max(top_k * 5, 50)
@@ -273,7 +291,7 @@ def bm25_search(
     if not match:
         return []
     hits = [_bm25_hit(row) for row in store.bm25(match, _pool_size(top_k, roles))]
-    return _filter_roles(hits, roles)[:top_k]
+    return _with_images(store, _filter_roles(hits, roles)[:top_k])
 
 
 def hybrid_search(
@@ -324,7 +342,7 @@ def hybrid_search(
                 search_mode="hybrid",
             )
         )
-    return _filter_roles(hits, roles)[:top_k]
+    return _with_images(store, _filter_roles(hits, roles)[:top_k])
 
 
 def vector_search(
@@ -364,7 +382,7 @@ def vector_search(
                 search_mode="vector",
             )
         )
-    return _filter_roles(hits, roles)[:top_k]
+    return _with_images(store, _filter_roles(hits, roles)[:top_k])
 
 
 def search(

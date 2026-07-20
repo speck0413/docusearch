@@ -986,11 +986,16 @@ def _search_payload(
         for hit in lst:
             documents.setdefault(_doc_key(hit), [hit.title, hit.path, hit.fmt])
 
-    def row(hit: SearchHit) -> list[str]:
-        cells = [hit.citation, _doc_key(hit), hit.locator, hit.kind, hit.snippet]
+    # an image-derived hit describes a picture — carry the ref so it can be viewed and cited
+    with_images = any(hit.images for lst in results for hit in lst)
+
+    def row(hit: SearchHit) -> list[Any]:
+        cells: list[Any] = [hit.citation, _doc_key(hit), hit.locator, hit.kind, hit.snippet]
+        if with_images:
+            cells.append(hit.images)
         return cells if federated else cells[:1] + cells[2:]
 
-    fields = ["cite", "doc", "locator", "kind", "snippet"]
+    fields = ["cite", "doc", "locator", "kind", "snippet"] + (["img"] if with_images else [])
     return {
         "hit_fields": fields if federated else [f for f in fields if f != "doc"],
         "results": [[row(hit) for hit in lst] for lst in results],
@@ -1002,8 +1007,15 @@ def _search_payload(
             + ("via its `doc` column" if federated else "on the doc part of `cite`")
             + " -> `documents[key]`, whose columns are named by `doc_fields`. "
             "Full text: get_document(doc_id). Open in a browser: url_base + doc_id."
+            + (
+                " Rows with an `img` column describe a picture: fetch it at img_base + sha to "
+                "look at it, and cite it by the row's `cite` like any other evidence."
+                if with_images
+                else ""
+            )
         ),
         "url_base": f"{base_url}/v1/documents/",
+        **({"img_base": f"{base_url}/v1/images/"} if with_images else {}),
         "embed_model_used": model_used,
         "search_mode": mode,
     }

@@ -969,6 +969,24 @@ class Store:
             (doc_id, row["locator"]),
         ).fetchall()
 
+    def images_for_chunks(self, chunk_ids: Sequence[int]) -> dict[int, list[sqlite3.Row]]:
+        """``images_for_chunk`` for a whole ranked result set in one query — search calls this on
+        every hit, so it must not be N+1. Keyed by chunk id; chunks with no image are absent."""
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = self._conn.execute(
+            "SELECT c.id AS chunk_id, i.sha256, i.ext, i.alt, i.caption "
+            "FROM chunks c JOIN images i ON i.doc_id = c.document_id AND i.locator = c.locator "
+            f"WHERE c.id IN ({placeholders}) AND c.kind IN ('enrichment', 'image_ref') "
+            "ORDER BY c.id, i.sha256",  # deterministic ordering (R-SRCH-5)
+            tuple(chunk_ids),
+        ).fetchall()
+        out: dict[int, list[sqlite3.Row]] = {}
+        for row in rows:
+            out.setdefault(int(row["chunk_id"]), []).append(row)
+        return out
+
     def count_images(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])
 
