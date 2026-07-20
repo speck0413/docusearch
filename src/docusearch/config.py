@@ -287,6 +287,17 @@ SCHEMA: tuple[_Node, ...] = (
                 ),
             ),
             _Field(
+                "default_format",
+                "html",
+                comment=(
+                    "The format reports are produced in unless the requester asks otherwise.\n"
+                    "An agent reads this (report_format tool) BEFORE writing, because content\n"
+                    "has to be authored for its target: a deck needs short bullets, a\n"
+                    "spreadsheet one fact per row, a document takes prose."
+                ),
+                choices=("md", "html", "html-slide", "pdf", "docx", "pptx", "xlsx"),
+            ),
+            _Field(
                 "pptx_template",
                 "",
                 comment=(
@@ -714,6 +725,7 @@ class RankingConfig:
 @dataclass(frozen=True)
 class ReportsConfig:
     retain_days: int
+    default_format: str
     pptx_template: str
 
 
@@ -846,6 +858,7 @@ class Config:
             ),
             reports=ReportsConfig(
                 retain_days=int(m["reports"]["retain_days"]),
+                default_format=str(m["reports"]["default_format"]),
                 pptx_template=str(m["reports"]["pptx_template"]),
             ),
             serve=ServeConfig(

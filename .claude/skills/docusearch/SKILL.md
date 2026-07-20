@@ -41,8 +41,29 @@ The user picks an effort level (default **medium**):
   a card with real code / a full procedure, not just a snippet).
 - `related_documents(doc_id, direction="both")` → cross-referenced docs (follow leads).
 - `catalog_stats()` → sanity-check the catalog is populated.
+- `report_format(fmt="")` → the target format's authoring rules + the configured default.
 
 ## Workflow
+
+0. **Learn the target format first.** Call `report_format()`. It returns the operator's
+   configured default and how to author for it.
+
+   **If the user named a format, that wins.** "Create a PowerPoint…" → `pptx`, even when the
+   configured default is something else; the default only applies when they did not say. Map
+   plain words: PowerPoint/deck/slides → `pptx`, Word/document → `docx`, spreadsheet/Excel →
+   `xlsx`, PDF → `pdf`, web page → `html`, browsable deck → `html-slide`.
+
+   **Do this before you draft**, not after: the
+   renderer lays out what you give it and cannot invent structure you did not write, so a
+   section written as dense paragraphs becomes a wall of text on a slide. Shape the content to
+   the destination —
+
+   | Target | Write it as |
+   |--------|-------------|
+   | `md` · `html` | Prose. Full paragraphs, fenced code, markdown lists. |
+   | `docx` · `pdf` | A document. Short paragraphs, markdown lists for steps. |
+   | `pptx` · `html-slide` | A deck. One idea per section, 4–6 bullets of <15 words, written as `- ` list items. Split a long procedure into several sections rather than one dense one. |
+   | `xlsx` | A grid. Every list item one self-contained fact; nested `  - ` items for detail. Paragraphs become unreadable single cells. |
 
 1. **Discover + retrieve.** Plan phrasings for the effort level (synonyms, subtopics,
    how-to framings) and `search_docs` them in one batched call. Repeat per the level's
@@ -106,9 +127,12 @@ The user picks an effort level (default **medium**):
    ```
 
    Set `request`, `requested_by`, and `model` — they populate the report's provenance header.
-   `sources` defaults to the config's document stores. You do **not** set references: the
-   builder links each one to the original document automatically (store — title — heading),
-   so leave that to the tool.
+   `sources` defaults to the config's document stores.
+
+   **Never write a References section yourself.** Do not add a section titled References,
+   Sources, or Further Reading, and do not add a "sources are listed below" note. The builder
+   appends the real reference list (store — title — heading, linked) from your `evidence`. A
+   hand-written one is duplicated in the output.
 
 5. **Always include a `trace`** so the reader can see how the report was produced (it renders
    as a collapsed "Generation log" and is NOT citation-verified — it's a log, not claims):

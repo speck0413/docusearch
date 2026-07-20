@@ -1284,8 +1284,15 @@ knowledge of the domain.
 - `related_documents(doc_id, direction="both", depth=1)` -> cross-referenced docs (follow leads);
   `depth` walks N hops, each result carries its shortest `hops`.
 - `catalog_stats()` -> counts + embedding model (sanity-check the catalog is populated).
-- `build_report(spec, fmt="md")` -> a themed, cited report. VERIFIES every citation against your
-  evidence and refuses hallucinated ones. `fmt` is "md" or "html".
+- `report_format(fmt="")` -> CALL BEFORE WRITING. How to author for the target format, plus the
+  operator's configured default. Content must be shaped for its output: a deck needs short
+  bullets, a spreadsheet one fact per row, a document takes prose. The renderer lays out what you
+  give it — it cannot invent structure you did not write, so a document-shaped section becomes a
+  wall of text on a slide.
+- `build_report(spec, fmt=...)` -> a themed, cited report SAVED on the server; returns
+  {fmt, filename, url, bytes}. Give the user the `url`. VERIFIES every citation against your
+  evidence and refuses hallucinated ones. `fmt`: md | html | html-slide | pdf | docx | pptx |
+  xlsx.
 
 ## Ground rules
 - Cite everything: each catalog claim ends with `[D:<doc_id>#<chunk_id>]`; general knowledge ends
@@ -1301,6 +1308,8 @@ knowledge of the domain.
   to follow leads; keep going until new searches surface nothing new.
 
 ## Workflow
+0. `report_format()` — learn the target format and how to write for it BEFORE you draft. If the
+   user named a format ("make me a PowerPoint"), that WINS over the configured default.
 1. Discover + retrieve — plan phrasings for the effort level and `search_docs` them in one batched
    call; repeat per the level. `get_document` the strongest hits for full text.
 2. Select evidence — the (doc_id, chunk_id) pairs whose text actually supports your answer.
@@ -1684,17 +1693,38 @@ def build_mcp(service: Service, config: Config) -> Any:
             return {"error": "FEEDBACK", "message": str(err)}
 
     @mcp.tool()
+    def report_format(fmt: str = "") -> dict[str, Any]:
+        """Call BEFORE writing a report: how to author content for the target format. A deck
+        needs short bullets, a spreadsheet needs one fact per row, a document takes prose — the
+        renderer cannot invent structure the author did not write. Omit `fmt` for all formats.
+
+        PRECEDENCE: if the requester named a format ("make me a PowerPoint", "as a spreadsheet"),
+        THAT wins. `configured_default` applies only when they did not say."""
+        note = (
+            "If the requester named a format, use it — configured_default applies only when "
+            "they did not. Map plain words: PowerPoint/deck/slides -> pptx, Word/doc -> docx, "
+            "spreadsheet/Excel -> xlsx, web page -> html, browsable deck -> html-slide."
+        )
+        if fmt:
+            return {"fmt": fmt, "guidance": report_export.guidance(fmt),
+                    "configured_default": config.reports.default_format, "precedence": note}
+        return {"formats": report_export.FORMAT_GUIDANCE,
+                "configured_default": config.reports.default_format, "precedence": note}
+
+    @mcp.tool()
     def build_report(spec: dict[str, Any], fmt: str = "md") -> dict[str, Any]:
         """Render a cited report and SAVE it on the server; returns {fmt, filename, url, bytes}
         — give the user the `url`, it is a direct link to the file. fmt: md | html | pdf | docx |
         pptx | xlsx (all six write a file). md/html also return the text as `report`. Verifies
         every citation and refuses hallucinated ones."""
         try:
-            return service.build_report_file(spec, base_url=base, fmt=fmt)
+            out = service.build_report_file(spec, base_url=base, fmt=fmt)
         except citations.CitationError as err:
             return {"error": "HALLUCINATED_CITATION", "message": str(err)}
         except (report_export.ExportDependencyError, ValueError) as err:
             return {"error": "EXPORT", "message": str(err)}
+        out["authored_for"] = report_export.guidance(fmt)
+        return out
 
     return mcp
 

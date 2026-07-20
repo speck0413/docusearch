@@ -12,6 +12,7 @@ import io
 import re
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from typing import Any
 
 from . import citations
@@ -41,6 +42,44 @@ def xlsx_cell(value: str) -> str:
     formula in whoever opens the file (CWE-1236, red-team H3)."""
     v = xml_safe(value)
     return "'" + v if v[:1] in ("=", "+", "-", "@") else v
+
+# What a good report looks like in each format. The renderer can lay out whatever it is given,
+# but it cannot invent structure that is not there: a section written as four dense paragraphs
+# becomes four dense bullets on a slide. So the AUTHOR has to know the target before writing,
+# and this is the single place that contract is stated — the MCP tool, help(), and the skill all
+# read from here so they cannot drift.
+FORMAT_GUIDANCE: dict[str, str] = {
+    "md": "Prose. Full paragraphs, fenced code blocks, markdown lists. No length limit.",
+    "html": "Prose, same as md — the richest layout. Cards render per section `kind`.",
+    "html-slide": (
+        "A DECK. One idea per section; 4-6 short bullets, each under ~15 words. Lead with the "
+        "point, not the preamble. Put a long procedure in several sections rather than one. "
+        "Code belongs in its own section, trimmed to the lines that matter."
+    ),
+    "pptx": (
+        "A DECK. Same as html-slide: 4-6 short bullets per section, each under ~15 words, one "
+        "idea per section. Write bullets as markdown list items ('- ') so they render as real "
+        "bullets. Long sections are split across continuation slides and the full prose is kept "
+        "in the speaker notes, but a section written as paragraphs still reads as a wall of "
+        "text — write it short."
+    ),
+    "xlsx": (
+        "A GRID, one row per point. Write each section as a markdown list where every item is "
+        "one self-contained fact; use nested items ('  - ') for supporting detail. Avoid long "
+        "paragraphs: a paragraph becomes one enormous cell."
+    ),
+    "docx": (
+        "A DOCUMENT. Prose with headings; short paragraphs beat one long one. Use markdown "
+        "lists for steps and enumerations so they render as real Word lists."
+    ),
+    "pdf": "A DOCUMENT — identical to docx guidance; PDF is printed from the HTML rendering.",
+}
+
+
+def guidance(fmt: str) -> str:
+    """Authoring guidance for a target format (empty for an unknown one)."""
+    return FORMAT_GUIDANCE.get(fmt.lower(), "")
+
 
 _AI_WARNING = "AI-generated — verify every claim against the cited sources before relying on it."
 
@@ -132,6 +171,72 @@ def _numbered(
     return bodies, [xml_safe(r) for r in refs]
 
 
+
+# A slide holds a handful of points before it becomes a wall of text. Past this the section
+# continues on another slide rather than overflowing off the bottom.
+_SLIDE_BULLETS = 6
+_SLIDE_CHARS = 160  # a "point" longer than this is prose, not a bullet
+
+
+def _points(body: str) -> list[tuple[int, str]]:
+    """A body as ``(indent level, text)`` bullet points.
+
+    Markdown list markers become real bullet levels; a fenced code block keeps its lines
+    verbatim. Prose that is not a list still yields one point per paragraph, so a document-shaped
+    section degrades to readable bullets instead of one unbroken blob."""
+    points: list[tuple[int, str]] = []
+    in_code = False
+    for raw in body.splitlines():
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if not line.strip():
+            continue
+        if in_code:
+            points.append((1, xml_safe(line.strip())))
+            continue
+        indent = (len(line) - len(line.lstrip())) // 2
+        text = line.strip()
+        if text[:2] in ("- ", "* ") or (text[:1].isdigit() and text[1:3] in (". ", ") ")):
+            text = text.split(" ", 1)[1] if " " in text else text
+            points.append((min(indent, 4), xml_safe(text)))
+        else:
+            points.append((0, xml_safe(text)))
+    return points
+
+
+def _slide_chunks(points: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    """Split points across slides, keeping long prose points on lighter slides."""
+    chunks: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
+    budget = 0
+    for level, text in points:
+        cost = 2 if len(text) > _SLIDE_CHARS else 1
+        if current and budget + cost > _SLIDE_BULLETS:
+            chunks.append(current)
+            current, budget = [], 0
+        current.append((level, text))
+        budget += cost
+    if current:
+        chunks.append(current)
+    return chunks or [[]]
+
+
+def _fill(holder: Any, points: list[tuple[int, str]]) -> None:
+    """Write real bullet PARAGRAPHS, not one newline-joined blob.
+
+    Setting ``.text`` with newlines produces a single paragraph that neither indents nor bullets
+    and simply overflows the placeholder — the reason decks looked like dumped documents."""
+    frame = holder.text_frame
+    frame.clear()
+    frame.word_wrap = True
+    for i, (level, text) in enumerate(points or [(0, " ")]):
+        para = frame.paragraphs[0] if i == 0 else frame.add_paragraph()
+        para.text = text
+        para.level = level
+
+
 def _styled(paragraph: object, *names: str) -> None:
     """Apply the first BUILT-IN style that exists in this document.
 
@@ -192,7 +297,11 @@ def _body_placeholder(slide: Any) -> Any:
     picture, a date, or absent entirely."""
     from pptx.enum.shapes import PP_PLACEHOLDER
 
-    holders = [p for p in slide.placeholders if p != slide.shapes.title]
+    # Exclude the title by placeholder TYPE, not by object identity: python-pptx hands back a new
+    # wrapper each time you touch `shapes.title`, so `p != slide.shapes.title` can be true for the
+    # title itself — and the title would then be filled with body text.
+    titles = (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE)
+    holders = [p for p in slide.placeholders if p.placeholder_format.type not in titles]
     for kind in (PP_PLACEHOLDER.BODY, PP_PLACEHOLDER.OBJECT, PP_PLACEHOLDER.SUBTITLE):
         for holder in holders:
             if holder.placeholder_format.type == kind:
@@ -220,45 +329,84 @@ def _to_pptx(
         sub.text = xml_safe(subtitle) or _AI_WARNING
     body_layout = _layout(prs, "Title and Content", "Title and Body", fallback=1)
     for heading, bdy in secs:
-        slide = prs.slides.add_slide(body_layout)
-        if slide.shapes.title is not None:
-            slide.shapes.title.text = xml_safe(heading) or xml_safe(title)
-        holder = _body_placeholder(slide)
-        if holder is not None:
-            holder.text = "\n".join(_paragraphs(bdy)) or " "
+        chunks = _slide_chunks(_points(bdy))
+        for n, chunk in enumerate(chunks):
+            slide = prs.slides.add_slide(body_layout)
+            head = xml_safe(heading) or xml_safe(title)
+            if slide.shapes.title is not None:
+                slide.shapes.title.text = head if n == 0 else f"{head} (cont.)"
+            holder = _body_placeholder(slide)
+            if holder is not None:
+                _fill(holder, chunk)
+            # the full prose lives in the speaker notes, so shortening the slide loses nothing
+            if n == 0 and bdy.strip():
+                with suppress(AttributeError, KeyError):  # a template without a notes master
+                    slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
     if refs:
-        slide = prs.slides.add_slide(body_layout)
-        if slide.shapes.title is not None:
-            slide.shapes.title.text = "References"
-        holder = _body_placeholder(slide)
-        if holder is not None:
-            holder.text = "\n".join(f"{i}. {r}" for i, r in enumerate(refs, 1))
+        numbered = [(0, f"{i}. {r}") for i, r in enumerate(refs, 1)]
+        for n, chunk in enumerate(_slide_chunks(numbered)):
+            slide = prs.slides.add_slide(body_layout)
+            if slide.shapes.title is not None:
+                slide.shapes.title.text = "References" if n == 0 else "References (cont.)"
+            holder = _body_placeholder(slide)
+            if holder is not None:
+                _fill(holder, chunk)
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
 
 
 def _to_xlsx(title: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str]) -> bytes:
+    """A spreadsheet is a GRID, so emit rows and columns — not a document poured down column A.
+
+    Section / Point / Detail lets you filter and sort by section, which is the only reason to
+    want a report as a workbook. Provenance and references get their own sheets rather than
+    interrupting the data."""
     from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Report"
-    ws.append([xlsx_cell(title)])
-    ws.append([_AI_WARNING])
-    for line in meta:
-        ws.append([xlsx_cell(line)])
+    ws.append(["Section", "Point", "Detail"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
     for heading, bdy in secs:
-        ws.append([])
-        if heading:
-            ws.append([xlsx_cell(heading)])
-        for para in _paragraphs(bdy):
-            ws.append([xlsx_cell(para)])
+        points = _points(bdy)
+        for level, text in points:
+            ws.append([
+                xlsx_cell(heading),
+                xlsx_cell(text) if level == 0 else "",
+                xlsx_cell(text) if level > 0 else "",
+            ])
+    ws.freeze_panes = "A2"  # the header stays put while you scroll
+    ws.auto_filter.ref = ws.dimensions  # filter/sort by section out of the box
+    for col, width in (("A", 28), ("B", 90), ("C", 90)):
+        ws.column_dimensions[col].width = width
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+    info = wb.create_sheet("About")
+    info.append(["Title", xlsx_cell(title)])
+    info.append(["Notice", _AI_WARNING])
+    for line in meta:
+        key, _, value = line.partition(": ")
+        info.append([xlsx_cell(key), xlsx_cell(value)])
+    info.column_dimensions["A"].width = 18
+    info.column_dimensions["B"].width = 90
+
     if refs:
-        ws.append([])
-        ws.append(["References"])
-        for r in refs:
-            ws.append([xlsx_cell(r)])
+        sheet = wb.create_sheet("References")
+        sheet.append(["#", "Source"])
+        for cell in sheet[1]:
+            cell.font = Font(bold=True)
+        for i, r in enumerate(refs, 1):
+            sheet.append([i, xlsx_cell(r)])
+        sheet.freeze_panes = "A2"
+        sheet.column_dimensions["A"].width = 5
+        sheet.column_dimensions["B"].width = 110
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
