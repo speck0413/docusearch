@@ -91,6 +91,12 @@ The user picks an effort level (default **medium**):
    `test-program`, `warning`, `reference`) — it sets the icon and accent.
 
    Aim for something a person is glad to be handed, not a filled-in template.
+
+   **Deliverables go IN the report, never to a local file.** Asked to produce a script, a
+   config, or a test program, put the complete thing in a `code` section — the report is the
+   deliverable and there is no local filesystem to write to. Do not call Write, do not ask for
+   permission to save a file, and do not truncate the code to an excerpt: if the reader is meant
+   to run it, ship all of it.
 4. **Render with `build_report`.** This is the terminal step and it is not optional — you are
    talking to a REMOTE docusearch server over MCP, so there is no local `docusearch` CLI to
    shell out to and no local file you can write the report into. The server renders it, saves

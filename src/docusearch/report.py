@@ -846,6 +846,22 @@ _SLIDE_JS = """
 """
 
 
+def _trace_notes(trace: Mapping[str, object] | None) -> str:
+    """The generation log as plain text, for a deck's speaker notes."""
+    if not trace:
+        return ""
+    parts: list[str] = []
+    for key in ("prompt", "reasoning"):
+        value = trace.get(key)
+        if value:
+            parts.append(f"{key.title()}: {value}")
+    for key in ("queries", "retrieved"):
+        rows = trace.get(key)
+        if isinstance(rows, (list, tuple)) and rows:
+            parts.append(f"{key.title()}:\n" + "\n".join(f"  - {r}" for r in rows))
+    return "\n\n".join(parts)
+
+
 def _render_slides(
     title: str,
     subtitle: str,
@@ -891,9 +907,13 @@ def _render_slides(
             f'<div class="body figures">{figs}</div></section>'
         )
     ref_items = "".join(f'<li>{esc(label)}</li>' for _href, label in refs) or "<li>(none)</li>"
+    # The generation log belongs with the deck (every other format carries it) but not ON a
+    # slide — it is provenance, not content. Speaker notes keep it without cluttering the room.
+    log = _trace_notes(trace)
+    notes = f'<div class="notes" hidden>{esc(log)}</div>' if log else ""
     slides.append(
         '<section class="slide refs-slide"><h2><span class="ic">📎</span>References</h2>'
-        f'<div class="body"><ol class="refs">{ref_items}</ol></div></section>'
+        f'<div class="body"><ol class="refs">{ref_items}</ol>{notes}</div></section>'
     )
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
