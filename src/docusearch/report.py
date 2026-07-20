@@ -68,6 +68,35 @@ def _norm_sections(
 
 
 
+def _write_assets(
+    figures: Mapping[str, tuple[str, str]], asset_dir: str
+) -> dict[str, tuple[str, str]]:
+    """Materialise data: URIs as files under ``asset_dir`` and relink them relatively.
+
+    Markdown cannot embed binary; a base64 URI in a .md is unreadable to every editor and most
+    renderers. Writing the bytes next to the report keeps the images working for a human and for
+    any markdown-to-PDF conversion."""
+    import base64
+    from pathlib import Path
+
+    out: dict[str, tuple[str, str]] = {}
+    target = Path(asset_dir)
+    for sha, (src, caption) in figures.items():
+        if not src.startswith("data:"):
+            out[sha] = (src, caption)
+            continue
+        head, _, payload = src.partition(",")
+        ext = head.split("/")[-1].split(";")[0] or "png"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            path = target / f"{sha[:16]}.{ext}"
+            path.write_bytes(base64.b64decode(payload))
+            out[sha] = (f"{target.name}/{path.name}", caption)
+        except (OSError, ValueError):
+            out[sha] = (src, caption)  # keep the data URI rather than losing the figure
+    return out
+
+
 def _section_figures(
     shas: Sequence[str], srcs: Mapping[str, tuple[str, str]]
 ) -> list[tuple[str, str]]:
@@ -113,6 +142,40 @@ _MEDIA = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
           "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml", "bmp": "image/bmp"}
 
 
+# A source document numbers its own figures from 1, so a report drawing on twenty documents
+# ends up with twenty "Figure 1"s. Strip the source's prefix and number them in report order.
+_FIG_PREFIX = re.compile(
+    r"^\s*(?:fig(?:ure)?|table|image|diagram|exhibit)\s*\.?\s*\d+\s*[.:\-\u2013\u2014]*\s*",
+    re.IGNORECASE,
+)
+
+
+def clean_caption(text: str) -> str:
+    """A caption with the source document's own figure number removed."""
+    return _FIG_PREFIX.sub("", text or "").strip()
+
+
+def figure_label(index: int, caption: str, *, word: str = "Figure") -> str:
+    """``Figure 3 — nWire Engine Clocking``, numbered by position in THIS report."""
+    body = clean_caption(caption)
+    return f"{word} {index} — {body}" if body else f"{word} {index}"
+
+
+def number_figures(
+    secs: Sequence[tuple[str, str, str, list[str]]], trailing: Sequence[str] = ()
+) -> dict[str, int]:
+    """Map each image sha to its figure number, in the order the reader meets it."""
+    order: dict[str, int] = {}
+    for _h, _k, _b, shas in secs:
+        for sha in shas:
+            if sha not in order:
+                order[sha] = len(order) + 1
+    for sha in trailing:
+        if sha not in order:
+            order[sha] = len(order) + 1
+    return order
+
+
 _AI_WARNING = (
     "AI-generated — every claim must be double-checked against the cited source "
     "documents before it is relied upon."
@@ -143,6 +206,7 @@ def render_report(
     trace: Mapping[str, object] | None = None,
     theme: str = "",  # a THEMES key; empty = the configured default
     figure_srcs: Mapping[str, tuple[str, str]] | None = None,  # sha -> (src, caption)
+    asset_dir: str = "",  # markdown only: write images here and reference them relatively
 ) -> str:
     """Render a report to ``md`` or ``html``. Raises ``CitationError`` if any citation (in
     the title, subtitle, or any section) references a ``(doc_id, chunk_id)`` outside the
@@ -185,6 +249,16 @@ def render_report(
     refs = _references(ordered, base_url, ref_targets)
 
     figures = dict(figure_srcs or {})
+    if fmt == "md" and asset_dir:
+        # Markdown has no way to carry binary, so a data: URI is useless in a .md a human will
+        # open in an editor. Write each figure beside the file and link to it relatively.
+        figures = _write_assets(figures, asset_dir)
+    fig_no = number_figures(secs, list(images))
+    # bake the report-order label into each source so every renderer agrees on the numbering
+    figures = {
+        sha: (src, figure_label(fig_no.get(sha, i + 1), cap))
+        for i, (sha, (src, cap)) in enumerate(figures.items())
+    }
     if fmt == "html-slide":
         return _render_slides(
             title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images,

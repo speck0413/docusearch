@@ -454,7 +454,10 @@ class Service:
         the body against the evidence set first, so a hallucinated citation is refused in a pptx
         exactly as in HTML (R-CIT-1)."""
         fmt = (fmt or "md").lower()
-        rendered = self.build_report(spec, base_url=base_url, fmt=fmt)
+        assets = str(report_store.reports_dir(self.config.paths.tmp_dir) / "assets")
+        rendered = self.build_report(
+            spec, base_url=base_url, fmt=fmt, asset_dir=assets if fmt == "md" else ""
+        )
         name = report_store.filename(str(spec.get("title", "report")), runlog.RUN_ID, fmt)
         path = report_store.write(self.config.paths.tmp_dir, name, rendered)
         report_store.sweep(self.config.paths.tmp_dir, self.config.reports.retain_days)
@@ -470,7 +473,7 @@ class Service:
         return out
 
     def build_report(
-        self, spec: dict[str, Any], *, base_url: str, fmt: str = "md"
+        self, spec: dict[str, Any], *, base_url: str, fmt: str = "md", asset_dir: str = ""
     ) -> str | bytes:
         """Render a cited report from an answer ``spec`` (title/sections/evidence/provenance),
         verifying every citation against the evidence set (R-CIT-1) — the same renderer the CLI
@@ -492,6 +495,8 @@ class Service:
             # Resolve to files so a deck/document can SHOW the diagram, not just describe it.
             # Anything unresolvable is skipped, never an error.
             figure_map: dict[str, tuple[str, str]] = {}
+            order = report.number_figures(report._norm_sections(spec.get("sections"), ""),
+                                          [str(x) for x in spec.get("images", []) or []])
             for sha in dict.fromkeys(shas):
                 found = self.image(sha)
                 if found is None:
@@ -499,9 +504,16 @@ class Service:
                 with Store.open(cfg.paths.db_path) as _db:
                     row = _db.get_image(sha)
                 caption = str(row["caption"] or row["alt"] or "") if row is not None else ""
-                figure_map[sha] = (str(found[0]), caption)
-            # PDF is printed from the HTML report, so there is one layout, not two that drift.
-            html = self.build_report(spec, base_url=base_url, fmt="html") if fmt == "pdf" else ""
+                # one numbering for every format: the source's own "Figure 1" is stripped
+                figure_map[sha] = (str(found[0]),
+                                   report.figure_label(order.get(sha, len(figure_map) + 1), caption))
+            # PDF is built from the MARKDOWN rendering — a document flow, not the web layout.
+            # Its figures are written beside the report so the print step can load them.
+            markdown = ""
+            if fmt == "pdf":
+                assets = report_store.reports_dir(cfg.paths.tmp_dir) / "assets"
+                markdown = str(self.build_report(spec, base_url=base_url, fmt="md",
+                                                 asset_dir=str(assets)))
             return report_export.export_report(
                 title=str(spec.get("title", "Report")),
                 subtitle=str(spec.get("subtitle", "")),
@@ -514,7 +526,7 @@ class Service:
                 model=str(spec.get("model", "")),
                 classification=str(spec.get("classification", "Confidential")),
                 ref_targets=report.reference_targets(cfg.paths.db_path, evidence, base_url=base_url),
-                html=str(html),
+                markdown=markdown,
                 pptx_template=cfg.reports.pptx_template,
                 figure_map=figure_map,
             )
@@ -546,6 +558,7 @@ class Service:
             figure_srcs=report.figure_sources(
                 cfg.paths.db_path, cfg.paths.staging_dir, shas, base_url=base_url
             ),
+            asset_dir=asset_dir,
         )
 
     def search_vectors(

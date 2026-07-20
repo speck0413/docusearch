@@ -61,26 +61,27 @@ FORMAT_GUIDANCE: dict[str, str] = {
         "genuinely explain something."
     ),
     "html-slide": (
-        "A PRESENTATION, so design it like one. Same craft as pptx below; it is the same deck in "
-        "a browser."
+        "A PRESENTATION in a browser — design it exactly like the pptx guidance below, including "
+        "attaching each figure to the section it illustrates."
     ),
     "pptx": (
-        "You are DESIGNING A PRESENTATION, not summarising a document. Slides of uniform grey "
-        "bullets are a bad deck no matter how accurate they are.\n"
-        "  * Give it a narrative arc: what this is -> why it matters -> how to do it -> what "
-        "goes wrong. Every slide should earn its place and advance that arc.\n"
-        "  * VARY the slides. A one-line statement slide for a key claim. A short list where a "
-        "list is genuinely the right shape. A code slide with only the lines that matter. A "
-        "diagram slide that is mostly picture.\n"
-        "  * USE IMAGES. Search hits carry an `img` column when their section has a figure — a "
-        "block diagram or timing chart usually explains what a paragraph cannot. Pass those shas "
-        "in the spec's `images` and let the deck show them. A deck with no visuals is a "
-        "missed opportunity, not a neutral choice.\n"
-        "  * Write for the eye: lead with the point, cut filler words, keep a line scannable. "
-        "Aim for a handful of lines a slide, but break that when a slide genuinely needs more — "
-        "judgement beats a quota.\n"
-        "  * Put the depth in the speaker notes. They are preserved in full, so the slide can "
-        "stay clean without losing anything."
+        "You are DESIGNING A PRESENTATION. Slides of uniform grey bullets are a bad deck no "
+        "matter how accurate they are, and density is what makes them unreadable.\n"
+        "  * ONE IDEA PER SECTION, and keep each section short — roughly 3-5 lines. A section "
+        "that runs long is split across continuation slides, which reads worse than splitting it "
+        "yourself into two ideas with their own headings.\n"
+        "  * SHORT LINES. Aim for under ~12 words; lead with the point and cut the run-up. Long "
+        "lines force the text smaller to fit, which is what makes a slide look cramped.\n"
+        "  * ATTACH A FIGURE TO ITS SECTION (that section's `images`). A section with a figure "
+        "and a few short points is laid out with the picture BESIDE the text — the best-looking "
+        "slide this builder makes, and the one that actually explains something. Prefer it.\n"
+        "  * GIVE IT AN ARC: what this is -> why it matters -> how to do it -> what goes wrong. "
+        "Vary the sections so consecutive slides do not look identical.\n"
+        "  * PUT THE DEPTH IN THE PROSE, not on the slide: the full section text is preserved in "
+        "the speaker notes, so a short slide loses nothing. Write the slide for the eye and the "
+        "notes for the presenter.\n"
+        "  * Code: only the lines that matter, in its own section. A full listing does not fit a "
+        "slide and never reads well on one."
     ),
     "xlsx": (
         "A GRID, one row per point. Each list item should be one self-contained fact; nested "
@@ -159,7 +160,8 @@ def export_report(
     model: str = "",
     classification: str = "Confidential",
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None = None,
-    html: str = "",  # the rendered HTML report - required for fmt="pdf", ignored otherwise
+    html: str = "",  # fallback source for fmt="pdf"
+    markdown: str = "",  # the rendered markdown - the preferred source for fmt="pdf"
     pptx_template: str = "",  # a .pptx/.potx whose theme + layouts the deck inherits
     figure_map: Mapping[str, tuple[str, str]] | None = None,  # sha -> (file path, caption)
 ) -> bytes:
@@ -188,19 +190,13 @@ def export_report(
                         figure_map=figure_map)
     if fmt == "xlsx":
         return _to_xlsx(title, secs, meta, refs)
-    # PDF is a DOCUMENT, so it comes from the docx — the closest equivalent — whenever a
-    # converter is available. Printing the web layout produced something that read like a saved
-    # web page rather than a document. Chromium is the fallback when no converter is installed.
-    docx = _to_docx(title, subtitle, secs, meta, refs, figure_map=figure_map)
-    converted = docx_to_pdf(docx)
-    if converted is not None:
-        return converted
-    if not html:
-        raise ValueError(
-            "pdf export needs either a docx converter (LibreOffice) or the rendered HTML - "
-            "pass html=render_report(..., fmt='html')"
-        )
-    return html_to_pdf(html)
+    # PDF is a DOCUMENT. It is built from the MARKDOWN rendering — a plain document flow —
+    # rather than the web layout, whose cards and full-bleed banner print like a saved web page.
+    if markdown:
+        return html_to_pdf(markdown_to_print_html(markdown, title))
+    if html:
+        return html_to_pdf(html)
+    raise ValueError("pdf export needs the rendered markdown - pass markdown=render_report(...)")
 
 
 def _numbered(
@@ -363,10 +359,14 @@ def _layout(prs: Any, *names: str, fallback: int) -> Any:
 
     Every template orders its layouts differently, so taking ``slide_layouts[1]`` and hoping is
     how a themed deck comes out wrong. Match the standard names first."""
-    wanted = {n.lower() for n in names}
-    for layout in prs.slide_layouts:
-        if layout.name.lower() in wanted:
-            return layout
+    # Preference order is the CALLER's, not the template's: scanning the deck's layouts and
+    # taking the first match returned "Title Only" for a picture slide simply because it is
+    # earlier in the file than "Picture with Caption".
+    by_name = {layout.name.lower(): layout for layout in prs.slide_layouts}
+    for name in names:
+        found = by_name.get(name.lower())
+        if found is not None:
+            return found
     return prs.slide_layouts[fallback if fallback < len(prs.slide_layouts) else 0]
 
 
@@ -390,14 +390,25 @@ def _body_placeholder(slide: Any) -> Any:
 
 
 def _figure_slide(prs: Any, layout: Any, path: str, caption: str) -> None:
-    """One slide holding a figure and its caption as the title."""
+    """A slide for one figure: picture in the picture placeholder, caption beneath it."""
+    from pptx.enum.shapes import PP_PLACEHOLDER
+
     slide = prs.slides.add_slide(layout)
     if slide.shapes.title is not None:
         slide.shapes.title.text = xml_safe(caption) or "Figure"
-    holder = _body_placeholder(slide)  # drop the empty body so no prompt text shows
-    if holder is not None:
-        holder._element.getparent().remove(holder._element)
-    _place_picture(prs, slide, path)
+    holders = _content_holders(slide)
+    picture = next(
+        (h for h in holders if h.placeholder_format.type == PP_PLACEHOLDER.PICTURE), None
+    )
+    if picture is not None:
+        _fill_box(prs, slide, picture, path)
+        for other in holders:
+            if other is not picture and not other.text_frame.text.strip():
+                other._element.getparent().remove(other._element)
+    else:
+        for other in holders:
+            other._element.getparent().remove(other._element)
+        _place_picture(prs, slide, path)
 
 
 def _place_picture(prs: Any, slide: Any, path: str) -> None:
@@ -427,15 +438,69 @@ def _place_picture(prs: Any, slide: Any, path: str) -> None:
         slide.shapes.add_picture(path, left, top_margin, width=width, height=height)
 
 
+def _fit(frame: Any, points: list[tuple[int, str]]) -> None:
+    """Shrink dense text so it cannot overflow its placeholder.
+
+    Only ever shrinks: a template's own sizing is respected until the content would spill, which
+    is the failure that makes a generated deck look broken. python-pptx cannot measure text, so
+    this is a density heuristic, not exact layout."""
+    from pptx.util import Pt
+
+    chars = sum(len(t) for _l, t in points)
+    lines = len(points)
+    if chars <= 260 and lines <= 5:
+        return  # comfortable — leave the template alone
+    size = 18 if (chars <= 420 and lines <= 7) else (16 if chars <= 620 else 14)
+    for para in frame.paragraphs:
+        for run in para.runs:
+            run.font.size = Pt(size)
+
+
+def _fill_box(prs: Any, slide: Any, holder: Any, path: str) -> None:
+    """Put a picture where a placeholder is, scaled to fit its box, then drop the placeholder."""
+    from PIL import Image
+
+    left, top = holder.left, holder.top
+    box_w, box_h = holder.width, holder.height
+    holder._element.getparent().remove(holder._element)
+    try:
+        with Image.open(path) as img:
+            ratio = img.height / img.width if img.width else 0.75
+    except Exception:  # noqa: BLE001
+        ratio = 0.75
+    width = box_w
+    height = int(width * ratio)
+    if height > box_h:
+        height = box_h
+        width = int(height / ratio) if ratio else box_w
+    with suppress(Exception):
+        slide.shapes.add_picture(
+            path, left + int((box_w - width) / 2), top + int((box_h - height) / 2),
+            width=width, height=height,
+        )
+
+
+def _content_holders(slide: Any) -> list[Any]:
+    """The non-title placeholders of a slide, in layout order."""
+    from pptx.enum.shapes import PP_PLACEHOLDER
+
+    skip = (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE, PP_PLACEHOLDER.DATE,
+            PP_PLACEHOLDER.FOOTER, PP_PLACEHOLDER.SLIDE_NUMBER)
+    return [p for p in slide.placeholders if p.placeholder_format.type not in skip]
+
+
 def _to_pptx(
-    title: str, subtitle: str, secs: list[tuple[str, str, list[str]]], meta: list[str], refs: list[str],
+    title: str, subtitle: str, secs: list[tuple[str, str, list[str]]], meta: list[str],
+    refs: list[str],
     *, template: str = "", figure_map: Mapping[str, tuple[str, str]] | None = None,
 ) -> bytes:
-    """Build the deck from a template's LAYOUTS and PLACEHOLDERS only.
+    """Build the deck from the template's LAYOUTS and PLACEHOLDERS.
 
-    Nothing here sets a font, colour or position, so pointing ``reports.pptx_template`` at any
-    deck — or applying a different theme in PowerPoint afterwards — restyles the whole thing.
-    With no template configured, python-pptx's default gives a clean Office look out of the box."""
+    Uses more than one layout on purpose: a deck where every slide is a title over a bullet list
+    is exhausting to sit through. A section with a figure puts the picture BESIDE its points
+    (Two Content) so the two read together; a further figure gets a Picture-with-Caption slide;
+    dense text is shrunk rather than allowed to overflow. Nothing sets a font face or colour, so
+    swapping the template still restyles everything."""
     from pptx import Presentation
 
     figure_map = dict(figure_map or {})
@@ -443,43 +508,61 @@ def _to_pptx(
     cover = prs.slides.add_slide(_layout(prs, "Title Slide", fallback=0))
     if cover.shapes.title is not None:
         cover.shapes.title.text = xml_safe(title)
-    sub = _body_placeholder(cover)
-    if sub is not None:
-        sub.text = xml_safe(subtitle) or _AI_WARNING
+    holders = _content_holders(cover)
+    if holders:
+        holders[0].text = xml_safe(subtitle) or _AI_WARNING
+
     body_layout = _layout(prs, "Title and Content", "Title and Body", fallback=1)
+    two_layout = _layout(prs, "Two Content", "Comparison", fallback=1)
+    pic_layout = _layout(prs, "Picture with Caption", "Title Only", fallback=1)
+
     placed: set[str] = set()
     for heading, bdy, sec_imgs in secs:
-        chunks = _slide_chunks(_points(bdy))
+        points = _points(bdy)
+        figs = [(sha, figure_map[sha]) for sha in sec_imgs if sha in figure_map]
+        chunks = _slide_chunks(points)
+        head = xml_safe(heading) or xml_safe(title)
         for n, chunk in enumerate(chunks):
-            slide = prs.slides.add_slide(body_layout)
-            head = xml_safe(heading) or xml_safe(title)
+            pair = figs[0] if (n == 0 and figs and len(chunk) <= _SLIDE_BULLETS) else None
+            layout = two_layout if pair is not None else body_layout
+            slide = prs.slides.add_slide(layout)
             if slide.shapes.title is not None:
                 slide.shapes.title.text = head if n == 0 else f"{head} (cont.)"
-            holder = _body_placeholder(slide)
-            if holder is not None:
-                _fill(holder, chunk)
-            # the full prose lives in the speaker notes, so shortening the slide loses nothing
+            holders = _content_holders(slide)
+            if holders:
+                _fill(holders[0], chunk)
+                _fit(holders[0].text_frame, chunk)
+            if pair is not None:
+                sha, (path, _caption) = pair
+                if len(holders) > 1:
+                    _fill_box(prs, slide, holders[1], path)  # picture beside the points
+                else:
+                    _place_picture(prs, slide, path)
+                placed.add(sha)
+            for extra in holders[2:]:  # unused placeholders would show prompt text
+                extra._element.getparent().remove(extra._element)
             if n == 0 and bdy.strip():
                 with suppress(AttributeError, KeyError):  # a template without a notes master
                     slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
-        # this section's figures follow it immediately, illustrating the point just made
-        for sha in sec_imgs:
-            if sha in figure_map:
-                path, caption = figure_map[sha]
-                _figure_slide(prs, body_layout, path, caption or xml_safe(heading))
+        for sha, (path, caption) in figs:  # any further figure gets its own slide
+            if sha not in placed:
+                _figure_slide(prs, pic_layout, path, caption)
                 placed.add(sha)
-    for sha, (path, caption) in figure_map.items():  # anything not attached to a section
+
+    for sha, (path, caption) in figure_map.items():  # not attached to any section
         if sha not in placed:
-            _figure_slide(prs, body_layout, path, caption)
+            _figure_slide(prs, pic_layout, path, caption)
+
     if refs:
         numbered = [(0, f"{i}. {r}") for i, r in enumerate(refs, 1)]
         for n, chunk in enumerate(_slide_chunks(numbered)):
             slide = prs.slides.add_slide(body_layout)
             if slide.shapes.title is not None:
                 slide.shapes.title.text = "References" if n == 0 else "References (cont.)"
-            holder = _body_placeholder(slide)
-            if holder is not None:
-                _fill(holder, chunk)
+            holders = _content_holders(slide)
+            if holders:
+                _fill(holders[0], chunk)
+                _fit(holders[0].text_frame, chunk)
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
@@ -551,6 +634,51 @@ def _soffice() -> str | None:
             return found
     mac = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
     return mac if Path(mac).is_file() else None
+
+
+_PRINT_CSS = """
+@page{size:Letter;margin:0.85in 0.8in;}
+body{font:11.5pt/1.55 Georgia,"Times New Roman",serif;color:#111;max-width:none;margin:0;}
+h1{font-size:20pt;margin:0 0 .2em;line-height:1.2;}
+h2{font-size:14.5pt;margin:1.4em 0 .35em;border-bottom:1px solid #ccc;padding-bottom:.15em;
+page-break-after:avoid;}
+h3{font-size:12.5pt;margin:1.1em 0 .3em;page-break-after:avoid;}
+p,li{orphans:3;widows:3;}
+blockquote{margin:.6em 0;padding:.5em .9em;background:#f4f4f6;border-left:3px solid #bbb;
+font-size:10.5pt;color:#333;}
+pre{background:#f4f4f6;border:1px solid #ddd;border-radius:4px;padding:.7em .9em;
+font:9.5pt/1.4 "SF Mono",Menlo,Consolas,monospace;white-space:pre-wrap;page-break-inside:avoid;}
+code{font:9.5pt "SF Mono",Menlo,Consolas,monospace;background:#f4f4f6;padding:.1em .3em;
+border-radius:3px;}
+pre code{background:none;padding:0;}
+img{max-width:100%;max-height:4.2in;height:auto;display:block;margin:.7em auto;
+page-break-inside:avoid;}
+table{border-collapse:collapse;width:100%;font-size:10pt;margin:.7em 0;}
+th,td{border:1px solid #ccc;padding:.35em .5em;text-align:left;}
+th{background:#f0f0f3;}
+hr{border:none;border-top:1px solid #ccc;margin:1.4em 0;}
+a{color:#123f7a;}
+"""
+
+
+def markdown_to_print_html(md: str, title: str = "") -> str:
+    """Markdown -> a document-shaped HTML page for printing.
+
+    Deliberately not the report's web layout: a PDF should read as a document, so this is a
+    single serif column with print-aware page breaks and no cards or banner styling."""
+    from html import escape
+
+    try:
+        from markdown_it import MarkdownIt
+
+        body = MarkdownIt("commonmark", {"html": False, "linkify": False}).enable("table").render(md)
+    except ImportError:  # keep working without the md extra
+        body = "<pre>" + escape(md) + "</pre>"
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        f"<title>{escape(title or 'Report')}</title><style>{_PRINT_CSS}</style>"
+        f"</head><body>{body}</body></html>"
+    )
 
 
 def docx_to_pdf(data: bytes) -> bytes | None:
