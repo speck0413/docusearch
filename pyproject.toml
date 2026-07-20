@@ -147,10 +147,7 @@ packages = ["src/docusearch"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["src", "tests", "harness", "corpora"]
-# redteam/ holds the adversary's independently-written check scripts + findings — a
-# record of the red-team pass, not builder code, so it is not held to our lint bar.
-extend-exclude = ["redteam"]
+src = ["src"]
 
 [tool.ruff.lint]
 # Sensible, low-ceremony rule set. E/F = pyflakes+pycodestyle, I = isort,
