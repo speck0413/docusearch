@@ -1,9 +1,10 @@
-# docusearch — instructions for AI agents (Claude Code / Claude Desktop)
+# docusearch — instructions for AI coding agents
 
 You have a **docusearch** MCP server: a local catalog of the team's technical
 documentation and code. Use it to ground your answers in real sources. It connects over
-**HTTP MCP** (streamable) — see `agents/mcp.json` (`http://localhost:8321/mcp`); the
-human runs `docusearch serve` first.
+**HTTP MCP** (streamable) at `http://localhost:8321/mcp`; the human runs `docusearch serve`
+first. Claude Code reads the connection from `.mcp.json`; VS Code / Copilot from
+`.vscode/mcp.json`.
 
 ## Tools (names are stable — depend on them)
 
@@ -14,7 +15,7 @@ human runs `docusearch serve` first.
 - `related_documents(doc_id, direction="both")` — linked / linking documents.
 - `catalog_stats()` — counts + which embedding model the index uses.
 
-## Citations are mandatory (R-CIT-1)
+## Citations are mandatory
 
 Every factual sentence you write from the catalog **must end with a citation tag**:
 
@@ -26,14 +27,13 @@ Every factual sentence you write from the catalog **must end with a citation tag
 
 ## Workflow
 
-1. Turn the question into a few focused queries; call `search_docs` **once** with the
-   list.
+1. Turn the question into a few focused queries; call `search_docs` **once** with the list.
 2. Read the top snippets; open promising ones with `get_document`; follow
    `related_documents` when a source points elsewhere.
 3. Answer in short factual sentences, each ending in `[D:...]` or `[GK]`.
 4. For a written deliverable, don't hand-format it — send your cited body to the
-   `/v1/reports` endpoint (or the `create_report` tool when available), which renders a
-   consistent banner + numbered references and verifies every citation.
+   `/v1/reports` endpoint (or the `create_report` tool), which renders a consistent banner
+   + numbered references and verifies every citation.
 
 Prefer the catalog over guessing. If `search_docs` returns nothing relevant, say so and
 mark the answer `[GK]` — never fabricate a citation.

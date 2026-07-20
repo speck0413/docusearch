@@ -11,8 +11,9 @@ laptops and on servers; heavy ingestion belongs on the server, clients stay ligh
 
 > Ingests HTML, PDF, DOCX, and Markdown; BM25 with optional local **hybrid** (vector +
 > RRF) search, all with citations/relations/image retention; `serve` exposes REST + MCP.
-> See [`GETTING_STARTED.md`](GETTING_STARTED.md) for the full operator and user guide
-> (PowerShell **and** bash).
+> See [`GETTING_STARTED.md`](GETTING_STARTED.md) for the full operator and user guide, and
+> [`SERVER-SETUP-GUIDE.md`](SERVER-SETUP-GUIDE.md) to run it as a central team server
+> (PowerShell **and** bash throughout).
 
 ## Run it on your documents (macOS)
 
@@ -143,7 +144,7 @@ needs code changes to retarget. Ways to shift it per run:
 
 Benchmarked on a controlled corpus with human-authored ground truth (18 signal topics + 400
 distractor docs). Two different jobs are reported separately, because averaging them hides
-the tradeoff. Reproduce with `python -m harness.embed_benchmark`.
+the tradeoff.
 
 **1. Is turning on a model worth it? (product mode: hybrid BM25+vector, vs BM25-only)**
 
@@ -204,10 +205,6 @@ second a few-hundred-person organization generates at peak, and **no GPU is requ
 index for a mid-size corpus fits in ~1 GB of RAM; a BM25-only deployment is lighter still. Vertical
 scale (more cores) and horizontal scale (federation, below) both apply. Everything is deterministic
 and offline-capable once the embedding model is cached.
-
-> Reproduce: query latency + memory with the perf harness on any ingested store; the model-quality
-> table above with `python -m harness.embed_benchmark`; federation parity with `python -m
-> harness.federated --corpus <dir> --shards 3`.
 
 ## Central MCP server (one server for the whole company)
 

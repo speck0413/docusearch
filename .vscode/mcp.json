@@ -1,5 +1,5 @@
 {
-  "mcpServers": {
+  "servers": {
     "docusearch": {
       "type": "http",
       "url": "http://localhost:8321/mcp"

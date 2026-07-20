@@ -114,7 +114,8 @@ docusearch serve --config firmware.yaml --port 8322   # catalog B -> /mcp on 832
 ## 1.5 Connect the clients
 
 The connection is always the same HTTP MCP URL (`http://<host>:<port>/mcp`); each client
-just registers it differently. A ready-to-copy `agents/mcp.json` ships in the repo.
+just registers it differently. Two ready-to-copy configs ship in the repo: `.mcp.json`
+(Claude Code / Claude Desktop) and `.vscode/mcp.json` (VS Code / Copilot).
 
 - **Claude Code (CLI):**
   ```bash
@@ -122,17 +123,17 @@ just registers it differently. A ready-to-copy `agents/mcp.json` ships in the re
   claude mcp list                          # verify it connected
   ```
 - **Claude Desktop:** Settings → Developer → Edit Config, add the `mcpServers` entry from
-  §1.4 (or copy `agents/mcp.json`), then restart the app.
-- **VS Code (Claude / Copilot MCP):** add the server to your MCP config (`.vscode/mcp.json`
-  or the extension's MCP settings) using the same `{ "type": "http", "url": ".../mcp" }`
-  shape, then reload the window.
-- **GitHub Copilot CLI:** register the HTTP MCP endpoint via its MCP configuration (see
-  `agents/copilot-instructions.md`), which also carries the citation rules Copilot must
-  follow.
+  §1.4 (or copy `.mcp.json`), then restart the app.
+- **VS Code (Claude / Copilot MCP):** the repo's `.vscode/mcp.json` registers it
+  automatically; or add the same `{ "type": "http", "url": ".../mcp" }` shape to the
+  extension's MCP settings, then reload the window.
+- **GitHub Copilot:** it reads `.github/copilot-instructions.md` (the same generic prompt
+  as Claude's) automatically, and connects via `.vscode/mcp.json`.
 
-For any agent client, `agents/CLAUDE.md` documents the **mandatory citation grammar** —
-every catalog fact ends in `[D:<doc>#<chunk>]`, everything else in `[GK]` — and the report
-builder refuses citations outside the retrieved evidence, so agents can't fabricate refs.
+Both `CLAUDE.md` (Claude Code) and `.github/copilot-instructions.md` (Copilot) carry the
+**mandatory citation grammar** — every catalog fact ends in `[D:<doc>#<chunk>]`, everything
+else in `[GK]` — and the report builder refuses citations outside the retrieved evidence,
+so agents can't fabricate refs. The two files are identical apart from their filename.
 
 ## 1.6 Permissions: who can see which categories
 
@@ -244,13 +245,14 @@ docusearch report --spec answer.yaml --format md   --out watchdog.md      # Mark
 The renderer **refuses** any `[D:...]` not in `evidence`, so a report can't cite something
 that wasn't actually retrieved. (Reports are also available over REST at `POST /v1/reports`.)
 
-## 2.4 The research agent + exhaustiveness levels
+## 2.4 Research questions + exhaustiveness levels
 
-`agents/prompts/docusearch-researcher.md` is a ready-made agent that answers a question
-end-to-end: it batches searches, synthesizes a cited answer, and renders the report for
-you. Point Claude Code (or any MCP client) at it, or hand it to a subagent.
-
-It takes an **exhaustiveness** level (1–10, **default 5**):
+For a question you want answered end-to-end — batched searches, a synthesized cited
+answer, and a rendered report — just ask any connected agent (Claude Code or Copilot). The
+generic prompt in `CLAUDE.md` / `.github/copilot-instructions.md` already tells it to batch
+its searches and cite every claim; Claude Code users also have the bundled **`docusearch`
+skill** (`.claude/skills/docusearch`), which drives this with an explicit level-of-effort
+knob (1–10, **default 5**):
 
 | Level | Use it for | Behavior |
 |-------|-----------|----------|
@@ -260,8 +262,7 @@ It takes an **exhaustiveness** level (1–10, **default 5**):
 
 It **always batches** its queries (all phrasings for a round go in one
 `search --batch-file ... --json` call — 10 queries batched is far faster than 10 separate
-calls, which each reload the model). Sample task prompts live in
-[`agents/prompts/SAMPLE_PROMPTS.md`](agents/prompts/SAMPLE_PROMPTS.md).
+calls, which each reload the model).
 
 ---
 
