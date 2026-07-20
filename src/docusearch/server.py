@@ -511,9 +511,10 @@ class Service:
             # Its figures are written beside the report so the print step can load them.
             markdown = ""
             if fmt == "pdf":
-                assets = report_store.reports_dir(cfg.paths.tmp_dir) / "assets"
-                markdown = str(self.build_report(spec, base_url=base_url, fmt="md",
-                                                 asset_dir=str(assets)))
+                # NO asset_dir here on purpose. The PDF is printed with set_content(), which has
+                # no base URL, so a relative "assets/x.png" can never resolve — every figure came
+                # out broken. Inline data URIs are what chromium can actually load.
+                markdown = str(self.build_report(spec, base_url=base_url, fmt="md"))
             return report_export.export_report(
                 title=str(spec.get("title", "Report")),
                 subtitle=str(spec.get("subtitle", "")),

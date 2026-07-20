@@ -233,6 +233,7 @@ def _numbered(
 _SLIDE_BULLETS = 6
 _SLIDE_CHARS = 160  # a "point" longer than this is prose, not a bullet
 _SOURCE_LINES = 10  # a source list is one line each, so it packs tighter than bullets
+_DIVIDER_MIN_SECTIONS = 8  # below this a deck is short enough that dividers just pad it
 
 
 def _points(body: str) -> list[tuple[int, str]]:
@@ -283,10 +284,14 @@ def _slide_chunks(
 
 
 def _fill(holder: Any, points: list[tuple[int, str]]) -> None:
-    """Write real bullet PARAGRAPHS, not one newline-joined blob.
+    """Write real bullet PARAGRAPHS with breathing room.
 
     Setting ``.text`` with newlines produces a single paragraph that neither indents nor bullets
-    and simply overflows the placeholder — the reason decks looked like dumped documents."""
+    and simply overflows the placeholder. Line spacing and space-between-points are what separate
+    a deck that looks composed from one that looks dumped: default OOXML paragraphs sit flush
+    against each other, which reads as a wall even when the wording is short."""
+    from pptx.util import Pt
+
     frame = holder.text_frame
     frame.clear()
     frame.word_wrap = True
@@ -294,6 +299,8 @@ def _fill(holder: Any, points: list[tuple[int, str]]) -> None:
         para = frame.paragraphs[0] if i == 0 else frame.add_paragraph()
         para.text = text
         para.level = level
+        para.line_spacing = 1.15
+        para.space_after = Pt(10 if level == 0 else 4)
 
 
 def _styled(paragraph: object, *names: str) -> None:
@@ -513,14 +520,28 @@ def _to_pptx(
         cover.shapes.title.text = xml_safe(title)
     holders = _content_holders(cover)
     if holders:
-        holders[0].text = xml_safe(subtitle) or _AI_WARNING
+        # subtitle then the provenance line, so the cover states what this is and who it is for
+        sub = [(0, xml_safe(subtitle))] if subtitle else []
+        sub += [(0, xml_safe(line)) for line in meta if line.startswith(("For:", "Request:"))]
+        _fill(holders[0], sub or [(0, _AI_WARNING)])
+        for extra in holders[1:]:
+            extra._element.getparent().remove(extra._element)
 
     body_layout = _layout(prs, "Title and Content", "Title and Body", fallback=1)
     two_layout = _layout(prs, "Two Content", "Comparison", fallback=1)
     pic_layout = _layout(prs, "Picture with Caption", "Title Only", fallback=1)
 
+    section_layout = _layout(prs, "Section Header", "Title Only", fallback=1)
     placed: set[str] = set()
-    for heading, bdy, sec_imgs in secs:
+    # A divider every few sections gives a long deck rhythm; on a short one it is just noise.
+    divide_every = 4 if len(secs) >= _DIVIDER_MIN_SECTIONS else 0
+    for idx, (heading, bdy, sec_imgs) in enumerate(secs):
+        if divide_every and idx and idx % divide_every == 0:
+            divider = prs.slides.add_slide(section_layout)
+            if divider.shapes.title is not None:
+                divider.shapes.title.text = xml_safe(heading)
+            for extra in _content_holders(divider):
+                extra._element.getparent().remove(extra._element)
         points = _points(bdy)
         figs = [(sha, figure_map[sha]) for sha in sec_imgs if sha in figure_map]
         chunks = _slide_chunks(points)

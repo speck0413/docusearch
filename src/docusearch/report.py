@@ -15,6 +15,7 @@ Public surface:
 
 from __future__ import annotations
 
+import hashlib
 import html as _html
 import re
 from collections.abc import Mapping, Sequence
@@ -68,33 +69,41 @@ def _norm_sections(
 
 
 
+def _write_asset(src: str, asset_dir: str, stem: str) -> str:
+    """Materialise one data: URI as a file under ``asset_dir``; returns the relative link."""
+    import base64
+    from pathlib import Path
+
+    if not src.startswith("data:"):
+        return src
+    head, _, payload = src.partition(",")
+    mime = head[5:].split(";")[0]  # data:image/png;base64 -> image/png
+    ext = _EXT_FOR_MIME.get(mime, "png")  # never build a filename out of "svg+xml"
+    try:
+        target = Path(asset_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / f"{stem}.{ext}"
+        path.write_bytes(base64.b64decode(payload))
+        return f"{target.name}/{path.name}"
+    except (OSError, ValueError):
+        return src  # keep the data URI rather than losing the figure
+
+
+_EXT_FOR_MIME = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif",
+                 "image/webp": "webp", "image/svg+xml": "svg", "image/bmp": "bmp"}
+
+
 def _write_assets(
     figures: Mapping[str, tuple[str, str]], asset_dir: str
 ) -> dict[str, tuple[str, str]]:
     """Materialise data: URIs as files under ``asset_dir`` and relink them relatively.
 
     Markdown cannot embed binary; a base64 URI in a .md is unreadable to every editor and most
-    renderers. Writing the bytes next to the report keeps the images working for a human and for
-    any markdown-to-PDF conversion."""
-    import base64
-    from pathlib import Path
-
-    out: dict[str, tuple[str, str]] = {}
-    target = Path(asset_dir)
-    for sha, (src, caption) in figures.items():
-        if not src.startswith("data:"):
-            out[sha] = (src, caption)
-            continue
-        head, _, payload = src.partition(",")
-        ext = head.split("/")[-1].split(";")[0] or "png"
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-            path = target / f"{sha[:16]}.{ext}"
-            path.write_bytes(base64.b64decode(payload))
-            out[sha] = (f"{target.name}/{path.name}", caption)
-        except (OSError, ValueError):
-            out[sha] = (src, caption)  # keep the data URI rather than losing the figure
-    return out
+    renderers. Writing the bytes next to the report keeps the images working for a human."""
+    return {
+        sha: (_write_asset(src, asset_dir, sha[:16]), caption)
+        for sha, (src, caption) in figures.items()
+    }
 
 
 def _section_figures(
@@ -251,8 +260,14 @@ def render_report(
     figures = dict(figure_srcs or {})
     if fmt == "md" and asset_dir:
         # Markdown has no way to carry binary, so a data: URI is useless in a .md a human will
-        # open in an editor. Write each figure beside the file and link to it relatively.
+        # open in an editor. Write every figure beside the file and link to it relatively —
+        # including the evidence-derived ones, which used to slip through as raw base64.
         figures = _write_assets(figures, asset_dir)
+        embedded_images = [
+            (_write_asset(src, asset_dir, hashlib.sha256(src.encode()).hexdigest()[:16]),
+             clean_caption(cap))
+            for src, cap in embedded_images
+        ]
     fig_no = number_figures(secs, list(images))
     # bake the report-order label into each source so every renderer agrees on the numbering
     figures = {
