@@ -127,13 +127,15 @@ just registers it differently. Two ready-to-copy configs ship in the repo: `.mcp
 - **VS Code (Claude / Copilot MCP):** the repo's `.vscode/mcp.json` registers it
   automatically; or add the same `{ "type": "http", "url": ".../mcp" }` shape to the
   extension's MCP settings, then reload the window.
-- **GitHub Copilot:** it reads `.github/copilot-instructions.md` (the same generic prompt
-  as Claude's) automatically, and connects via `.vscode/mcp.json`.
+- **GitHub Copilot:** reads `CLAUDE.md` as always-on instructions automatically (same as
+  Claude Code — no separate Copilot file needed) and connects via `.vscode/mcp.json`.
 
-Both `CLAUDE.md` (Claude Code) and `.github/copilot-instructions.md` (Copilot) carry the
-**mandatory citation grammar** — every catalog fact ends in `[D:<doc>#<chunk>]`, everything
-else in `[GK]` — and the report builder refuses citations outside the retrieved evidence,
-so agents can't fabricate refs. The two files are identical apart from their filename.
+A single `CLAUDE.md` at the repo root is the instruction file for **both** Claude Code and
+VS Code / Copilot. It carries the **mandatory citation grammar** — every catalog fact ends
+in `[D:<doc>#<chunk>]`, everything else in `[GK]` — and the report builder refuses citations
+outside the retrieved evidence, so agents can't fabricate refs. The bundled skills under
+`.claude/skills/` are likewise read by both tools; the only tool-specific files are the two
+MCP configs (`.mcp.json` for Claude, `.vscode/mcp.json` for VS Code / Copilot).
 
 ## 1.6 Permissions: who can see which categories
 
@@ -249,10 +251,9 @@ that wasn't actually retrieved. (Reports are also available over REST at `POST /
 
 For a question you want answered end-to-end — batched searches, a synthesized cited
 answer, and a rendered report — just ask any connected agent (Claude Code or Copilot). The
-generic prompt in `CLAUDE.md` / `.github/copilot-instructions.md` already tells it to batch
-its searches and cite every claim; Claude Code users also have the bundled **`docusearch`
-skill** (`.claude/skills/docusearch`), which drives this with an explicit level-of-effort
-knob (1–10, **default 5**):
+generic prompt in `CLAUDE.md` already tells it to batch its searches and cite every claim;
+both tools also pick up the bundled **`docusearch` skill** (`.claude/skills/docusearch`),
+which drives this with an explicit level-of-effort knob (1–10, **default 5**):
 
 | Level | Use it for | Behavior |
 |-------|-----------|----------|
