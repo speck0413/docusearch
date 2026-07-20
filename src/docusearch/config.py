@@ -270,6 +270,23 @@ SCHEMA: tuple[_Node, ...] = (
         ),
     ),
     _Section(
+        "reports",
+        (
+            _Field(
+                "retain_days",
+                -1,
+                comment=(
+                    "How long a generated report file is kept under tmp_dir/reports/.\n"
+                    "  -1 : keep forever (default)\n"
+                    "   0 : delete at the next midnight\n"
+                    "   N : delete at midnight N days after the day it was written\n"
+                    "Midnight is the SERVER's local timezone. Swept when the server starts\n"
+                    "and after each report is written."
+                ),
+            ),
+        ),
+    ),
+    _Section(
         "serve",
         (
             _Field("host", "0.0.0.0", inline="bind address"),
@@ -677,6 +694,11 @@ class RankingConfig:
 
 
 @dataclass(frozen=True)
+class ReportsConfig:
+    retain_days: int
+
+
+@dataclass(frozen=True)
 class ServeConfig:
     host: str
     port: int
@@ -731,6 +753,7 @@ class Config:
     index: IndexConfig
     search: SearchConfig
     ranking: RankingConfig
+    reports: ReportsConfig
     serve: ServeConfig
     access: AccessConfig
     enrich: EnrichConfig
@@ -802,6 +825,7 @@ class Config:
                 rrf_k=int(se["rrf_k"]),
                 bm25_only=bool(se["bm25_only"]),
             ),
+            reports=ReportsConfig(retain_days=int(m["reports"]["retain_days"])),
             serve=ServeConfig(
                 host=str(sv["host"]),
                 port=int(sv["port"]),
