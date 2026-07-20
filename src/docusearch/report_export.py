@@ -49,36 +49,64 @@ def xlsx_cell(value: str) -> str:
 # and this is the single place that contract is stated — the MCP tool, help(), and the skill all
 # read from here so they cannot drift.
 FORMAT_GUIDANCE: dict[str, str] = {
-    "md": "Prose. Full paragraphs, fenced code blocks, markdown lists. No length limit.",
-    "html": "Prose, same as md — the richest layout. Cards render per section `kind`.",
+    "md": (
+        "PROSE DOCUMENT. Full paragraphs, fenced code, markdown lists, tables where they earn "
+        "their place. No length limit — depth is the point."
+    ),
+    "html": (
+        "PROSE DOCUMENT, the richest layout. Sections render as cards styled by their `kind`, so "
+        "pick kinds deliberately (overview / procedure / code / hardware / config / test-program "
+        "/ warning / reference). Figures render inline — pass the `img` shas of diagrams that "
+        "genuinely explain something."
+    ),
     "html-slide": (
-        "A DECK. One idea per section; 4-6 short bullets, each under ~15 words. Lead with the "
-        "point, not the preamble. Put a long procedure in several sections rather than one. "
-        "Code belongs in its own section, trimmed to the lines that matter."
+        "A PRESENTATION, so design it like one. Same craft as pptx below; it is the same deck in "
+        "a browser."
     ),
     "pptx": (
-        "A DECK. Same as html-slide: 4-6 short bullets per section, each under ~15 words, one "
-        "idea per section. Write bullets as markdown list items ('- ') so they render as real "
-        "bullets. Long sections are split across continuation slides and the full prose is kept "
-        "in the speaker notes, but a section written as paragraphs still reads as a wall of "
-        "text — write it short."
+        "You are DESIGNING A PRESENTATION, not summarising a document. Slides of uniform grey "
+        "bullets are a bad deck no matter how accurate they are.\n"
+        "  * Give it a narrative arc: what this is -> why it matters -> how to do it -> what "
+        "goes wrong. Every slide should earn its place and advance that arc.\n"
+        "  * VARY the slides. A one-line statement slide for a key claim. A short list where a "
+        "list is genuinely the right shape. A code slide with only the lines that matter. A "
+        "diagram slide that is mostly picture.\n"
+        "  * USE IMAGES. Search hits carry an `img` column when their section has a figure — a "
+        "block diagram or timing chart usually explains what a paragraph cannot. Pass those shas "
+        "in the spec's `images` and let the deck show them. A deck with no visuals is a "
+        "missed opportunity, not a neutral choice.\n"
+        "  * Write for the eye: lead with the point, cut filler words, keep a line scannable. "
+        "Aim for a handful of lines a slide, but break that when a slide genuinely needs more — "
+        "judgement beats a quota.\n"
+        "  * Put the depth in the speaker notes. They are preserved in full, so the slide can "
+        "stay clean without losing anything."
     ),
     "xlsx": (
-        "A GRID, one row per point. Write each section as a markdown list where every item is "
-        "one self-contained fact; use nested items ('  - ') for supporting detail. Avoid long "
-        "paragraphs: a paragraph becomes one enormous cell."
+        "A GRID, one row per point. Each list item should be one self-contained fact; nested "
+        "items ('  - ') become the detail column. It is meant to be sorted and filtered, so "
+        "think in records, not paragraphs — a paragraph becomes one unreadable cell."
     ),
     "docx": (
-        "A DOCUMENT. Prose with headings; short paragraphs beat one long one. Use markdown "
-        "lists for steps and enumerations so they render as real Word lists."
+        "A DOCUMENT for people to read and mark up. Prose with real headings, short paragraphs, "
+        "markdown lists for steps and enumerations. Figures are welcome — pass the `img` shas of "
+        "diagrams worth showing."
     ),
-    "pdf": "A DOCUMENT — identical to docx guidance; PDF is printed from the HTML rendering.",
+    "pdf": (
+        "A DOCUMENT — authored exactly like docx; the PDF is printed from the HTML rendering, so "
+        "figures and card styling carry through."
+    ),
 }
 
+# What to tell an author regardless of format.
+_UNIVERSAL_GUIDANCE = (
+    "Shape the content for its destination and use your judgement on presentation — these are "
+    "guardrails, not a template. Accuracy and citations are non-negotiable; layout is yours."
+)
 
 def guidance(fmt: str) -> str:
     """Authoring guidance for a target format (empty for an unknown one)."""
-    return FORMAT_GUIDANCE.get(fmt.lower(), "")
+    specific = FORMAT_GUIDANCE.get(fmt.lower(), "")
+    return f"{specific}\n\n{_UNIVERSAL_GUIDANCE}" if specific else ""
 
 
 _AI_WARNING = "AI-generated — verify every claim against the cited sources before relying on it."
@@ -111,6 +139,7 @@ def export_report(
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None = None,
     html: str = "",  # the rendered HTML report - required for fmt="pdf", ignored otherwise
     pptx_template: str = "",  # a .pptx/.potx whose theme + layouts the deck inherits
+    figures: Sequence[tuple[str, str]] = (),  # (image file path, caption) to place in the output
 ) -> bytes:
     """Render the report to ``fmt`` bytes. Raises ``CitationError`` if any citation references a
     ``(doc_id, chunk_id)`` outside ``evidence`` (R-CIT-1)."""
@@ -131,9 +160,9 @@ def export_report(
                         f"Model: {model}" if model else "",
                         f"Classification: {classification}") if x]
     if fmt == "docx":
-        return _to_docx(title, subtitle, secs, meta, refs)
+        return _to_docx(title, subtitle, secs, meta, refs, figures=figures)
     if fmt == "pptx":
-        return _to_pptx(title, subtitle, secs, meta, refs, template=pptx_template)
+        return _to_pptx(title, subtitle, secs, meta, refs, template=pptx_template, figures=figures)
     if fmt == "xlsx":
         return _to_xlsx(title, secs, meta, refs)
     if not html:
@@ -253,9 +282,11 @@ def _styled(paragraph: object, *names: str) -> None:
 
 
 def _to_docx(
-    title: str, subtitle: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str]
+    title: str, subtitle: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str],
+    *, figures: Sequence[tuple[str, str]] = (),
 ) -> bytes:
     from docx import Document
+    from docx.shared import Inches
 
     doc = Document()
     doc.add_heading(xml_safe(title), 0)
@@ -269,6 +300,13 @@ def _to_docx(
             doc.add_heading(xml_safe(heading), level=1)
         for para in _paragraphs(bdy):
             _styled(doc.add_paragraph(para), "Body Text")
+    if figures:
+        doc.add_heading("Figures", level=1)
+        for path, caption in figures:
+            with suppress(Exception):  # a missing/undecodable image must not fail the report
+                doc.add_picture(path, width=Inches(6.0))
+            if caption:
+                _styled(doc.add_paragraph(caption), "Caption", "Body Text")
     if refs:
         doc.add_heading("References", level=1)
         for i, r in enumerate(refs, 1):
@@ -309,9 +347,36 @@ def _body_placeholder(slide: Any) -> Any:
     return holders[0] if holders else None
 
 
+def _place_picture(prs: Any, slide: Any, path: str) -> None:
+    """Centre a picture in the slide's usable area, scaled to fit.
+
+    Geometry comes from the template's own slide size, so a 16:9 corporate deck and the default
+    4:3 both place it correctly — this is the one place positioning is unavoidable, and it is
+    derived, never hardcoded."""
+    from PIL import Image  # pillow ships with the vision extras; guarded by the caller
+
+    top_margin = int(prs.slide_height * 0.22)  # below the title
+    max_w = int(prs.slide_width * 0.86)
+    max_h = int(prs.slide_height - top_margin - prs.slide_height * 0.08)
+    try:
+        with Image.open(path) as img:
+            ratio = img.height / img.width if img.width else 0.75
+    except Exception:  # noqa: BLE001 - unreadable image: fall back to a sane box
+        ratio = 0.75
+    width = max_w
+    height = int(width * ratio)
+    if height > max_h:
+        height = max_h
+        width = int(height / ratio) if ratio else max_w
+    left = int((prs.slide_width - width) / 2)
+    # A corrupt or unreadable image must cost its slide, never the whole report.
+    with suppress(Exception):
+        slide.shapes.add_picture(path, left, top_margin, width=width, height=height)
+
+
 def _to_pptx(
     title: str, subtitle: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str],
-    *, template: str = "",
+    *, template: str = "", figures: Sequence[tuple[str, str]] = (),
 ) -> bytes:
     """Build the deck from a template's LAYOUTS and PLACEHOLDERS only.
 
@@ -342,6 +407,15 @@ def _to_pptx(
             if n == 0 and bdy.strip():
                 with suppress(AttributeError, KeyError):  # a template without a notes master
                     slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
+    for path, caption in figures:
+        slide = prs.slides.add_slide(_layout(prs, "Title Only", "Title and Content", fallback=1))
+        if slide.shapes.title is not None:
+            slide.shapes.title.text = xml_safe(caption) or "Figure"
+        # drop the layout's empty body placeholder so it does not show its prompt text
+        holder = _body_placeholder(slide)
+        if holder is not None:
+            holder._element.getparent().remove(holder._element)
+        _place_picture(prs, slide, path)
     if refs:
         numbered = [(0, f"{i}. {r}") for i, r in enumerate(refs, 1)]
         for n, chunk in enumerate(_slide_chunks(numbered)):

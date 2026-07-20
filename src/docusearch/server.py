@@ -483,6 +483,18 @@ class Service:
         evidence = {(int(d), int(c)) for d, c in spec.get("evidence", [])}
         sources = list(spec.get("sources", [])) or [s.name for s in cfg.sources]
         if fmt in report_export.EXPORT_FORMATS:
+            # Resolve the spec's image shas to files so a deck/document can SHOW the diagrams,
+            # not just describe them. Anything unresolvable is skipped, never an error.
+            figures: list[tuple[str, str]] = []
+            for sha in list(spec.get("images", [])):
+                found = self.image(str(sha))
+                if found is not None:
+                    with Store.open(cfg.paths.db_path) as _db:
+                        row = _db.get_image(str(sha))
+                    caption = ""
+                    if row is not None:
+                        caption = str(row["caption"] or row["alt"] or "")
+                    figures.append((str(found[0]), caption))
             # PDF is printed from the HTML report, so there is one layout, not two that drift.
             html = self.build_report(spec, base_url=base_url, fmt="html") if fmt == "pdf" else ""
             return report_export.export_report(
@@ -499,6 +511,7 @@ class Service:
                 ref_targets=report.reference_targets(cfg.paths.db_path, evidence, base_url=base_url),
                 html=str(html),
                 pptx_template=cfg.reports.pptx_template,
+                figures=figures,
             )
         return report.render_report(
             title=str(spec.get("title", "Report")),
@@ -1047,8 +1060,15 @@ def _search_payload(
         for hit in lst:
             documents.setdefault(_doc_key(hit), [hit.title, hit.path, hit.fmt])
 
-    # an image-derived hit describes a picture — carry the ref so it can be viewed and cited
+    # A hit whose section holds a figure carries it, so an agent can SHOW the diagram rather than
+    # only describe it. Captions are stated once in an `images` map (the same image recurs across
+    # hits), so the model can judge relevance without fetching anything.
     with_images = any(hit.images for lst in results for hit in lst)
+    captions: dict[str, str] = {}
+    for lst in results:
+        for hit in lst:
+            for sha, text in hit.image_captions.items():
+                captions.setdefault(sha, text)
 
     def row(hit: SearchHit) -> list[Any]:
         cells: list[Any] = [hit.citation, _doc_key(hit), hit.locator, hit.kind, hit.snippet]
@@ -1069,14 +1089,16 @@ def _search_payload(
             + " -> `documents[key]`, whose columns are named by `doc_fields`. "
             "Full text: get_document(doc_id). Open in a browser: url_base + doc_id."
             + (
-                " Rows with an `img` column describe a picture: fetch it at img_base + sha to "
-                "look at it, and cite it by the row's `cite` like any other evidence."
+                " A row's `img` lists figures in that chunk's section: `images[sha]` is the "
+                "caption, and GET img_base + sha returns the file — fetch one when a diagram "
+                "would say it better, and pass the shas as the report spec's `images` to show "
+                "them. Cite the row's `cite` as usual."
                 if with_images
                 else ""
             )
         ),
         "url_base": f"{base_url}/v1/documents/",
-        **({"img_base": f"{base_url}/v1/images/"} if with_images else {}),
+        **({"img_base": f"{base_url}/v1/images/", "images": captions} if with_images else {}),
         "embed_model_used": model_used,
         "search_mode": mode,
     }
@@ -1276,6 +1298,9 @@ knowledge of the domain.
       federation each row also has a `doc` column — use that as the key instead, because member
       stores number their documents independently.
     * Full chunk text: `get_document(doc_id)`. Browser link: `url_base` + doc_id.
+    * FIGURES: a row's `img` lists the shas of images in that chunk's section (present whether or
+      not vision ran). `images[sha]` is the caption; `GET img_base + sha` fetches the file. Pass
+      shas as the report spec's `images` to show them in the output.
   Batches over 4 queries clamp top_k to 5. `stores=["internal"]` searches only those members; omit
   for all. `prefix` = partial-term matching; `bm25_only` = skip vectors; `roles` = cooperative
   filter.

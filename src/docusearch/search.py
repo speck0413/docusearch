@@ -55,6 +55,7 @@ class SearchHit:
     citation: str
     audience: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
+    image_captions: dict[str, str] = field(default_factory=dict)  # sha -> alt/caption
     embed_model_used: str = "none"
     search_mode: str = "bm25"
     store: str = ""  # federation member this hit came from (empty for a single store)
@@ -123,7 +124,14 @@ def _with_images(store: Store, hits: list[SearchHit]) -> list[SearchHit]:
     if not found:
         return hits
     return [
-        replace(hit, images=[str(row["sha256"]) for row in found[hit.chunk_id]])
+        replace(
+            hit,
+            images=[str(row["sha256"]) for row in found[hit.chunk_id]],
+            image_captions={
+                str(row["sha256"]): str(row["caption"] or row["alt"] or "")
+                for row in found[hit.chunk_id]
+            },
+        )
         if hit.chunk_id in found
         else hit
         for hit in hits

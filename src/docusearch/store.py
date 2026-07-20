@@ -955,14 +955,17 @@ class Store:
         )
 
     def images_for_chunk(self, doc_id: int, chunk_id: int) -> list[sqlite3.Row]:
-        """Retained images associated with a cited chunk — for embedding a diagram directly in a
-        report. An ``enrichment``/``image_ref`` chunk shares its ``locator`` with its image (both
-        from the image's heading path), so map through ``(doc_id, locator)``. Returns
-        ``(sha256, ext, alt, caption)`` rows; empty for non-image chunks."""
+        """Retained images that sat in the same part of the document as this chunk.
+
+        A chunk and an image share a ``locator`` (both are the heading path they were extracted
+        under), so ``(doc_id, locator)`` recovers the figures belonging to a chunk's section. This
+        is deliberately NOT limited to image-derived chunks: a prose chunk about a timing diagram
+        should be able to show that diagram — an image is worth a thousand words of description
+        (R-ING-6). Returns ``(sha256, ext, alt, caption)`` rows; empty when the section has none."""
         row = self._conn.execute(
             "SELECT kind, locator FROM chunks WHERE document_id=? AND id=?", (doc_id, chunk_id)
         ).fetchone()
-        if row is None or row["kind"] not in ("enrichment", "image_ref"):
+        if row is None:
             return []
         return self._conn.execute(
             "SELECT sha256, ext, alt, caption FROM images WHERE doc_id=? AND locator=?",
@@ -971,14 +974,17 @@ class Store:
 
     def images_for_chunks(self, chunk_ids: Sequence[int]) -> dict[int, list[sqlite3.Row]]:
         """``images_for_chunk`` for a whole ranked result set in one query — search calls this on
-        every hit, so it must not be N+1. Keyed by chunk id; chunks with no image are absent."""
+        every hit, so it must not be N+1. Keyed by chunk id; chunks with no image are absent.
+
+        Any hit whose section contains a figure carries it, not just image-derived chunks, so an
+        agent writing a report or a deck can show the diagram the text is describing."""
         if not chunk_ids:
             return {}
         placeholders = ",".join("?" * len(chunk_ids))
         rows = self._conn.execute(
             "SELECT c.id AS chunk_id, i.sha256, i.ext, i.alt, i.caption "
             "FROM chunks c JOIN images i ON i.doc_id = c.document_id AND i.locator = c.locator "
-            f"WHERE c.id IN ({placeholders}) AND c.kind IN ('enrichment', 'image_ref') "
+            f"WHERE c.id IN ({placeholders}) "
             "ORDER BY c.id, i.sha256",  # deterministic ordering (R-SRCH-5)
             tuple(chunk_ids),
         ).fetchall()

@@ -32,6 +32,13 @@ The user picks an effort level (default **medium**):
 
 ## Tools (docusearch MCP)
 
+- **Figures ride along with search results.** When a hit's section contains an image, its row
+  gains an `img` column of shas; `images[sha]` gives the caption and `GET img_base + sha`
+  returns the file over plain HTTP. This works whether or not vision enrichment was ever run,
+  because the figure is tied to the chunk by position, not by a generated description. Fetch one
+  when a diagram would explain something better than a paragraph, and pass the shas as the
+  report spec's `images` so the output actually shows them. **A deck or document with no visuals
+  is usually a missed opportunity** — an image is worth a thousand words of prose.
 - `search_docs(queries: list[str], top_k=10)` → a **table**: `results[i]` is query i's rows,
   ranked best-first, columns named by `hit_fields` (`cite, locator, kind, snippet`). `cite` is
   the citation, quoted verbatim. Join a row to its document on the doc part of `cite`
