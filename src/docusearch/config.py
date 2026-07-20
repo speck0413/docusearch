@@ -299,7 +299,7 @@ SCHEMA: tuple[_Node, ...] = (
             ),
             _Field(
                 "theme",
-                "midnight",
+                "slate",
                 comment=(
                     "Default visual theme for html / html-slide / pdf reports. This is a\n"
                     "DEFAULT, not a house style: a requester may ask for another and the\n"

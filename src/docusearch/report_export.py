@@ -13,6 +13,7 @@ import re
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from . import citations
@@ -104,6 +105,10 @@ _UNIVERSAL_GUIDANCE = (
     "classification, request and provenance, and the References list built from your evidence.\n"
     "REQUIRED of you: every catalog claim carries its [D:doc#chunk], general knowledge carries "
     "[GK], and no claim goes beyond what the cited chunk says.\n"
+    "FIGURES GO WITH THEIR SECTION. Put a diagram's sha in that section's own `images` list, not "
+    "in the spec's top-level `images` — a figure belongs beside the text it explains, telling "
+    "the story as it is told. Top-level `images` are for anything that genuinely belongs "
+    "nowhere in particular, and they land at the end.\n"
     "EVERYTHING ELSE IS YOURS. How many sections, what they are called, how long they run, what "
     "order they take, which `kind` each one is, whether to lead with a summary or build to one, "
     "when a table beats prose, when a figure beats both. There is no required outline and no "
@@ -123,11 +128,18 @@ _AI_WARNING = "AI-generated — verify every claim against the cited sources bef
 
 
 def _sections(
-    sections: Sequence[Mapping[str, str]] | None, body: str
-) -> list[tuple[str, str]]:
+    sections: Sequence[Mapping[str, Any]] | None, body: str
+) -> list[tuple[str, str, list[str]]]:
+    """``(heading, body, image shas)``. A section's figures belong with it, not in a dump at the
+    end where the reader has to work out what each one referred to."""
     if sections:
-        return [(str(s.get("heading", "")), str(s.get("body", ""))) for s in sections]
-    return [("", body)] if body else []
+        out = []
+        for sec in sections:
+            raw = sec.get("images") or []
+            shas = [str(x) for x in raw] if isinstance(raw, (list, tuple)) else []
+            out.append((str(sec.get("heading", "")), str(sec.get("body", "")), shas))
+        return out
+    return [("", body, [])] if body else []
 
 
 def _paragraphs(body: str) -> list[str]:
@@ -149,7 +161,7 @@ def export_report(
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None = None,
     html: str = "",  # the rendered HTML report - required for fmt="pdf", ignored otherwise
     pptx_template: str = "",  # a .pptx/.potx whose theme + layouts the deck inherits
-    figures: Sequence[tuple[str, str]] = (),  # (image file path, caption) to place in the output
+    figure_map: Mapping[str, tuple[str, str]] | None = None,  # sha -> (file path, caption)
 ) -> bytes:
     """Render the report to ``fmt`` bytes. Raises ``CitationError`` if any citation references a
     ``(doc_id, chunk_id)`` outside ``evidence`` (R-CIT-1)."""
@@ -157,7 +169,7 @@ def export_report(
     if fmt not in EXPORT_FORMATS:
         raise ValueError(f"unknown export format {fmt!r}; expected one of {EXPORT_FORMATS} (or md/html via report.render_report)")
     secs = _sections(sections, body)
-    surface = "\n".join([title, subtitle, *(b for _, b in secs)])
+    surface = "\n".join([title, subtitle, *(b for _h, b, _i in secs)])
     violations = citations.verify(surface, evidence)
     if violations:
         raise citations.CitationError(
@@ -170,14 +182,23 @@ def export_report(
                         f"Model: {model}" if model else "",
                         f"Classification: {classification}") if x]
     if fmt == "docx":
-        return _to_docx(title, subtitle, secs, meta, refs, figures=figures)
+        return _to_docx(title, subtitle, secs, meta, refs, figure_map=figure_map)
     if fmt == "pptx":
-        return _to_pptx(title, subtitle, secs, meta, refs, template=pptx_template, figures=figures)
+        return _to_pptx(title, subtitle, secs, meta, refs, template=pptx_template,
+                        figure_map=figure_map)
     if fmt == "xlsx":
         return _to_xlsx(title, secs, meta, refs)
+    # PDF is a DOCUMENT, so it comes from the docx — the closest equivalent — whenever a
+    # converter is available. Printing the web layout produced something that read like a saved
+    # web page rather than a document. Chromium is the fallback when no converter is installed.
+    docx = _to_docx(title, subtitle, secs, meta, refs, figure_map=figure_map)
+    converted = docx_to_pdf(docx)
+    if converted is not None:
+        return converted
     if not html:
         raise ValueError(
-            "pdf export renders the HTML report - pass html=render_report(..., fmt='html')"
+            "pdf export needs either a docx converter (LibreOffice) or the rendered HTML - "
+            "pass html=render_report(..., fmt='html')"
         )
     return html_to_pdf(html)
 
@@ -185,11 +206,11 @@ def export_report(
 def _numbered(
     title: str,
     subtitle: str,
-    secs: list[tuple[str, str]],
+    secs: list[tuple[str, str, list[str]]],
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None,
     evidence: set[tuple[int, int]],
     base_url: str = "",
-) -> tuple[list[tuple[str, str]], list[str]]:
+) -> tuple[list[tuple[str, str, list[str]]], list[str]]:
     """Bodies with inline citations turned into ``[1]`` markers, plus the numbered reference list.
 
     Reuses the HTML/Markdown renderer's numbering so all six formats number identically
@@ -199,8 +220,8 @@ def _numbered(
     """
     from . import report
 
-    numbering, ordered = report._collect_numbering([title, subtitle, *(b for _h, b in secs)])
-    bodies = [(head, report._cite_md(body, numbering)) for head, body in secs]
+    numbering, ordered = report._collect_numbering([title, subtitle, *(b for _h, b, _i in secs)])
+    bodies = [(head, report._cite_md(body, numbering), imgs) for head, body, imgs in secs]
     refs = [label for _href, label in report._references(ordered, base_url, ref_targets)]
     # evidence that was supplied but never cited still belongs in the list, after the cited ones
     cited = {(c.doc_id, c.chunk_id) for c in ordered}
@@ -292,12 +313,13 @@ def _styled(paragraph: object, *names: str) -> None:
 
 
 def _to_docx(
-    title: str, subtitle: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str],
-    *, figures: Sequence[tuple[str, str]] = (),
+    title: str, subtitle: str, secs: list[tuple[str, str, list[str]]], meta: list[str], refs: list[str],
+    *, figure_map: Mapping[str, tuple[str, str]] | None = None,
 ) -> bytes:
     from docx import Document
     from docx.shared import Inches
 
+    figure_map = dict(figure_map or {})
     doc = Document()
     doc.add_heading(xml_safe(title), 0)
     if subtitle:
@@ -305,15 +327,25 @@ def _to_docx(
     _styled(doc.add_paragraph(_AI_WARNING), "Intense Quote", "Quote", "Body Text")
     for line in meta:
         _styled(doc.add_paragraph(xml_safe(line)), "Caption", "Body Text")
-    for heading, bdy in secs:
+    placed: set[str] = set()
+    for heading, bdy, sec_imgs in secs:
         if heading:
             doc.add_heading(xml_safe(heading), level=1)
         for para in _paragraphs(bdy):
             _styled(doc.add_paragraph(para), "Body Text")
-    if figures:
+        for sha in sec_imgs:  # this section's figures, beside the text they explain
+            if sha in figure_map:
+                path, caption = figure_map[sha]
+                with suppress(Exception):  # a bad image costs its figure, never the report
+                    doc.add_picture(path, width=Inches(6.0))
+                if caption:
+                    _styled(doc.add_paragraph(caption), "Caption", "Body Text")
+                placed.add(sha)
+    loose = [(p, c) for sha, (p, c) in figure_map.items() if sha not in placed]
+    if loose:  # anything the author did not attach to a section
         doc.add_heading("Figures", level=1)
-        for path, caption in figures:
-            with suppress(Exception):  # a missing/undecodable image must not fail the report
+        for path, caption in loose:
+            with suppress(Exception):
                 doc.add_picture(path, width=Inches(6.0))
             if caption:
                 _styled(doc.add_paragraph(caption), "Caption", "Body Text")
@@ -357,6 +389,17 @@ def _body_placeholder(slide: Any) -> Any:
     return holders[0] if holders else None
 
 
+def _figure_slide(prs: Any, layout: Any, path: str, caption: str) -> None:
+    """One slide holding a figure and its caption as the title."""
+    slide = prs.slides.add_slide(layout)
+    if slide.shapes.title is not None:
+        slide.shapes.title.text = xml_safe(caption) or "Figure"
+    holder = _body_placeholder(slide)  # drop the empty body so no prompt text shows
+    if holder is not None:
+        holder._element.getparent().remove(holder._element)
+    _place_picture(prs, slide, path)
+
+
 def _place_picture(prs: Any, slide: Any, path: str) -> None:
     """Centre a picture in the slide's usable area, scaled to fit.
 
@@ -385,8 +428,8 @@ def _place_picture(prs: Any, slide: Any, path: str) -> None:
 
 
 def _to_pptx(
-    title: str, subtitle: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str],
-    *, template: str = "", figures: Sequence[tuple[str, str]] = (),
+    title: str, subtitle: str, secs: list[tuple[str, str, list[str]]], meta: list[str], refs: list[str],
+    *, template: str = "", figure_map: Mapping[str, tuple[str, str]] | None = None,
 ) -> bytes:
     """Build the deck from a template's LAYOUTS and PLACEHOLDERS only.
 
@@ -395,6 +438,7 @@ def _to_pptx(
     With no template configured, python-pptx's default gives a clean Office look out of the box."""
     from pptx import Presentation
 
+    figure_map = dict(figure_map or {})
     prs = Presentation(template) if template else Presentation()
     cover = prs.slides.add_slide(_layout(prs, "Title Slide", fallback=0))
     if cover.shapes.title is not None:
@@ -403,7 +447,8 @@ def _to_pptx(
     if sub is not None:
         sub.text = xml_safe(subtitle) or _AI_WARNING
     body_layout = _layout(prs, "Title and Content", "Title and Body", fallback=1)
-    for heading, bdy in secs:
+    placed: set[str] = set()
+    for heading, bdy, sec_imgs in secs:
         chunks = _slide_chunks(_points(bdy))
         for n, chunk in enumerate(chunks):
             slide = prs.slides.add_slide(body_layout)
@@ -417,15 +462,15 @@ def _to_pptx(
             if n == 0 and bdy.strip():
                 with suppress(AttributeError, KeyError):  # a template without a notes master
                     slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
-    for path, caption in figures:
-        slide = prs.slides.add_slide(_layout(prs, "Title Only", "Title and Content", fallback=1))
-        if slide.shapes.title is not None:
-            slide.shapes.title.text = xml_safe(caption) or "Figure"
-        # drop the layout's empty body placeholder so it does not show its prompt text
-        holder = _body_placeholder(slide)
-        if holder is not None:
-            holder._element.getparent().remove(holder._element)
-        _place_picture(prs, slide, path)
+        # this section's figures follow it immediately, illustrating the point just made
+        for sha in sec_imgs:
+            if sha in figure_map:
+                path, caption = figure_map[sha]
+                _figure_slide(prs, body_layout, path, caption or xml_safe(heading))
+                placed.add(sha)
+    for sha, (path, caption) in figure_map.items():  # anything not attached to a section
+        if sha not in placed:
+            _figure_slide(prs, body_layout, path, caption)
     if refs:
         numbered = [(0, f"{i}. {r}") for i, r in enumerate(refs, 1)]
         for n, chunk in enumerate(_slide_chunks(numbered)):
@@ -440,7 +485,7 @@ def _to_pptx(
     return buf.getvalue()
 
 
-def _to_xlsx(title: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str]) -> bytes:
+def _to_xlsx(title: str, secs: list[tuple[str, str, list[str]]], meta: list[str], refs: list[str]) -> bytes:
     """A spreadsheet is a GRID, so emit rows and columns — not a document poured down column A.
 
     Section / Point / Detail lets you filter and sort by section, which is the only reason to
@@ -455,7 +500,7 @@ def _to_xlsx(title: str, secs: list[tuple[str, str]], meta: list[str], refs: lis
     ws.append(["Section", "Point", "Detail"])
     for cell in ws[1]:
         cell.font = Font(bold=True)
-    for heading, bdy in secs:
+    for heading, bdy, _imgs in secs:
         points = _points(bdy)
         for level, text in points:
             ws.append([
@@ -494,6 +539,45 @@ def _to_xlsx(title: str, secs: list[tuple[str, str]], meta: list[str], refs: lis
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _soffice() -> str | None:
+    """The LibreOffice binary, if this machine has one."""
+    import shutil
+
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            return found
+    mac = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    return mac if Path(mac).is_file() else None
+
+
+def docx_to_pdf(data: bytes) -> bytes | None:
+    """Convert a .docx to PDF with LibreOffice, or None when no converter is installed.
+
+    Returning None rather than raising is deliberate: PDF must keep working on a machine without
+    LibreOffice, so the caller falls back to printing the HTML. The docx route is preferred
+    because a PDF should look like a document, not like a saved web page."""
+    binary = _soffice()
+    if binary is None:
+        return None
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "report.docx"
+        src.write_bytes(data)
+        try:
+            subprocess.run(  # noqa: S603 - argv built here, paths are ours
+                [binary, "--headless", "--norestore", "--convert-to", "pdf",
+                 "--outdir", tmp, str(src)],
+                capture_output=True, timeout=180, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        out = Path(tmp) / "report.pdf"
+        return out.read_bytes() if out.is_file() else None
 
 
 def html_to_pdf(html: str) -> bytes:

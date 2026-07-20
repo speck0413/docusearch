@@ -37,7 +37,7 @@ The user picks an effort level (default **medium**):
   returns the file over plain HTTP. This works whether or not vision enrichment was ever run,
   because the figure is tied to the chunk by position, not by a generated description. Fetch one
   when a diagram would explain something better than a paragraph, and pass the shas as the
-  report spec's `images` so the output actually shows them. **A deck or document with no visuals
+  **section's own `images` list** so the figure renders inside that section, beside the text it explains — not collected at the end. **A deck or document with no visuals
   is usually a missed opportunity** — an image is worth a thousand words of prose.
 - `search_docs(queries: list[str], top_k=10)` → a **table**: `results[i]` is query i's rows,
   ranked best-first, columns named by `hit_fields` (`cite, locator, kind, snippet`). `cite` is

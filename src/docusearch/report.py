@@ -19,6 +19,7 @@ import html as _html
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 from . import citations
 from ._version import __version__
@@ -46,15 +47,70 @@ _KINDS: dict[str, tuple[str, str]] = {
 
 
 def _norm_sections(
-    sections: Sequence[Mapping[str, str]] | None, body: str
-) -> list[tuple[str, str, str]]:
-    """Return ``[(heading, kind, body)]``. Falls back to one 'overview' card from ``body``."""
+    sections: Sequence[Mapping[str, Any]] | None, body: str
+) -> list[tuple[str, str, str, list[str]]]:
+    """Return ``[(heading, kind, body, image shas)]``.
+
+    A section's own ``images`` render INSIDE it — a diagram belongs beside the text it explains,
+    not collected at the end where the reader must work out what it referred to. Falls back to
+    one 'overview' card from ``body``."""
     if sections:
-        return [
-            (str(s.get("heading", "")), str(s.get("kind", "overview")), str(s.get("body", "")))
-            for s in sections
-        ]
-    return [("", "overview", body)]
+        out: list[tuple[str, str, str, list[str]]] = []
+        for sec in sections:
+            raw = sec.get("images") or []
+            shas = [str(x) for x in raw] if isinstance(raw, (list, tuple)) else []
+            out.append(
+                (str(sec.get("heading", "")), str(sec.get("kind", "overview")),
+                 str(sec.get("body", "")), shas)
+            )
+        return out
+    return [("", "overview", body, [])]
+
+
+
+def _section_figures(
+    shas: Sequence[str], srcs: Mapping[str, tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """``(src, caption)`` for a section's images, skipping any that could not be resolved."""
+    return [srcs[sha] for sha in shas if sha in srcs]
+
+
+def figure_sources(
+    db_path: str, staging_dir: str, shas: Sequence[str], *, base_url: str = ""
+) -> dict[str, tuple[str, str]]:
+    """Map each image sha to ``(src, caption)`` for embedding in a report.
+
+    The file is inlined as a base64 ``data:`` URI so the report stays self-contained — a figure
+    must still render when the report is emailed on. Falls back to the served URL when the file
+    is unreadable, and drops the image entirely when there is nothing to point at."""
+    import base64
+    from pathlib import Path
+
+    from .store import Store
+
+    out: dict[str, tuple[str, str]] = {}
+    if db_path == ":memory:" or not shas:
+        return out
+    images_dir = (Path(staging_dir) / "images").resolve()
+    with Store.open(db_path) as store:
+        for sha in dict.fromkeys(shas):  # dedupe, preserve order
+            row = store.get_image(str(sha))
+            if row is None:
+                continue
+            caption = str(row["caption"] or row["alt"] or "")
+            ext = str(row["ext"] or "png").lower()
+            path = (images_dir / f"{sha}.{ext}").resolve()
+            if path.is_relative_to(images_dir) and path.is_file():
+                mime = _MEDIA.get(ext, "application/octet-stream")
+                data = base64.b64encode(path.read_bytes()).decode("ascii")
+                out[str(sha)] = (f"data:{mime};base64,{data}", caption)
+            elif base_url:
+                out[str(sha)] = (f"{base_url.rstrip('/')}/v1/images/{sha}", caption)
+    return out
+
+
+_MEDIA = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+          "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml", "bmp": "image/bmp"}
 
 
 _AI_WARNING = (
@@ -67,7 +123,7 @@ def render_report(
     *,
     title: str,
     body: str = "",
-    sections: Sequence[Mapping[str, str]] | None = None,
+    sections: Sequence[Mapping[str, Any]] | None = None,
     subtitle: str = "",
     evidence: set[tuple[int, int]],
     base_url: str,
@@ -86,6 +142,7 @@ def render_report(
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None = None,
     trace: Mapping[str, object] | None = None,
     theme: str = "",  # a THEMES key; empty = the configured default
+    figure_srcs: Mapping[str, tuple[str, str]] | None = None,  # sha -> (src, caption)
 ) -> str:
     """Render a report to ``md`` or ``html``. Raises ``CitationError`` if any citation (in
     the title, subtitle, or any section) references a ``(doc_id, chunk_id)`` outside the
@@ -106,8 +163,8 @@ def render_report(
             requested_by,
             model,
             classification,
-            *[h for h, _k, _b in secs],
-            *[b for _h, _k, b in secs],
+            *[h for h, _k, _b, _i in secs],
+            *[b for _h, _k, b, _i in secs],
             *audience,
             *sources,
         ]
@@ -121,24 +178,26 @@ def render_report(
 
     stamp = generated_at or datetime.now(UTC).isoformat(timespec="seconds")
     # Number citations across the whole report, in order of first appearance.
-    numbering, ordered = _collect_numbering([title, subtitle, *[b for _h, _k, b in secs]])
+    numbering, ordered = _collect_numbering([title, subtitle, *[b for _h, _k, b, _i in secs]])
     image_urls = [f"{base_url.rstrip('/')}/v1/images/{sha}" for sha in images]
     meta = _meta(stamp, requested_by, model, embed_model, audience, sources, run_id)
     header = (classification, request)
     refs = _references(ordered, base_url, ref_targets)
 
+    figures = dict(figure_srcs or {})
     if fmt == "html-slide":
         return _render_slides(
             title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images,
-            trace, theme,
+            trace, theme, figures,
         )
     if fmt == "html":
         return _render_html(
             title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images,
-            trace, theme,
+            trace, theme, figures,
         )
     return _render_markdown(
-        title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images, trace
+        title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images, trace,
+        figure_srcs=figures,
     )
 
 
@@ -333,13 +392,14 @@ def _render_markdown(
     subtitle: str,
     header: tuple[str, str],
     meta: list[tuple[str, str]],
-    secs: list[tuple[str, str, str]],
+    secs: list[tuple[str, str, str, list[str]]],
     numbering: dict[tuple[int, int], int],
     refs: list[tuple[str, str]],
     image_urls: list[str],
     embedded_images: Sequence[tuple[str, str]],
     trace: Mapping[str, object] | None,
     theme: str = "",
+    figure_srcs: Mapping[str, tuple[str, str]] | None = None,
 ) -> str:
     classification, request = header
     out: list[str] = []
@@ -352,12 +412,15 @@ def _render_markdown(
     if request:
         out += [f'**Request:** "{request}"', ""]
     out += ["> " + "  ·  ".join(f"{v}" for _icon, v in meta), ""]
-    for heading, _kind, sec_body in secs:
+    for heading, _kind, sec_body, sec_imgs in secs:
         if heading:
             out.append(f"## {heading}")
             out.append("")
         out.append(_cite_md(sec_body.strip(), numbering))
         out.append("")
+        # the section's own figures follow its text, not a Figures dump at the end
+        for src, alt in _section_figures(sec_imgs, figure_srcs or {}):
+            out += [f"![{alt}]({src})", ""]
     if embedded_images or image_urls:
         out += ["## Figures"]
         # cited images are embedded inline (base64 data URI) so they render even if the
@@ -376,28 +439,37 @@ def _render_html(
     subtitle: str,
     header: tuple[str, str],
     meta: list[tuple[str, str]],
-    secs: list[tuple[str, str, str]],
+    secs: list[tuple[str, str, str, list[str]]],
     numbering: dict[tuple[int, int], int],
     refs: list[tuple[str, str]],
     image_urls: list[str],
     embedded_images: Sequence[tuple[str, str]],
     trace: Mapping[str, object] | None,
     theme: str = "",
+    figure_srcs: Mapping[str, tuple[str, str]] | None = None,
 ) -> str:
     esc = _html.escape
     classification, request = header
     chips = "".join(f'<span class="chip">{icon}&nbsp;{esc(v)}</span>' for icon, v in meta)
     cards: list[str] = []
-    for heading, kind, sec_body in secs:
+    for heading, kind, sec_body, sec_imgs in secs:
         icon, cls = _KINDS.get(kind, ("📄", "kind-overview"))
         head = (
             f'<div class="card-head"><span class="ic">{icon}</span><h2>{esc(heading)}</h2></div>'
             if heading
             else ""
         )
+        # figures belong beside the text they explain, inside this card
+        figs = "".join(
+            f'<figure><img src="{esc(src)}" alt="{esc(alt)}">'
+            + (f"<figcaption>{esc(alt)}</figcaption>" if alt else "")
+            + "</figure>"
+            for src, alt in _section_figures(sec_imgs, figure_srcs or {})
+        )
+        fig_html = f'<div class="figures inline">{figs}</div>' if figs else ""
         cards.append(
             f'<section class="card {cls}">{head}'
-            f'<div class="card-body">{_blocks_html(sec_body, numbering)}</div></section>'
+            f'<div class="card-body">{_blocks_html(sec_body, numbering)}{fig_html}</div></section>'
         )
     if embedded_images or image_urls:
         # cited images are embedded inline as base64 data URIs, so the figure survives even if
@@ -610,6 +682,13 @@ td.chg{background:rgba(230,180,60,.34)!important;font-weight:700;color:#ffe6a0;}
 letter-spacing:.03em;}
 .badge.added{background:#256b39;color:#c8f5d6;} .badge.removed{background:#7a2f2f;color:#f7cccc;}
 .badge.changed{background:#7a5f22;color:#ffe6a0;} .badge.identical{background:#20406b;color:#bcd6ff;}
+/* a section's own figures, inside its card, beside the text they explain */
+.card-body .figures.inline{display:flex;gap:14px;flex-wrap:wrap;margin:14px 0 2px;}
+.card-body .figures.inline figure{margin:0;flex:1 1 260px;text-align:center;}
+.card-body .figures.inline img{max-width:100%;height:auto;border-radius:10px;
+background:#fff;padding:6px;border:1px solid var(--border);}
+.card-body .figures.inline figcaption{color:var(--muted);font-size:12.5px;margin-top:5px;}
+@media print{.card-body .figures.inline img{max-height:3.2in;}}
 .tabbar{display:flex;gap:6px;flex-wrap:wrap;margin:18px 0 0;border-bottom:1px solid var(--border);}
 .tab{background:transparent;border:1px solid var(--border);border-bottom:none;color:var(--muted);
 padding:9px 18px;border-radius:10px 10px 0 0;cursor:pointer;font:inherit;font-size:14px;font-weight:600;}
@@ -781,10 +860,14 @@ def evidence_images(
 
 _SLIDE_CSS = """
 /* Slide deck: same theme as the report, one section per slide. */
-html,body{height:100%;overflow:hidden;}
-.deck{height:100vh;width:100vw;position:relative;}
+/* Mobile: 100vh is the WRONG height on phones — the browser chrome overlaps it, so the last
+   line and the HUD sat off-screen. dvh tracks the visible viewport; the vh line is the fallback
+   for browsers without it. touch-action stops the tap-to-advance handler being eaten by scroll
+   gestures, and overscroll-behavior kills the rubber-band that made the deck feel broken. */
+html,body{height:100%;overflow:hidden;overscroll-behavior:none;}
+.deck{height:100vh;height:100dvh;width:100vw;position:relative;touch-action:pan-y;}
 .slide{position:absolute;inset:0;display:none;flex-direction:column;
-justify-content:center;padding:5vh 7vw 12vh;overflow-y:auto;}
+justify-content:center;padding:5vh 7vw 12vh;overflow-y:auto;-webkit-overflow-scrolling:touch;}
 .slide.on{display:flex;animation:slide-in .18s ease-out;}
 @keyframes slide-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 .slide h1{font-size:clamp(28px,4.6vw,60px);line-height:1.12;margin:0 0 .3em;}
@@ -796,6 +879,21 @@ color:var(--accent);display:flex;align-items:center;gap:.4em;}
 .slide.cover .subtitle{font-size:clamp(16px,2vw,26px);color:var(--muted);margin:0 0 1.2em;}
 .deck-meta{color:var(--muted);font-size:14px;display:flex;flex-wrap:wrap;gap:.4em 1.4em;}
 .refs-slide ol{font-size:clamp(13px,1.25vw,18px);}
+/* a figure shares its slide with the point it illustrates */
+.slide .figures.inline{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;margin:.6em 0 0;}
+.slide .figures.inline img{max-width:100%;max-height:44vh;height:auto;border-radius:10px;
+background:#fff;padding:6px;}
+.slide.has-figure .body{font-size:clamp(14px,1.35vw,19px);}
+.slide figure{margin:0;text-align:center;}
+.slide figcaption{color:var(--muted);font-size:12.5px;margin-top:4px;}
+@media (max-width:820px){
+ .slide{padding:4vh 6vw 14vh;justify-content:flex-start;}
+ .slide h1{font-size:clamp(24px,7vw,34px);} .slide h2{font-size:clamp(19px,5.4vw,26px);}
+ .slide .body{font-size:clamp(15px,4vw,18px);}
+ .slide .figures.inline img{max-height:34vh;}
+ .hint{display:none;} .hud{right:10px;bottom:8px;gap:10px;}
+ .hud button{padding:6px 14px;font-size:17px;}
+}
 /* chrome */
 .bar{position:fixed;left:0;bottom:0;height:3px;background:var(--accent);
 transition:width .18s ease;z-index:5;}
@@ -840,6 +938,15 @@ _SLIDE_JS = """
  // advance on click, except on a link or a control
  document.addEventListener('click',function(e){
   if(e.target.closest('a,button'))return;go(i+1);});
+ // swipe on touch devices; the keyboard is not available on a phone
+ var x0=null,y0=null;
+ document.addEventListener('touchstart',function(e){
+  if(e.touches.length!==1)return; x0=e.touches[0].clientX; y0=e.touches[0].clientY;},{passive:true});
+ document.addEventListener('touchend',function(e){
+  if(x0===null)return;
+  var t=e.changedTouches[0],dx=t.clientX-x0,dy=t.clientY-y0;
+  if(Math.abs(dx)>40&&Math.abs(dx)>Math.abs(dy)){go(dx<0?i+1:i-1);}
+  x0=y0=null;},{passive:true});
  var start=parseInt((location.hash||'').replace('#',''),10);
  go(isNaN(start)?0:start-1);
 })();
@@ -867,13 +974,14 @@ def _render_slides(
     subtitle: str,
     header: tuple[str, str],
     meta: list[tuple[str, str]],
-    secs: list[tuple[str, str, str]],
+    secs: list[tuple[str, str, str, list[str]]],
     numbering: dict[tuple[int, int], int],
     refs: list[tuple[str, str]],
     image_urls: list[str],
     embedded_images: Sequence[tuple[str, str]],
     trace: Mapping[str, object] | None,
     theme: str = "",
+    figure_srcs: Mapping[str, tuple[str, str]] | None = None,
 ) -> str:
     """A self-contained HTML slide deck in the report theme: one section per slide, navigated
     with PowerPoint's own keys. Same content, numbering and references as the HTML report — only
@@ -892,12 +1000,20 @@ def _render_slides(
         + f'<div class="ai-warning"><span class="wic">⚠️</span>{esc(_AI_WARNING)}</div>'
         + "</section>"
     )
-    for heading, kind, body in secs:
+    for heading, kind, body, sec_imgs in secs:
         icon, cls = _KINDS.get(kind.lower(), ("📄", "kind-generic"))
+        figs = "".join(
+            f'<figure><img src="{esc(src)}" alt="{esc(alt)}">'
+            + (f"<figcaption>{esc(alt)}</figcaption>" if alt else "")
+            + "</figure>"
+            for src, alt in _section_figures(sec_imgs, figure_srcs or {})
+        )
+        # the figure sits on its section's slide, illustrating that point as it is made
+        fig_html = f'<div class="figures inline">{figs}</div>' if figs else ""
         slides.append(
-            f'<section class="slide {cls}">'
+            f'<section class="slide {cls}{" has-figure" if figs else ""}">'
             + (f"<h2><span class=\"ic\">{icon}</span>{esc(heading)}</h2>" if heading else "")
-            + f'<div class="body">{_blocks_html(body, numbering)}</div></section>'
+            + f'<div class="body">{_blocks_html(body, numbering)}{fig_html}</div></section>'
         )
     if image_urls or embedded_images:
         figs = "".join(f'<img src="{esc(u)}" alt="">' for u in image_urls)

@@ -482,19 +482,24 @@ class Service:
         fmt = (fmt or "md").lower()
         evidence = {(int(d), int(c)) for d, c in spec.get("evidence", [])}
         sources = list(spec.get("sources", [])) or [s.name for s in cfg.sources]
+        # Every image the spec references, from its sections and the top level alike.
+        shas: list[str] = [str(x) for x in spec.get("images", []) or []]
+        for sec in spec.get("sections") or []:
+            if isinstance(sec, dict):
+                shas += [str(x) for x in (sec.get("images") or [])]
+
         if fmt in report_export.EXPORT_FORMATS:
-            # Resolve the spec's image shas to files so a deck/document can SHOW the diagrams,
-            # not just describe them. Anything unresolvable is skipped, never an error.
-            figures: list[tuple[str, str]] = []
-            for sha in list(spec.get("images", [])):
-                found = self.image(str(sha))
-                if found is not None:
-                    with Store.open(cfg.paths.db_path) as _db:
-                        row = _db.get_image(str(sha))
-                    caption = ""
-                    if row is not None:
-                        caption = str(row["caption"] or row["alt"] or "")
-                    figures.append((str(found[0]), caption))
+            # Resolve to files so a deck/document can SHOW the diagram, not just describe it.
+            # Anything unresolvable is skipped, never an error.
+            figure_map: dict[str, tuple[str, str]] = {}
+            for sha in dict.fromkeys(shas):
+                found = self.image(sha)
+                if found is None:
+                    continue
+                with Store.open(cfg.paths.db_path) as _db:
+                    row = _db.get_image(sha)
+                caption = str(row["caption"] or row["alt"] or "") if row is not None else ""
+                figure_map[sha] = (str(found[0]), caption)
             # PDF is printed from the HTML report, so there is one layout, not two that drift.
             html = self.build_report(spec, base_url=base_url, fmt="html") if fmt == "pdf" else ""
             return report_export.export_report(
@@ -511,7 +516,7 @@ class Service:
                 ref_targets=report.reference_targets(cfg.paths.db_path, evidence, base_url=base_url),
                 html=str(html),
                 pptx_template=cfg.reports.pptx_template,
-                figures=figures,
+                figure_map=figure_map,
             )
         return report.render_report(
             title=str(spec.get("title", "Report")),
@@ -537,6 +542,10 @@ class Service:
             trace=spec.get("trace"),
             # the requester may ask for a different look; the config value is only the default
             theme=str(spec.get("theme", "") or cfg.reports.theme),
+            # a section's figures render inside it; inlined so the report stays self-contained
+            figure_srcs=report.figure_sources(
+                cfg.paths.db_path, cfg.paths.staging_dir, shas, base_url=base_url
+            ),
         )
 
     def search_vectors(
