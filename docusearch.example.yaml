@@ -125,6 +125,14 @@ reports:
   # has to be authored for its target: a deck needs short bullets, a
   # spreadsheet one fact per row, a document takes prose.
   default_format: "html"
+  # Default visual theme for html / html-slide / pdf reports. This is a
+  # DEFAULT, not a house style: a requester may ask for another and the
+  # report will use it.
+  #   midnight : deep navy, cyan accents (the docusearch look)
+  #   paper    : light and print-friendly, for a document to mark up
+  #   slate    : neutral dark grey, no brand colour
+  #   contrast : near-black on white, heavy borders — maximum legibility
+  theme: "midnight"
   # A .pptx/.potx whose THEME and LAYOUTS every generated deck inherits —
   # drop in your corporate template and reports match it. Reports set no
   # fonts, colours or positions of their own, so swapping this (or applying

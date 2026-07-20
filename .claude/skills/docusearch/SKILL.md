@@ -78,11 +78,19 @@ The user picks an effort level (default **medium**):
    to follow references.
 2. **Select evidence.** Collect the `(doc_id, chunk_id)` pairs whose text actually supports
    your answer — these become the report's `evidence`.
-3. **Write the report as cards.** Group the answer into sections that match what the lookup
-   surfaced. Pick the `kind` per card so it renders with the right icon/accent:
-   `overview`, `procedure`, `code`, `hardware`, `config`, `test-program`, `warning`,
-   `reference`. Put every catalog claim's `[D:doc#chunk]` inline in the prose; the renderer
-   turns them into little superscript links to the References card.
+3. **Write the report — your way.** Two things are fixed because a reader needs them to trust
+   the document: the **banner** (classification, request, provenance) and the **References**
+   list. The builder adds both from your `evidence`; never write them yourself. Every catalog
+   claim carries `[D:doc#chunk]` inline and general knowledge carries `[GK]`.
+
+   **Everything else is your call** — how many sections, what to call them, how long they run,
+   what order they take, whether to open with a summary or build to one, when a table beats
+   prose, when a figure beats both. There is no required outline and no required length. A
+   three-card answer to a small question is better than a padded ten. Pick each section's
+   `kind` for how it should read (`overview`, `procedure`, `code`, `hardware`, `config`,
+   `test-program`, `warning`, `reference`) — it sets the icon and accent.
+
+   Aim for something a person is glad to be handed, not a filled-in template.
 4. **Render with `build_report`.** This is the terminal step and it is not optional — you are
    talking to a REMOTE docusearch server over MCP, so there is no local `docusearch` CLI to
    shell out to and no local file you can write the report into. The server renders it, saves
@@ -132,6 +140,9 @@ The user picks an effort level (default **medium**):
      - [101, 2]
      - [318, 2]
    ```
+
+   Optional `theme` picks the look (`midnight` · `paper` · `slate` · `contrast`) — set it only
+   if the requester asks; otherwise the operator's configured theme applies.
 
    Set `request`, `requested_by`, and `model` — they populate the report's provenance header.
    `sources` defaults to the config's document stores.

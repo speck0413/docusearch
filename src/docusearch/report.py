@@ -85,6 +85,7 @@ def render_report(
     classification: str = "Confidential",
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None = None,
     trace: Mapping[str, object] | None = None,
+    theme: str = "",  # a THEMES key; empty = the configured default
 ) -> str:
     """Render a report to ``md`` or ``html``. Raises ``CitationError`` if any citation (in
     the title, subtitle, or any section) references a ``(doc_id, chunk_id)`` outside the
@@ -128,11 +129,13 @@ def render_report(
 
     if fmt == "html-slide":
         return _render_slides(
-            title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images, trace
+            title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images,
+            trace, theme,
         )
     if fmt == "html":
         return _render_html(
-            title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images, trace
+            title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images,
+            trace, theme,
         )
     return _render_markdown(
         title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images, trace
@@ -336,6 +339,7 @@ def _render_markdown(
     image_urls: list[str],
     embedded_images: Sequence[tuple[str, str]],
     trace: Mapping[str, object] | None,
+    theme: str = "",
 ) -> str:
     classification, request = header
     out: list[str] = []
@@ -378,6 +382,7 @@ def _render_html(
     image_urls: list[str],
     embedded_images: Sequence[tuple[str, str]],
     trace: Mapping[str, object] | None,
+    theme: str = "",
 ) -> str:
     esc = _html.escape
     classification, request = header
@@ -429,7 +434,7 @@ def _render_html(
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{esc(title)}</title><style>{_CSS}</style></head><body>"
+        f"<title>{esc(title)}</title><style>{theme_css(theme)}{_CSS}</style></head><body>"
         '<div class="report">'
         f"{ribbon}"
         '<header class="banner"><div class="eyebrow">docusearch report</div>'
@@ -445,20 +450,75 @@ def _render_html(
     )
 
 
+# Themes are just a variable block; every rule below is structure and colour-agnostic. A report
+# renders in `reports.theme` unless the requester asks for another — the default is a default,
+# not a house style anyone is stuck with.
+THEMES: dict[str, str] = {
+    "midnight": (  # the original: deep navy, cyan accents
+        "--bg:#0a1730;--card:#0f2547;--card2:#123059;--border:#1d3f6e;"
+        "--accent:#7fdbff;--accent2:#48cae4;--accent-dim:#2b6f97;--text:#e8f2ff;"
+        "--muted:#9fb6d6;--code:#081426;"
+        "--page:linear-gradient(160deg,#08122a,#0a1730 45%,#0b1d3a);"
+        "--banner:linear-gradient(135deg,#0c2350,#0e2c63);"
+        "--warn-fg:#ffe1b0;--warn-bg:linear-gradient(90deg,rgba(120,70,20,.35),rgba(90,55,20,.25));"
+        "--ribbon-fg:#ffd7a8;--ribbon-bg:linear-gradient(90deg,#3a1d12,#5a2c17,#3a1d12);"
+        "--k-procedure:#64dfdf;--k-code:#4cc9f0;--k-hardware:#48cae4;--k-config:#56cfe1;"
+        "--k-test:#80ffdb;--k-warning:#ffb703;--k-reference:#5aa9e6;"
+    ),
+    "paper": (  # light, print-friendly, for a document people will mark up
+        "--bg:#ffffff;--card:#f6f8fb;--card2:#eef2f8;--border:#d3dcea;"
+        "--accent:#0b5cab;--accent2:#0a4b8c;--accent-dim:#7d9cc0;--text:#12212f;"
+        "--muted:#5a6b7e;--code:#f0f3f8;"
+        "--page:#ffffff;"
+        "--banner:linear-gradient(135deg,#eaf1fb,#dde8f7);"
+        "--warn-fg:#7a4c00;--warn-bg:linear-gradient(90deg,rgba(255,193,64,.28),rgba(255,193,64,.15));"
+        "--ribbon-fg:#7a3d00;--ribbon-bg:linear-gradient(90deg,#ffe8c7,#ffdca8,#ffe8c7);"
+        "--k-procedure:#0f8f8f;--k-code:#0b6fb8;--k-hardware:#0a6ea8;--k-config:#137a99;"
+        "--k-test:#0e8f6f;--k-warning:#b26a00;--k-reference:#3a72b8;"
+    ),
+    "slate": (  # neutral dark grey, no brand colour — safest inside another deck
+        "--bg:#16181d;--card:#1e2128;--card2:#252932;--border:#343a45;"
+        "--accent:#c9d4e3;--accent2:#9fb0c6;--accent-dim:#6d7c90;--text:#e7ecf3;"
+        "--muted:#9aa6b6;--code:#101216;"
+        "--page:#16181d;"
+        "--banner:linear-gradient(135deg,#1f232b,#272c36);"
+        "--warn-fg:#f2d9a8;--warn-bg:linear-gradient(90deg,rgba(120,90,40,.32),rgba(90,70,30,.22));"
+        "--ribbon-fg:#e8cfa6;--ribbon-bg:linear-gradient(90deg,#2f2820,#403528,#2f2820);"
+        "--k-procedure:#8fbcbb;--k-code:#88a9c9;--k-hardware:#9bb3c9;--k-config:#8fb0c0;"
+        "--k-test:#9ec9b4;--k-warning:#d8a657;--k-reference:#8ba7c4;"
+    ),
+    "contrast": (  # maximum legibility: near-black on white, heavy borders
+        "--bg:#ffffff;--card:#ffffff;--card2:#f2f2f2;--border:#000000;"
+        "--accent:#00368f;--accent2:#002a70;--accent-dim:#555555;--text:#000000;"
+        "--muted:#333333;--code:#f2f2f2;"
+        "--page:#ffffff;"
+        "--banner:#ffffff;"
+        "--warn-fg:#000000;--warn-bg:#ffe08a;"
+        "--ribbon-fg:#000000;--ribbon-bg:#ffd166;"
+        "--k-procedure:#006b6b;--k-code:#00368f;--k-hardware:#00457a;--k-config:#005566;"
+        "--k-test:#006644;--k-warning:#8a4b00;--k-reference:#123f7a;"
+    ),
+}
+
+DEFAULT_THEME = "midnight"
+
+
+def theme_css(name: str) -> str:
+    """The ``:root`` block for a theme, falling back to the default for an unknown name."""
+    return ":root{" + THEMES.get(name or DEFAULT_THEME, THEMES[DEFAULT_THEME]) + "}"
+
+
 _CSS = """
-:root{--bg:#0a1730;--card:#0f2547;--card2:#123059;--border:#1d3f6e;
---accent:#7fdbff;--accent2:#48cae4;--accent-dim:#2b6f97;--text:#e8f2ff;
---muted:#9fb6d6;--code:#081426;}
 *{box-sizing:border-box}
 body{margin:0;color:var(--text);
-background:linear-gradient(160deg,#08122a,#0a1730 45%,#0b1d3a);
+background:var(--page);
 font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
 .report{max-width:940px;margin:0 auto;padding:20px 20px 72px;}
 a{color:var(--accent2);}
 .ribbon{text-align:center;letter-spacing:.22em;text-transform:uppercase;font-size:12px;
-font-weight:700;color:#ffd7a8;background:linear-gradient(90deg,#3a1d12,#5a2c17,#3a1d12);
+font-weight:700;color:var(--ribbon-fg);background:var(--ribbon-bg);
 border:1px solid #7a3f22;border-radius:8px;padding:7px 12px;margin-bottom:16px;}
-.banner{background:linear-gradient(135deg,#0c2350,#0e2c63);border:1px solid var(--border);
+.banner{background:var(--banner);border:1px solid var(--border);
 border-left:4px solid var(--accent);border-radius:16px;padding:26px 32px;
 box-shadow:0 10px 34px rgba(0,0,0,.4);}
 .request{margin:.6em 0 1em;padding:10px 14px;border-left:3px solid var(--accent2);
@@ -466,7 +526,7 @@ background:rgba(127,219,255,.06);border-radius:0 8px 8px 0;color:#d6e8ff;font-st
 .request span{font-style:normal;font-weight:700;color:var(--accent2);text-transform:uppercase;
 font-size:11px;letter-spacing:.12em;margin-right:8px;}
 .ai-warning{display:flex;align-items:center;gap:10px;margin-top:16px;padding:12px 18px;
-color:#ffe1b0;background:linear-gradient(90deg,rgba(120,70,20,.35),rgba(90,55,20,.25));
+color:var(--warn-fg);background:var(--warn-bg);
 border:1px solid #8a5a2a;border-left:4px solid #ffb703;border-radius:12px;font-size:13.5px;}
 .ai-warning .wic{font-size:17px;}
 .eyebrow{letter-spacing:.2em;font-size:11.5px;color:var(--accent2);text-transform:uppercase;}
@@ -519,13 +579,13 @@ border-radius:8px;padding:10px 12px;color:#cfe8ff;font-size:12.5px;overflow-x:au
 .foot{margin-top:30px;text-align:center;color:var(--muted);font-size:12.5px;}
 .cite-legend{color:var(--accent2);font-weight:700;}
 .kind-overview{border-left-color:var(--accent);}
-.kind-procedure{border-left-color:#64dfdf;}
-.kind-code{border-left-color:#4cc9f0;}
-.kind-hardware{border-left-color:#48cae4;}
-.kind-config{border-left-color:#56cfe1;}
-.kind-test{border-left-color:#80ffdb;}
-.kind-warning{border-left-color:#ffb703;}
-.kind-reference{border-left-color:#5aa9e6;}
+.kind-procedure{border-left-color:var(--k-procedure);}
+.kind-code{border-left-color:var(--k-code);}
+.kind-hardware{border-left-color:var(--k-hardware);}
+.kind-config{border-left-color:var(--k-config);}
+.kind-test{border-left-color:var(--k-test);}
+.kind-warning{border-left-color:var(--k-warning);}
+.kind-reference{border-left-color:var(--k-reference);}
 """
 
 # Analytics/diff styling layered on the shared theme (cards, data grids, Beyond-Compare colors).
@@ -797,6 +857,7 @@ def _render_slides(
     image_urls: list[str],
     embedded_images: Sequence[tuple[str, str]],
     trace: Mapping[str, object] | None,
+    theme: str = "",
 ) -> str:
     """A self-contained HTML slide deck in the report theme: one section per slide, navigated
     with PowerPoint's own keys. Same content, numbering and references as the HTML report — only
@@ -837,7 +898,7 @@ def _render_slides(
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{esc(title)}</title><style>{_CSS}{_SLIDE_CSS}</style></head><body>"
+        f"<title>{esc(title)}</title><style>{theme_css(theme)}{_CSS}{_SLIDE_CSS}</style></head><body>"
         f'<div class="deck">{"".join(slides)}</div>'
         '<div class="bar"></div>'
         '<div class="hint">← → navigate · F full screen</div>'

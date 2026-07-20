@@ -97,10 +97,20 @@ FORMAT_GUIDANCE: dict[str, str] = {
     ),
 }
 
-# What to tell an author regardless of format.
+# What holds for every format. Deliberately short on rules: the only fixed parts of a report are
+# the ones a reader needs to trust it.
 _UNIVERSAL_GUIDANCE = (
-    "Shape the content for its destination and use your judgement on presentation — these are "
-    "guardrails, not a template. Accuracy and citations are non-negotiable; layout is yours."
+    "FIXED (the builder adds these — do not write them yourself): the banner with its "
+    "classification, request and provenance, and the References list built from your evidence.\n"
+    "REQUIRED of you: every catalog claim carries its [D:doc#chunk], general knowledge carries "
+    "[GK], and no claim goes beyond what the cited chunk says.\n"
+    "EVERYTHING ELSE IS YOURS. How many sections, what they are called, how long they run, what "
+    "order they take, which `kind` each one is, whether to lead with a summary or build to one, "
+    "when a table beats prose, when a figure beats both. There is no required outline and no "
+    "required length. Write the report this question deserves, and make it look like something "
+    "a person would be glad to be handed.\n"
+    "The visual theme follows the operator's configuration unless the requester asks for another "
+    "— pass spec['theme'] when they do."
 )
 
 def guidance(fmt: str) -> str:

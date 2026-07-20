@@ -298,6 +298,20 @@ SCHEMA: tuple[_Node, ...] = (
                 choices=("md", "html", "html-slide", "pdf", "docx", "pptx", "xlsx"),
             ),
             _Field(
+                "theme",
+                "midnight",
+                comment=(
+                    "Default visual theme for html / html-slide / pdf reports. This is a\n"
+                    "DEFAULT, not a house style: a requester may ask for another and the\n"
+                    "report will use it.\n"
+                    "  midnight : deep navy, cyan accents (the docusearch look)\n"
+                    "  paper    : light and print-friendly, for a document to mark up\n"
+                    "  slate    : neutral dark grey, no brand colour\n"
+                    "  contrast : near-black on white, heavy borders — maximum legibility"
+                ),
+                choices=("midnight", "paper", "slate", "contrast"),
+            ),
+            _Field(
                 "pptx_template",
                 "",
                 comment=(
@@ -726,6 +740,7 @@ class RankingConfig:
 class ReportsConfig:
     retain_days: int
     default_format: str
+    theme: str
     pptx_template: str
 
 
@@ -859,6 +874,7 @@ class Config:
             reports=ReportsConfig(
                 retain_days=int(m["reports"]["retain_days"]),
                 default_format=str(m["reports"]["default_format"]),
+                theme=str(m["reports"]["theme"]),
                 pptx_template=str(m["reports"]["pptx_template"]),
             ),
             serve=ServeConfig(

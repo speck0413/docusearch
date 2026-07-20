@@ -535,6 +535,8 @@ class Service:
             # remote client can open — identical to the CLI report save for the link host.
             ref_targets=report.reference_targets(cfg.paths.db_path, evidence, base_url=base_url),
             trace=spec.get("trace"),
+            # the requester may ask for a different look; the config value is only the default
+            theme=str(spec.get("theme", "") or cfg.reports.theme),
         )
 
     def search_vectors(
@@ -1728,13 +1730,17 @@ def build_mcp(service: Service, config: Config) -> Any:
         note = (
             "If the requester named a format, use it — configured_default applies only when "
             "they did not. Map plain words: PowerPoint/deck/slides -> pptx, Word/doc -> docx, "
-            "spreadsheet/Excel -> xlsx, web page -> html, browsable deck -> html-slide."
+            "spreadsheet/Excel -> xlsx, web page -> html, browsable deck -> html-slide. Same for "
+            "the look: set spec['theme'] if they ask for one, else the configured theme is used."
         )
+        themes = {"available": sorted(report.THEMES), "configured": config.reports.theme}
         if fmt:
             return {"fmt": fmt, "guidance": report_export.guidance(fmt),
-                    "configured_default": config.reports.default_format, "precedence": note}
+                    "configured_default": config.reports.default_format,
+                    "themes": themes, "precedence": note}
         return {"formats": report_export.FORMAT_GUIDANCE,
-                "configured_default": config.reports.default_format, "precedence": note}
+                "configured_default": config.reports.default_format,
+                "themes": themes, "precedence": note}
 
     @mcp.tool()
     def build_report(spec: dict[str, Any], fmt: str = "md") -> dict[str, Any]:
