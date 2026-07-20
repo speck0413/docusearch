@@ -24,10 +24,8 @@ test/
 /docusearch.yaml
 
 # docusearch generated output — ALL generated output lands under tmp/ (CLAUDE.md).
-# Exception: tmp/gates/ holds the gate files + evidence packs, which ARE the record
-# checked into the repo (§15.4), so they are tracked.
-tmp/*
-!tmp/gates/
+# The entire tree is transient and is never tracked.
+tmp/
 staging/
 catalog.db
 *.db
@@ -42,5 +40,3 @@ corpora/models/
 # OS noise
 .DS_Store
 Thumbs.db
-tmp/gates/evidence-phase6/artifacts/
-tmp/gates/evidence-phase6/e2e/
