@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -966,8 +967,17 @@ def _bundle_globs(patterns: list[str]) -> tuple[bytes, list[str]]:
 
 
 def _save_report(cfg: Config, out: str | None, title: str, html: str) -> Path:
-    """Write a generated report under the config's tmp_dir (or an explicit --out), returning path."""
-    path = Path(out) if out else Path(cfg.paths.tmp_dir) / "reports" / f"{title}.html"
+    """Write a generated report under the config's tmp_dir (or an explicit --out), returning path.
+
+    The default filename is derived from ``title``, which can embed untrusted data (a CSV column /
+    STDF test name), so it is reduced to a single safe basename — no path separators or ``..`` — so a
+    hostile name can't make the report escape the tmp_dir sandbox (red-team #H1)."""
+    if out:
+        path = Path(out)  # an explicit path the user typed themselves
+    else:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", title)
+        safe = re.sub(r"\.{2,}", "_", safe).strip("._-")[:120] or "report"  # no `..` runs either
+        path = Path(cfg.paths.tmp_dir) / "reports" / f"{safe}.html"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(html, encoding="utf-8")
     return path
@@ -1229,9 +1239,12 @@ def _cmd_data_ls(args: argparse.Namespace) -> int:
         return 0
     print(f"{'id':>5}  {'dataset':<16} {'column':<20} {'kind':<11} {'n':>6}  limits")
     for c in cols:
-        lim = "" if c["lo"] is None and c["hi"] is None else f"{c['lo']}..{c['hi']} {c['units']}"
-        print(f"{c['id']:>5}  {str(c['dataset'])[:16]:<16} {str(c['name'])[:20]:<20} "
-              f"{str(c['kind'])[:11]:<11} {c['n']:>6}  {lim}")
+        # column/dataset/units come from an untrusted CSV header — strip terminal-escape bytes (#M2)
+        lim = "" if c["lo"] is None and c["hi"] is None \
+            else f"{c['lo']}..{c['hi']} {_safe_term(str(c['units']))}"
+        print(f"{c['id']:>5}  {_safe_term(str(c['dataset']))[:16]:<16} "
+              f"{_safe_term(str(c['name']))[:20]:<20} "
+              f"{_safe_term(str(c['kind']))[:11]:<11} {c['n']:>6}  {lim}")
     print(f"\n{len(cols)} column(s)")
     return 0
 
@@ -1257,7 +1270,8 @@ def _cmd_data_plot(args: argparse.Namespace) -> int:
         return 1
     out = _save_report(cfg, args.out, f"data_{col['dataset']}_{col['name']}_{args.kind}", res["html"])
     s = res.get("stats", {})
-    print(f"Wrote {out}  ({col['dataset']}.{col['name']} · n={res.get('n')}"
+    label = _safe_term(f"{col['dataset']}.{col['name']}")  # untrusted CSV names → strip escapes (#M2)
+    print(f"Wrote {out}  ({label} · n={res.get('n')}"
           + (f" · mean={s['mean']:.4g}" if s.get("n") else "") + ")")
     runlog.log("cli.data_plot", column=col["name"], out=str(out))
     runlog.flush()

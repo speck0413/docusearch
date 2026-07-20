@@ -104,12 +104,16 @@ def _resolve_delimiter(path: Path | str, delimiter: str | None) -> str:
 
 
 def _split_fixed(line: str, widths: Sequence[int]) -> list[str]:
+    """Split a fixed-width line into **exactly** ``len(widths)`` fields. A short (ragged) line yields
+    empty strings for the fields it doesn't reach — which `_infer_kind` treats as missing — rather than
+    a ragged field count that would misalign columns or silently drop one (red-team #M3). Content past
+    the declared widths is ignored: the widths define the columns."""
     out, i = [], 0
     for w in widths:
-        out.append(line[i:i + w].strip())
+        # only take a field the line FULLY contains — a straddling/short field is missing (""), never a
+        # truncated fragment mistaken for a real value (red-team #M3)
+        out.append(line[i:i + w].strip() if i + w <= len(line) else "")
         i += w
-    if i < len(line):  # trailing content beyond the declared widths → its own field
-        out.append(line[i:].strip())
     return out
 
 
@@ -158,6 +162,14 @@ def read_table(
     ds_name = name or Path(path).stem
     if not header:
         return Dataset(ds_name)
+    # disambiguate duplicate column names (``x``, ``x`` → ``x``, ``x_2``) so each keeps its own
+    # position — a name-keyed index would otherwise silently drop all but the last (red-team #M4)
+    seen: dict[str, int] = {}
+    uniq: list[str] = []
+    for h in header:
+        seen[h] = seen.get(h, 0) + 1
+        uniq.append(h if seen[h] == 1 else f"{h}_{seen[h]}")
+    header = uniq
     idx = {h: i for i, h in enumerate(header)}
 
     def col(row: list[str], colname: str) -> str:

@@ -58,3 +58,31 @@ def test_data_plot_bad_column(tmp_path: Path) -> None:
     import pytest
     with pytest.raises(ValueError, match="no data column"):
         svc.data_plot(999999)
+
+
+def test_phase10_redteam_service_and_report(tmp_path: Path) -> None:
+    import pytest
+
+    from docusearch.cli import _save_report
+    svc = _service(tmp_path)
+    # H2: an out-of-int64 column_id is a clean ValueError (→ MCP DATA error / REST 404), not an
+    # uncaught OverflowError; consistent with data_plot's "no data column" error
+    with pytest.raises(ValueError, match="no data column"):
+        svc.data_values(2**64)
+    with pytest.raises(ValueError, match="no data column"):
+        svc.data_values(-(2**70))
+
+    # M1: a NULL value (a NaN written via the public Store API) must not crash data_plot
+    cols = svc.data_columns()["columns"]
+    vmin_id = next(c["id"] for c in cols if c["name"] == "VMIN")
+    with Store.open(svc.config.paths.db_path) as store:
+        cid = store.add_data_column(doc_id=1, dataset="x", name="withnan", kind="numeric",
+                                    units="", lo=None, hi=None, values=[1.0, float("nan"), 3.0])
+    assert svc.data_plot(cid, kind="histogram")["n"] == 2          # the NULL value skipped, no crash
+    assert svc.data_plot(vmin_id, kind="whisker")["html"]          # ungrouped whisker still fine
+
+    # H1: an auto-derived report filename from a hostile column name stays under tmp_dir/reports
+    from types import SimpleNamespace
+    fake = SimpleNamespace(paths=SimpleNamespace(tmp_dir=str(tmp_path / "rep")))
+    p = _save_report(fake, None, "data_ds_../../../../etc/PWNED_histogram", "<html>x</html>")
+    assert p.parent == (tmp_path / "rep" / "reports") and "/" not in p.name and ".." not in p.name

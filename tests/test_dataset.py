@@ -98,3 +98,20 @@ def test_fixed_width_columns(tmp_path: Path) -> None:
     ds = dataset.read_table(fw, fixed_widths=[6, 6, 4])
     assert [c.name for c in ds.columns] == ["vmin", "iddq", "st"]
     assert ds.column("vmin").values == [0.71, 0.72] and ds.column("iddq").values == [1e-6, 2e-6]
+
+
+def test_phase10_redteam_ragged_and_duplicate_columns(tmp_path: Path) -> None:
+    from docusearch import dataset
+
+    # M3: a ragged fixed-width line yields exactly len(widths) fields; a field the line doesn't FULLY
+    # contain is missing ("") — never a truncated fragment mistaken for a real value
+    assert dataset._split_fixed("abcde", [5, 5]) == ["abcde", ""]         # noqa: SLF001 (2nd absent)
+    assert dataset._split_fixed("abcdefg", [5, 5]) == ["abcde", ""]       # noqa: SLF001 ("fg" truncated → "")
+    assert dataset._split_fixed("abcdefghij", [3, 3]) == ["abc", "def"]   # noqa: SLF001 (tail ignored)
+
+    # M4: duplicate column names are disambiguated so BOTH keep their own data (was: first silently lost)
+    f = tmp_path / "dup.csv"
+    f.write_text("x,x\n1,2\n3,4\n", encoding="utf-8")
+    ds = dataset.read_table(f)
+    by = {c.name: list(c.values) for c in ds.columns}
+    assert set(by) == {"x", "x_2"} and by["x"] == [1.0, 3.0] and by["x_2"] == [2.0, 4.0]

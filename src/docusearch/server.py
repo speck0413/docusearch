@@ -830,6 +830,8 @@ class Service:
         user: str | None = None, groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """One column's values (+ group per row) as plain JSON — the data behind a plot/query, no AI."""
+        if not _fits_i64(column_id):  # absurd id -> a clean ValueError (404 / DATA error), not an
+            raise ValueError(f"no data column with id {column_id}")  # OverflowError (red-team #H2)
         with Store.open(self._db_for_read(store, user, groups)) as db:
             rows = db.data_values(column_id=column_id)
         return {"values": [{"row": int(r["row_idx"]), "value": r["value"], "group": r["grp"]}
@@ -849,14 +851,16 @@ class Service:
             if meta is None:
                 raise ValueError(f"no data column with id {column_id}")
             rows = db.data_values(column_id=column_id)
-        vals = [float(r["value"]) for r in rows]
+        # a NULL value (e.g. a NaN written via the public Store API) must not crash float() (#M1)
+        vals = [float(r["value"]) for r in rows if r["value"] is not None]
         name, lo, hi = str(meta["name"]), meta["lo"], meta["hi"]
         vlines = [float(x) for x in (lo, hi) if x is not None]
         be = self._backend(backend)
         if by_group and any(r["grp"] for r in rows):
             grouped: dict[str, list[float]] = {}
             for r in rows:
-                grouped.setdefault(str(r["grp"]), []).append(float(r["value"]))
+                if r["value"] is not None:
+                    grouped.setdefault(str(r["grp"]), []).append(float(r["value"]))
             html = analytics.render_plot(
                 kind if kind != "histogram" else "whisker",
                 series=[(g, v) for g, v in sorted(grouped.items())],
