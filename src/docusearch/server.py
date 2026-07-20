@@ -25,7 +25,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import citations, embed, report, runlog, search
+from . import citations, embed, report, report_export, report_store, runlog, search
 from ._version import __version__
 from .catalog import Catalog, open_federation
 from .config import Config, SourceConfig, load
@@ -40,6 +40,17 @@ _MEDIA_TYPES = {
     "svg": "image/svg+xml",
     "webp": "image/webp",
     "bmp": "image/bmp",
+}
+
+# Served for a generated report file. html/md render in the browser; the OOXML types are the
+# official ones so a download lands with the right icon and opens in the right application.
+_REPORT_MEDIA = {
+    ".html": "text/html; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
 
@@ -429,7 +440,39 @@ class Service:
             "documents": result.documents, "chunks": result.chunks, "images": result.images,
         }
 
-    def build_report(self, spec: dict[str, Any], *, base_url: str, fmt: str = "md") -> str:
+    def build_report_file(
+        self, spec: dict[str, Any], *, base_url: str, fmt: str = "md"
+    ) -> dict[str, Any]:
+        """Render a report, write it under ``tmp_dir/reports/``, and return a clickable URL.
+
+        All six formats come back the same way, so an agent's terminal step never depends on the
+        format it was configured with. ``md``/``html`` also carry the text inline (small, and the
+        agent may want to quote it); the binary formats do not — a base64'd pptx through the
+        model's context is exactly the cost the compact search payload exists to avoid.
+
+        The citation guard runs on every path: ``render_report`` and ``export_report`` each verify
+        the body against the evidence set first, so a hallucinated citation is refused in a pptx
+        exactly as in HTML (R-CIT-1)."""
+        fmt = (fmt or "md").lower()
+        rendered = self.build_report(spec, base_url=base_url, fmt=fmt)
+        stem = report_store.slug(str(spec.get("title", "report")))
+        name = f"{stem}-{runlog.RUN_ID}.{fmt}"
+        path = report_store.write(self.config.paths.tmp_dir, name, rendered)
+        report_store.sweep(self.config.paths.tmp_dir, self.config.reports.retain_days)
+        out: dict[str, Any] = {
+            "fmt": fmt,
+            "filename": path.name,
+            "url": f"{base_url}/v1/reports/{path.name}",
+            "path": str(path),
+            "bytes": path.stat().st_size,
+        }
+        if isinstance(rendered, str):
+            out["report"] = rendered
+        return out
+
+    def build_report(
+        self, spec: dict[str, Any], *, base_url: str, fmt: str = "md"
+    ) -> str | bytes:
         """Render a cited report from an answer ``spec`` (title/sections/evidence/provenance),
         verifying every citation against the evidence set (R-CIT-1) — the same renderer the CLI
         uses, so a given spec yields an identical report save for the reference links: a SERVED
@@ -437,8 +480,26 @@ class Service:
         client), where the local CLI links to the original ``file://`` document. Raises
         ``citations.CitationError`` on a hallucinated citation."""
         cfg = self.config
+        fmt = (fmt or "md").lower()
         evidence = {(int(d), int(c)) for d, c in spec.get("evidence", [])}
         sources = list(spec.get("sources", [])) or [s.name for s in cfg.sources]
+        if fmt in report_export.EXPORT_FORMATS:
+            # PDF is printed from the HTML report, so there is one layout, not two that drift.
+            html = self.build_report(spec, base_url=base_url, fmt="html") if fmt == "pdf" else ""
+            return report_export.export_report(
+                title=str(spec.get("title", "Report")),
+                subtitle=str(spec.get("subtitle", "")),
+                body=str(spec.get("body", "")),
+                sections=spec.get("sections"),
+                evidence=evidence,
+                fmt=fmt,
+                request=str(spec.get("request", "")),
+                requested_by=str(spec.get("requested_by", "")),
+                model=str(spec.get("model", "")),
+                classification=str(spec.get("classification", "Confidential")),
+                ref_targets=report.reference_targets(cfg.paths.db_path, evidence, base_url=base_url),
+                html=str(html),
+            )
         return report.render_report(
             title=str(spec.get("title", "Report")),
             subtitle=str(spec.get("subtitle", "")),
@@ -1624,12 +1685,16 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def build_report(spec: dict[str, Any], fmt: str = "md") -> dict[str, Any]:
-        """Render a cited report from an answer spec; verifies citations, refuses hallucinated ones."""
+        """Render a cited report and SAVE it on the server; returns {fmt, filename, url, bytes}
+        — give the user the `url`, it is a direct link to the file. fmt: md | html | pdf | docx |
+        pptx | xlsx (all six write a file). md/html also return the text as `report`. Verifies
+        every citation and refuses hallucinated ones."""
         try:
-            rendered = service.build_report(spec, base_url=base, fmt=fmt)
+            return service.build_report_file(spec, base_url=base, fmt=fmt)
         except citations.CitationError as err:
             return {"error": "HALLUCINATED_CITATION", "message": str(err)}
-        return {"fmt": fmt, "report": rendered}
+        except (report_export.ExportDependencyError, ValueError) as err:
+            return {"error": "EXPORT", "message": str(err)}
 
     return mcp
 
@@ -1644,6 +1709,10 @@ def create_app(config: Config) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> Any:
+        # age out reports left by earlier runs before serving anything (reports.retain_days)
+        swept = report_store.sweep(config.paths.tmp_dir, config.reports.retain_days)
+        if swept:
+            runlog.log("serve.reports_swept", count=swept)
         # run the MCP session manager's lifespan alongside the app (streamable HTTP)
         async with mcp_app.router.lifespan_context(mcp_app):
             yield
@@ -1881,14 +1950,27 @@ def create_app(config: Config) -> FastAPI:
             "trace": req.trace,
         }
         try:
-            rendered = service.build_report(spec, base_url=base, fmt=req.fmt)
+            out = service.build_report_file(spec, base_url=base, fmt=req.fmt)
         except citations.CitationError as err:
             raise HTTPException(
                 status_code=400,
                 detail={"error": "HALLUCINATED_CITATION", "message": str(err)},
             ) from err
+        except report_export.ExportDependencyError as err:
+            raise HTTPException(status_code=501, detail=str(err)) from err
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
         runlog.log("api.report", fmt=req.fmt, evidence=len(req.evidence))
-        return {"fmt": req.fmt, "report": rendered}
+        return out
+
+    @app.get("/v1/reports/{name}")
+    def get_report(name: str) -> FileResponse:
+        """Serve a generated report file — the `url` build_report hands back."""
+        path = report_store.resolve(config.paths.tmp_dir, name)
+        if path is None:
+            raise HTTPException(status_code=404, detail="report not found (it may have aged out)")
+        return FileResponse(path, media_type=_REPORT_MEDIA.get(path.suffix.lower(),
+                                                               "application/octet-stream"))
 
     def _require_user(request: Request) -> str:
         # A write always records who did it — the username must be supplied (R write-auth).

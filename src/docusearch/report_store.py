@@ -61,12 +61,15 @@ def resolve(tmp_dir: Path | str, name: str) -> Path | None:
 def expires_at(written: datetime, retain_days: int) -> datetime | None:
     """When a file written at ``written`` becomes deletable, or None if it is kept forever.
 
-    ``0`` means the next midnight, so a report made at 23:59 survives one minute — that is the
-    documented meaning of "clear it at midnight", not "keep for 24 hours"."""
+    The file always lives a **minimum** span first, then dies at the next midnight, so a report
+    written just before midnight is never swept minutes later. ``0`` is a 12-hour floor; ``N`` is
+    N x 24 hours. Both then round up to midnight in the server's local timezone."""
     if retain_days <= _KEEP_FOREVER:
         return None
-    midnight = datetime.combine(written.date(), datetime.min.time())
-    return midnight + timedelta(days=retain_days + 1)
+    floor = timedelta(hours=12) if retain_days == 0 else timedelta(days=retain_days)
+    earliest = written + floor
+    midnight = datetime.combine(earliest.date(), datetime.min.time())
+    return midnight if midnight == earliest else midnight + timedelta(days=1)
 
 
 def sweep(tmp_dir: Path | str, retain_days: int, *, now: datetime | None = None) -> int:

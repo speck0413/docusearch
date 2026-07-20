@@ -16,6 +16,13 @@ from . import citations
 
 EXPORT_FORMATS = ("pdf", "docx", "pptx", "xlsx")
 
+# plotly needs a tick to draw before the print snapshot is taken
+_PDF_SETTLE_MS = 250
+
+
+class ExportDependencyError(RuntimeError):
+    """A format's writer is not installed. The message names the exact command to fix it."""
+
 # Control chars that are illegal in OOXML/XML (keep tab, LF, CR) — a NUL in a title/body otherwise
 # crashes python-docx/openpyxl with a raw traceback (red-team M1).
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -61,6 +68,7 @@ def export_report(
     model: str = "",
     classification: str = "Confidential",
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None = None,
+    html: str = "",  # the rendered HTML report - required for fmt="pdf", ignored otherwise
 ) -> bytes:
     """Render the report to ``fmt`` bytes. Raises ``CitationError`` if any citation references a
     ``(doc_id, chunk_id)`` outside ``evidence`` (R-CIT-1)."""
@@ -86,7 +94,11 @@ def export_report(
         return _to_pptx(title, subtitle, secs, meta, refs)
     if fmt == "xlsx":
         return _to_xlsx(title, secs, meta, refs)
-    return _to_pdf(title, subtitle, secs, meta, refs)
+    if not html:
+        raise ValueError(
+            "pdf export renders the HTML report - pass html=render_report(..., fmt='html')"
+        )
+    return html_to_pdf(html)
 
 
 def _reference_lines(
@@ -176,33 +188,44 @@ def _to_xlsx(title: str, secs: list[tuple[str, str]], meta: list[str], refs: lis
     return buf.getvalue()
 
 
-def _to_pdf(
-    title: str, subtitle: str, secs: list[tuple[str, str]], meta: list[str], refs: list[str]
-) -> bytes:
-    from html import escape
+def html_to_pdf(html: str) -> bytes:
+    """Print a rendered HTML report to PDF in headless chromium.
 
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
-
-    styles = getSampleStyleSheet()
-    flow = [Paragraph(escape(xml_safe(title)), styles["Title"])]
-    if subtitle:
-        flow.append(Paragraph(escape(xml_safe(subtitle)), styles["Italic"]))
-    flow.append(Paragraph(f"<i>{escape(_AI_WARNING)}</i>", styles["BodyText"]))
-    for line in meta:
-        flow.append(Paragraph(escape(xml_safe(line)), styles["BodyText"]))
-    flow.append(Spacer(1, 12))
-    for heading, bdy in secs:
-        if heading:
-            flow.append(Paragraph(escape(xml_safe(heading)), styles["Heading1"]))
-        for para in _paragraphs(bdy):
-            flow.append(Paragraph(escape(para), styles["BodyText"]))
-        flow.append(Spacer(1, 8))
-    if refs:
-        flow.append(Paragraph("References", styles["Heading1"]))
-        for r in refs:
-            flow.append(Paragraph(escape(xml_safe(r)), styles["BodyText"]))
-    buf = io.BytesIO()
-    SimpleDocTemplate(buf, pagesize=letter, title=title).build(flow)
-    return buf.getvalue()
+    PDF is the one output format with no structured writer of its own, deliberately: rendering
+    the real HTML means there is ONE layout to maintain instead of two that drift, and because
+    chromium executes the page's JS, interactive plotly charts appear in the PDF. A direct
+    writer (reportlab) or a JS-less converter (WeasyPrint) would silently drop them.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as err:  # actionable, one line (operability contract)
+        raise ExportDependencyError(
+            "PDF export needs the [export] extra: pip install 'docusearch[export]' "
+            "&& python -m playwright install chromium"
+        ) from err
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            try:
+                page = browser.new_page()
+                # The report is self-contained (inlined CSS/JS, data: images) so there is no
+                # network to wait on, but plotly needs a tick to draw before the print snapshot.
+                page.set_content(html, wait_until="domcontentloaded")
+                page.wait_for_timeout(_PDF_SETTLE_MS)
+                return bytes(
+                    page.pdf(
+                        format="Letter",
+                        print_background=True,  # keep the report's banner/card styling
+                        margin={"top": "0.6in", "bottom": "0.6in",
+                                "left": "0.5in", "right": "0.5in"},
+                    )
+                )
+            finally:
+                browser.close()
+    except ExportDependencyError:
+        raise
+    except Exception as err:  # a missing browser download is the common case
+        raise ExportDependencyError(
+            f"PDF export could not drive chromium ({type(err).__name__}). Run: "
+            "python -m playwright install chromium"
+        ) from err

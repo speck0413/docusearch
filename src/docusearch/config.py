@@ -277,9 +277,11 @@ SCHEMA: tuple[_Node, ...] = (
                 -1,
                 comment=(
                     "How long a generated report file is kept under tmp_dir/reports/.\n"
+                    "A report always lives a minimum span, THEN dies at the next midnight,\n"
+                    "so one written just before midnight is never swept minutes later.\n"
                     "  -1 : keep forever (default)\n"
-                    "   0 : delete at the next midnight\n"
-                    "   N : delete at midnight N days after the day it was written\n"
+                    "   0 : at least 12 hours, then the next midnight\n"
+                    "   N : at least N x 24 hours, then the next midnight\n"
                     "Midnight is the SERVER's local timezone. Swept when the server starts\n"
                     "and after each report is written."
                 ),

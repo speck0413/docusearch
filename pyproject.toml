@@ -113,6 +113,18 @@ vision-local = [
   "pillow>=10",
   "accelerate>=0.30",
 ]
+# Report OUTPUT to binary formats (docx/pptx/xlsx/pdf). Deliberately separate from the ingest
+# extras above: those exist to READ a format, these to WRITE a report. PDF is rendered by
+# printing the HTML report in headless chromium, so a PDF is byte-for-byte the layout you see
+# in a browser and there is ONE layout to maintain — and, unlike a direct PDF writer, it runs
+# the page's JS so interactive plotly charts actually appear. After installing, fetch the
+# browser once: `python -m playwright install chromium` (offline thereafter).
+export = [
+  "python-docx>=1.1",
+  "python-pptx>=0.6.23",
+  "openpyxl>=3.1",
+  "playwright>=1.40",
+]
 # Developer/validation tooling. Includes every extra so the full suite runs.
 dev = [
   "ruff==0.14.0",
@@ -172,6 +184,7 @@ no_implicit_reexport = false  # __init__.py re-exports the public API (R-ARCH-2)
 
 [[tool.mypy.overrides]]
 module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "reportlab.*",
+          "playwright", "playwright.*",
           "docx", "docx.*", "markdown_it", "markdown_it.*", "pptx", "pptx.*", "openpyxl",
           "openpyxl.*", "pystdf", "pystdf.*", "matplotlib", "matplotlib.*", "plotly", "plotly.*",
           "tree_sitter_python", "tree_sitter_javascript", "tree_sitter_typescript",
