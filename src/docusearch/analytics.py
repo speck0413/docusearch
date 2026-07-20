@@ -300,8 +300,11 @@ def _render_matplotlib(
         if len(hs) > 1:
             ax.legend()
     elif kind == "whisker":
-        data = [_finite(s[1]) for s in (series or [])]
-        ax.boxplot(data, tick_labels=[s[0] for s in (series or [])])
+        # named series → one box each; no series (an ungrouped column) → a single box of the values
+        boxes = list(series) if series else [(ylabel or xlabel or "", _primary(series, y))]
+        drawn = [(lbl, fv) for lbl, v in boxes if (fv := _finite(v))]
+        if drawn:  # boxplot of an empty set raises; a degenerate all-non-finite plot stays blank
+            ax.boxplot([fv for _, fv in drawn], tick_labels=[lbl for lbl, _ in drawn])
     elif kind == "quantile":
         vals = sorted(_primary(series, y))
         qs = [i / (len(vals) - 1) for i in range(len(vals))] if len(vals) > 1 else [0.0]
@@ -359,8 +362,10 @@ def _render_plotly(
         if len(hs) > 1:
             fig.update_layout(barmode="overlay")
     elif kind == "whisker":
-        for label, data in series or []:
-            fig.add_box(y=_finite(data), name=label)
+        boxes = list(series) if series else [(ylabel or xlabel or "", _primary(series, y))]
+        for label, data in boxes:
+            if fv := _finite(data):  # skip an empty/all-non-finite box rather than draw nothing
+                fig.add_box(y=fv, name=label or None)
     elif kind == "quantile":
         vals = sorted(_primary(series, y))
         qs = [i / (len(vals) - 1) for i in range(len(vals))] if len(vals) > 1 else [0.0]

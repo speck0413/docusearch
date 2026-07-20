@@ -125,3 +125,18 @@ def test_site_dispersion_flags_site_to_site_shift() -> None:
     d = analytics.site_dispersion(offset)
     assert d["site_shift"] is True and d["spread_sigma"] > 0.5 and d["n_sites"] == 4
     assert analytics.site_dispersion({1: [1.0, 2.0, 3.0]})["site_shift"] is None  # single site
+
+
+def test_whisker_ungrouped_column_does_not_crash() -> None:
+    # regression: a whisker of an ungrouped column (series=None, values via y) used to raise in the
+    # matplotlib boxplot path ("Dimensions of labels and X must be compatible") — found by the GATE 10
+    # data-engine checkout. Both backends must render a single box from y, and stay blank (no crash)
+    # when nothing is finite.
+    from docusearch import analytics
+    for backend in ("matplotlib", "plotly"):
+        html = analytics.render_plot("whisker", y=[0.71, 0.72, 0.90, 0.70], series=None,
+                                     title="vmin", xlabel="vmin", ylabel="v", backend=backend)
+        assert len(html) > 200
+        blank = analytics.render_plot("whisker", y=[float("nan"), float("inf")], series=None,
+                                      backend=backend)
+        assert len(blank) > 0  # degenerate all-non-finite: blank plot, not an exception
