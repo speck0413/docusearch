@@ -1141,6 +1141,23 @@ class Store:
             return None
         return (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""), str(row[3] or ""))
 
+    def enriched_images(self) -> list[sqlite3.Row]:
+        """Every image carrying a vision result, with the searchable body that was derived from it.
+
+        ``set_image_vision`` keeps only the OCR ``text``; the description survives solely in the
+        enrichment chunk, so recover the body by joining back on ``(doc_id, locator)`` — otherwise
+        an exported sidecar would silently lose the half of the insight that makes an image
+        findable. Ordered by sha for a byte-identical export across runs (R-SRCH-5)."""
+        return self._conn.execute(
+            "SELECT i.sha256 AS sha256, i.vision_text AS vision_text, "
+            "i.vision_model AS vision_model, ("
+            "  SELECT c.text FROM chunks c"
+            "  WHERE c.document_id = i.doc_id AND c.locator = i.locator AND c.kind = 'enrichment'"
+            "  ORDER BY c.id LIMIT 1"
+            ") AS body "
+            "FROM images i WHERE i.vision_model IS NOT NULL ORDER BY i.sha256"
+        ).fetchall()
+
     def get_image(self, sha256: str) -> sqlite3.Row | None:
         row: sqlite3.Row | None = self._conn.execute(
             "SELECT * FROM images WHERE sha256=?", (sha256,)

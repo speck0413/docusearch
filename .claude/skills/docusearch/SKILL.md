@@ -1,6 +1,6 @@
 ---
 name: docusearch
-description: Answer a question from the docusearch catalog and produce a cited, themed HTML/MD report. Use when the user asks something that should be answered from the ingested documentation, or asks for a docusearch report. Exposes a level-of-effort knob (1–10, default 5).
+description: Answer a question from the docusearch catalog and produce a cited, themed report (md/html/html-slide/pdf/docx/pptx/xlsx) saved on the server. Use when the user asks something that should be answered from the ingested documentation, or asks for a docusearch report. Exposes a level-of-effort knob (1–10, default 5).
 ---
 
 # docusearch research + report
@@ -55,21 +55,38 @@ The user picks an effort level (default **medium**):
    `overview`, `procedure`, `code`, `hardware`, `config`, `test-program`, `warning`,
    `reference`. Put every catalog claim's `[D:doc#chunk]` inline in the prose; the renderer
    turns them into little superscript links to the References card.
-4. **Render** via the report builder, which **verifies every citation against your evidence**
-   and refuses hallucinated ones:
+4. **Render with `build_report`.** This is the terminal step and it is not optional — you are
+   talking to a REMOTE docusearch server over MCP, so there is no local `docusearch` CLI to
+   shell out to and no local file you can write the report into. The server renders it, saves
+   it, and hands you back a URL.
 
-   ```bash
-   docusearch report --spec answer.yaml --format html --out <path>.html
-   docusearch report --spec answer.yaml --format md   --out <path>.md
+   ```
+   build_report(spec, fmt="<the configured format>")
    ```
 
-   `answer.yaml`:
+   It **verifies every citation against your evidence and refuses hallucinated ones**, in every
+   format. It returns:
+
+   ```json
+   {"fmt": "html", "filename": "pa-overview-<run>.html",
+    "url": "http://<server>/v1/reports/pa-overview-<run>.html", "bytes": 48213}
+   ```
+
+   **Give the user the `url`** — it is a direct, clickable link to the file. For `md` and
+   `html` the text also comes back as `report` if you want to quote from it; the binary
+   formats deliberately do not inline their payload.
+
+   `fmt` is one of `md` · `html` · `html-slide` · `pdf` · `docx` · `pptx` · `xlsx`.
+   `html-slide` is a keyboard-navigated deck (PowerPoint's own keys). Use the format the
+   operator configured; do not substitute another because one seems easier.
+
+   The `spec` (JSON object):
    ```yaml
    title: "Protocol Aware (PA) — Overview"
    subtitle: "How PA drives serialized bus protocols in the test program"
    request: "Give me a comprehensive overview of controlling PA"   # the user's verbatim ask
    requested_by: "<the requesting user>"                            # who the report is for
-   model: "<your model id, e.g. claude-haiku-4-5>"                  # what generated it
+   model: "<your model id, e.g. claude-sonnet-5>"                   # what generated it
    audience: ["engineering"]
    sections:
      - heading: "Overview"
@@ -88,13 +105,12 @@ The user picks an effort level (default **medium**):
      - [318, 2]
    ```
 
-   Set `request`, `requested_by`, and `model` (or pass `--request/--requested-by/--model`
-   flags) — they populate the report's provenance header. `sources` defaults to the config's
-   document stores; `classification` defaults to "Confidential — Acme". You do **not** set
-   references: the `report` command links each one to the original vendor document
-   automatically (store — title — heading), so leave that to the tool.
+   Set `request`, `requested_by`, and `model` — they populate the report's provenance header.
+   `sources` defaults to the config's document stores. You do **not** set references: the
+   builder links each one to the original document automatically (store — title — heading),
+   so leave that to the tool.
 
-7. **Always include a `trace`** so the reader can see how the report was produced (it renders
+5. **Always include a `trace`** so the reader can see how the report was produced (it renders
    as a collapsed "Generation log" and is NOT citation-verified — it's a log, not claims):
 
    ```yaml
@@ -108,14 +124,16 @@ The user picks an effort level (default **medium**):
      reasoning: "Why you structured the report as you did; leads you followed or dropped."
    ```
 
-5. If `report` prints `error: … cites sources outside the evidence set`, you cited a pair
-   that isn't in `evidence` — add it (if you really retrieved it) or drop the claim, then
-   re-render. Never invent an evidence entry.
+6. If `build_report` returns `{"error": "HALLUCINATED_CITATION", …}`, you cited a pair that
+   isn't in `evidence` — add it (if you really retrieved it) or drop the claim, then re-render.
+   Never invent an evidence entry. An `{"error": "EXPORT", …}` means the server is missing that
+   format's writer; report the message verbatim rather than silently falling back to another
+   format.
 
 ## Invoking as a subagent
 
 To run this in a clean context, spawn a subagent that has the **docusearch MCP** connected
 and this skill available, and hand it the user's question verbatim plus the effort level.
 Give it no other domain instructions — the skill and the catalog are the only sources of
-truth. Have it return the report path + metadata (searches run, chunks cited, mode), not the
+truth. Have it return the report **URL** + metadata (searches run, chunks cited, mode), not the
 document contents.

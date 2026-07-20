@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -450,3 +450,68 @@ def enrich_images(
 def _tick(progress: ProgressFn | None, done: int, total: int) -> None:
     if progress is not None:
         progress("vision", done, total)
+
+
+# ------------------------------------------------------------------ portable sidecar
+
+
+SIDECAR_VERSION = 1
+
+
+@dataclass
+class SidecarResult:
+    """Counts from applying a sidecar to a catalog."""
+
+    applied: int = 0
+    already: int = 0  # already enriched here — a re-import is a no-op
+    absent: int = 0  # that image is not in this catalog
+
+
+def export_enrichments(store: Store) -> dict[str, Any]:
+    """Every vision result in this catalog, as a portable document keyed by image sha256.
+
+    Images dedupe by CONTENT hash, so a result travels: enrich once on a machine that can run the
+    vision model, then apply the sidecar to any catalog holding the same picture — no re-running a
+    paid model per store, and no shipping the catalog itself."""
+    images = {}
+    for row in store.enriched_images():
+        images[str(row["sha256"])] = {
+            "text": str(row["vision_text"] or ""),
+            "model": str(row["vision_model"] or ""),
+            "body": str(row["body"] or ""),
+        }
+    return {"version": SIDECAR_VERSION, "images": images}
+
+
+def import_enrichments(store: Store, data: Mapping[str, Any]) -> SidecarResult:
+    """Apply a sidecar to this catalog: persist each result and add its searchable chunk.
+
+    Idempotent — an image already enriched here is left alone, so re-importing cannot duplicate
+    chunks. An image the sidecar knows but this catalog does not is counted, not an error: sharing
+    one sidecar across stores with overlapping images is the point.
+
+    The caller embeds afterwards (``catalog.enrich_vision`` does this) so the new chunks join the
+    hybrid index."""
+    version = int(data.get("version", 0))
+    if version != SIDECAR_VERSION:
+        raise VisionError(
+            f"sidecar version {version} is not supported (expected {SIDECAR_VERSION}) — "
+            "re-export it with this version of docusearch"
+        )
+    result = SidecarResult()
+    images = data.get("images") or {}
+    for sha in sorted(images):  # sorted => deterministic, and stable progress output
+        entry = images[sha]
+        row = store.get_image(str(sha))
+        if row is None:
+            result.absent += 1
+            continue
+        if row["vision_model"]:
+            result.already += 1
+            continue
+        store.set_image_vision(str(sha), str(entry.get("text", "")), str(entry.get("model", "")))
+        body = str(entry.get("body", "")).strip()
+        if body:
+            store.add_enrichment_chunk(int(row["doc_id"]), body, str(row["locator"] or ""))
+        result.applied += 1
+    return result

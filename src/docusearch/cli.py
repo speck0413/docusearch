@@ -31,7 +31,7 @@ from typing import Any, TextIO
 
 import yaml
 
-from . import config, embed, enrich, ingest, report, runlog
+from . import config, embed, enrich, ingest, report, runlog, vision
 from ._version import __version__
 from .catalog import Catalog, open_federation
 from .config import Config, ConfigError
@@ -167,6 +167,43 @@ def _cmd_vision(args: argparse.Namespace) -> int:
     """Enrich retained images with cloud OCR + description (enrich.vision_images)."""
     cfg = config.load(Path(args.config))
     _configure_logging(cfg)
+
+    # Sidecar moves results BETWEEN catalogs. Images dedupe by content sha, so enrich once on a
+    # machine that can run the model, then apply the file to a server's catalog — no paid re-run
+    # per store, no shipping the catalog. Neither path calls a model, so neither needs vision on.
+    if args.export:
+        with Store.open(cfg.paths.db_path) as store:
+            data = vision.export_enrichments(store)
+        out = Path(args.export)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+        print(f"Exported {len(data['images'])} image enrichments to {out}")
+        runlog.log("cli.vision_export", images=len(data["images"]))
+        runlog.flush()
+        return 0
+    if getattr(args, "import_", None):
+        src = Path(args.import_)
+        try:
+            data = json.loads(src.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            print(f"error: cannot read sidecar {src}: {err}", file=sys.stderr)
+            return 1
+        with Store.open(cfg.paths.db_path) as store:
+            try:
+                res = vision.import_enrichments(store, data)
+            except vision.VisionError as err:
+                print(f"error: {err}", file=sys.stderr)
+                return 1
+        print(
+            f"Applied {res.applied} enrichments "
+            f"({res.already} already enriched, {res.absent} not in this catalog)."
+        )
+        if res.applied:
+            print("Run `docusearch ingest --embed-only` to index the new chunks.")
+        runlog.log("cli.vision_import", applied=res.applied, absent=res.absent)
+        runlog.flush()
+        return 0
+
     if not cfg.enrich.vision_images:
         raise config.ConfigError(
             "enrich.vision_images is off — set `enrich.vision_images: true` in your config "
@@ -1388,6 +1425,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="enrich the largest images first (real diagrams before tiny icons)",
     )
     p_vision.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p_vision.add_argument(
+        "--export", metavar="FILE",
+        help="write this catalog's image enrichments to a portable sidecar (no model calls)",
+    )
+    p_vision.add_argument(
+        "--import", metavar="FILE", dest="import_",
+        help="apply a sidecar's enrichments to this catalog (idempotent, no model calls)",
+    )
     p_vision.add_argument("--config", default="docusearch.yaml", help="config path")
     p_vision.set_defaults(func=_cmd_vision)
 
