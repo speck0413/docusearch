@@ -228,7 +228,7 @@ def _page(title: str, body: str, *, subtitle: str = "") -> str:
 
 
 def plot_test_html(
-    run: StdfRun, test_num: int, *, kind: str = "histogram", backend: str = "matplotlib"
+    run: StdfRun, test_num: int, *, kind: str = "histogram", backend: str = "plotly"
 ) -> str:
     """A single test's distribution plot + summary stats, in the shared theme."""
     vals = results_for(run, test_num)
@@ -243,7 +243,7 @@ def plot_test_html(
     return _page(f"{txt} — distribution", card, subtitle=f"test {test_num} · {kind}")
 
 
-def site_compare_html(run: StdfRun, test_num: int, *, backend: str = "matplotlib") -> str:
+def site_compare_html(run: StdfRun, test_num: int, *, backend: str = "plotly") -> str:
     """Site-to-site box comparison of one test, themed."""
     groups = site_groups(run, test_num)
     series = [(f"site {site}", vals) for site, vals in groups.items()]
@@ -260,7 +260,7 @@ def site_compare_html(run: StdfRun, test_num: int, *, backend: str = "matplotlib
 
 
 def trend_html(
-    runs: list[tuple[str, StdfRun]], test_num: int, *, stat: str = "mean", backend: str = "matplotlib"
+    runs: list[tuple[str, StdfRun]], test_num: int, *, stat: str = "mean", backend: str = "plotly"
 ) -> str:
     """Long-run trend of a test's ``stat`` across ordered runs, themed."""
     pts = trend_points(runs, test_num, stat)
@@ -503,13 +503,45 @@ _DASHBOARD_JS = """
    btn.textContent=btn.dataset.dir==='best'?'best first':'worst first';run();});
   run();
  });
- // expand a table to a full-window overlay (and back); Esc also exits
- function setFull(tp,on){tp.classList.toggle('full',on);var b=tp.querySelector('.expand-btn');
-  if(b)b.textContent=on?'\\u2715 Close':'\\u26f6 Full screen';}
+ // expand a table to fill the window BELOW the tab bar (and back); Esc also exits.
+ // The tab bar stays pinned and clickable so you can switch views while maximized.
+ function setFull(tp,on){
+  tp.classList.toggle('full',on);
+  var b=tp.querySelector('.expand-btn');
+  if(b)b.textContent=on?'\\u2715 Close':'\\u26f6 Full screen';
+  var bar=document.querySelector('.tabbar');
+  if(bar)document.documentElement.style.setProperty('--tabbar-h',bar.offsetHeight+'px');
+  document.body.classList.toggle('panel-full',!!document.querySelector('.tablepanel.full'));
+ }
  document.querySelectorAll('.expand-btn').forEach(function(btn){btn.addEventListener('click',function(){
   var tp=btn.closest('.tablepanel');if(tp)setFull(tp,!tp.classList.contains('full'));});});
  document.addEventListener('keydown',function(e){if(e.key==='Escape')
   document.querySelectorAll('.tablepanel.full').forEach(function(tp){setFull(tp,false);});});
+ // switching tabs while maximized keeps the new view maximized too
+ document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click',function(){
+  if(!document.body.classList.contains('panel-full'))return;
+  document.querySelectorAll('.tablepanel.full').forEach(function(tp){setFull(tp,false);});
+  var open=document.querySelector('.panel:not(.hidden) .tablepanel');
+  if(open)setFull(open,true);});});
+ // editable feedback survives a refresh (localStorage, keyed by file + panel + row)
+ (function(){
+  var KEY='docusearch-fb:'+location.pathname;
+  var saved={};
+  try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch(e){saved={};}
+  function cellKey(td){
+   var row=td.closest('tr'),panel=td.closest('.panel');
+   return (panel?panel.dataset.t||panel.id||'':'')+'|'+(row?(row.dataset.name||row.rowIndex):'');
+  }
+  document.querySelectorAll('td.fb').forEach(function(td){
+   var k=cellKey(td);
+   if(saved[k])td.textContent=saved[k];
+   td.addEventListener('input',function(){
+    saved[k]=td.textContent.trim();
+    if(!saved[k])delete saved[k];
+    try{localStorage.setItem(KEY,JSON.stringify(saved));}catch(e){}
+   });
+  });
+ })();
 })();
 """
 
@@ -745,7 +777,7 @@ def _pick_plotted(analyses: list[TestAnalysis], cap: int) -> list[TestAnalysis]:
 
 
 def audit_report_html(
-    run_a: StdfRun, run_b: StdfRun, *, backend: str = "matplotlib",
+    run_a: StdfRun, run_b: StdfRun, *, backend: str = "plotly",
     label_a: str = "A", label_b: str = "B", max_plots: int = 48,
 ) -> str:
     """A themed, **tabbed, interactive** STDF audit dashboard (R-STDF-2), built for **thousands** of

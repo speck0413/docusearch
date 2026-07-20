@@ -18,6 +18,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
+
+# A format whose file extension differs from its name. `html-slide` is a slide deck rendered as
+# one self-contained HTML file, so it must land as .html or a browser will not open it.
+EXTENSIONS = {"html-slide": "html"}
 _KEEP_FOREVER = -1
 
 

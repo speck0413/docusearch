@@ -456,7 +456,7 @@ class Service:
         fmt = (fmt or "md").lower()
         rendered = self.build_report(spec, base_url=base_url, fmt=fmt)
         stem = report_store.slug(str(spec.get("title", "report")))
-        name = f"{stem}-{runlog.RUN_ID}.{fmt}"
+        name = f"{stem}-{runlog.RUN_ID}.{report_store.EXTENSIONS.get(fmt, fmt)}"
         path = report_store.write(self.config.paths.tmp_dir, name, rendered)
         report_store.sweep(self.config.paths.tmp_dir, self.config.reports.retain_days)
         out: dict[str, Any] = {

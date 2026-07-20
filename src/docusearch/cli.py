@@ -1450,8 +1450,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--spec", required=True, help="YAML: title, body (with [D:] cites), evidence"
     )
     p_report.add_argument(
-        "--format", choices=("md", "html", "pdf", "docx", "pptx", "xlsx"), default=None,
-        help="output format (pdf/docx/pptx/xlsx need --out)",
+        "--format", choices=("md", "html", "html-slide", "pdf", "docx", "pptx", "xlsx"),
+        default=None,
+        help="output format; html-slide is a keyboard-navigated deck (pdf/docx/pptx/xlsx need --out)",
     )
     p_report.add_argument("--out", help="write here (default: stdout); format inferred from .html")
     p_report.add_argument("--request", default="", help="the exact request this report answers")

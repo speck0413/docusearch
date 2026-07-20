@@ -126,6 +126,10 @@ def render_report(
     header = (classification, request)
     refs = _references(ordered, base_url, ref_targets)
 
+    if fmt == "html-slide":
+        return _render_slides(
+            title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images, trace
+        )
     if fmt == "html":
         return _render_html(
             title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images, trace
@@ -590,8 +594,13 @@ td .tag,.tag{display:inline-block;background:var(--card2);border:1px solid var(-
 color:var(--accent2);border-radius:6px;padding:0 6px;margin:1px 2px;font-size:10.5px;font-weight:600;}
 /* fixed-size, self-scrolling table with a frozen header row; expand toggles a full-window overlay */
 .tablepanel{margin:.3em 0;}
-.tablepanel.full{position:fixed;inset:0;z-index:1000;background:var(--bg);padding:14px 16px;
+/* Full screen stops BELOW the tab bar and pins it, so you can still switch tabs while
+   maximized — a full-viewport overlay hid the one control you most want up there. */
+.tablepanel.full{position:fixed;inset:var(--tabbar-h,56px) 0 0 0;z-index:1000;
+background:var(--bg);padding:14px 16px;
 display:flex;flex-direction:column;overflow:hidden;box-shadow:0 0 0 100vmax var(--bg);}
+body.panel-full .tabbar{position:fixed;top:0;left:0;right:0;z-index:1001;margin:0;
+background:var(--bg);padding:8px 16px 0;box-shadow:0 6px 18px -12px #000;}
 .tablewrap{overflow:auto;max-height:60vh;border:1px solid var(--border);border-radius:10px;
 -webkit-overflow-scrolling:touch;}
 .tablepanel.full .tablewrap{max-height:none;flex:1;}
@@ -705,3 +714,134 @@ def evidence_images(
                 ) or f"figure [D:{doc_id}#{chunk_id}]"
                 out.append((f"data:image/{media};base64,{b64}", caption))
     return out
+
+
+# ------------------------------------------------------------------------- slide deck
+
+
+_SLIDE_CSS = """
+/* Slide deck: same theme as the report, one section per slide. */
+html,body{height:100%;overflow:hidden;}
+.deck{height:100vh;width:100vw;position:relative;}
+.slide{position:absolute;inset:0;display:none;flex-direction:column;
+justify-content:center;padding:5vh 7vw 12vh;overflow-y:auto;}
+.slide.on{display:flex;animation:slide-in .18s ease-out;}
+@keyframes slide-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.slide h1{font-size:clamp(28px,4.6vw,60px);line-height:1.12;margin:0 0 .3em;}
+.slide h2{font-size:clamp(22px,3.2vw,40px);line-height:1.2;margin:0 0 .5em;
+color:var(--accent);display:flex;align-items:center;gap:.4em;}
+.slide .body{font-size:clamp(15px,1.55vw,22px);}
+.slide .body p{margin:0 0 .7em;}
+.slide.cover{justify-content:center;text-align:left;}
+.slide.cover .subtitle{font-size:clamp(16px,2vw,26px);color:var(--muted);margin:0 0 1.2em;}
+.deck-meta{color:var(--muted);font-size:14px;display:flex;flex-wrap:wrap;gap:.4em 1.4em;}
+.refs-slide ol{font-size:clamp(13px,1.25vw,18px);}
+/* chrome */
+.bar{position:fixed;left:0;bottom:0;height:3px;background:var(--accent);
+transition:width .18s ease;z-index:5;}
+.hud{position:fixed;right:16px;bottom:12px;color:var(--muted);font-size:13px;
+display:flex;align-items:center;gap:14px;z-index:5;}
+.hud button{background:transparent;border:1px solid var(--border);color:var(--muted);
+border-radius:8px;padding:2px 9px;font-size:14px;cursor:pointer;}
+.hud button:hover{color:var(--text);border-color:var(--accent-dim);}
+.hint{position:fixed;left:16px;bottom:12px;color:var(--muted);font-size:12.5px;
+opacity:.75;z-index:5;}
+@media print{html,body{overflow:visible;height:auto}
+.slide{display:flex!important;position:relative;page-break-after:always;height:100vh;}
+.bar,.hud,.hint{display:none}}
+"""
+
+# PowerPoint's own navigation keys, so muscle memory transfers.
+_SLIDE_JS = """
+(function(){
+ var s=[].slice.call(document.querySelectorAll('.slide')),i=0;
+ var bar=document.querySelector('.bar'),now=document.querySelector('.now');
+ function go(n){
+  i=Math.max(0,Math.min(s.length-1,n));
+  s.forEach(function(el,k){el.classList.toggle('on',k===i);});
+  if(bar)bar.style.width=((i+1)/s.length*100)+'%';
+  if(now)now.textContent=(i+1)+' / '+s.length;
+  if(history.replaceState)history.replaceState(null,'','#'+(i+1));
+ }
+ var NEXT=['ArrowRight','ArrowDown','PageDown','Enter',' ','n','N'];
+ var PREV=['ArrowLeft','ArrowUp','PageUp','Backspace','p','P'];
+ document.addEventListener('keydown',function(e){
+  if(NEXT.indexOf(e.key)>=0){go(i+1);e.preventDefault();}
+  else if(PREV.indexOf(e.key)>=0){go(i-1);e.preventDefault();}
+  else if(e.key==='Home'){go(0);e.preventDefault();}
+  else if(e.key==='End'){go(s.length-1);e.preventDefault();}
+  else if(e.key==='f'||e.key==='F'||e.key==='F5'){full();e.preventDefault();}
+ });
+ function full(){if(document.fullscreenElement)document.exitFullscreen();
+  else if(document.documentElement.requestFullscreen)document.documentElement.requestFullscreen();}
+ var fb=document.querySelector('.fs');if(fb)fb.addEventListener('click',full);
+ var nb=document.querySelector('.nx');if(nb)nb.addEventListener('click',function(){go(i+1);});
+ var pb=document.querySelector('.pv');if(pb)pb.addEventListener('click',function(){go(i-1);});
+ // advance on click, except on a link or a control
+ document.addEventListener('click',function(e){
+  if(e.target.closest('a,button'))return;go(i+1);});
+ var start=parseInt((location.hash||'').replace('#',''),10);
+ go(isNaN(start)?0:start-1);
+})();
+"""
+
+
+def _render_slides(
+    title: str,
+    subtitle: str,
+    header: tuple[str, str],
+    meta: list[tuple[str, str]],
+    secs: list[tuple[str, str, str]],
+    numbering: dict[tuple[int, int], int],
+    refs: list[tuple[str, str]],
+    image_urls: list[str],
+    embedded_images: Sequence[tuple[str, str]],
+    trace: Mapping[str, object] | None,
+) -> str:
+    """A self-contained HTML slide deck in the report theme: one section per slide, navigated
+    with PowerPoint's own keys. Same content, numbering and references as the HTML report — only
+    the layout differs, so a deck and a report of the same spec cite identically (R-REUSE-2)."""
+    esc = _html.escape
+    classification, request = header
+    slides: list[str] = []
+    meta_html = "".join(f"<span><b>{esc(k)}</b> {esc(v)}</span>" for k, v in meta)
+    request_html = f'<div class="request"><span>Request</span> “{esc(request)}”</div>' if request else ""
+    slides.append(
+        '<section class="slide cover"><p class="eyebrow">' + esc(classification) + "</p>"
+        f"<h1>{esc(title)}</h1>"
+        + (f'<p class="subtitle">{esc(subtitle)}</p>' if subtitle else "")
+        + request_html
+        + f'<div class="deck-meta">{meta_html}</div>'
+        + f'<div class="ai-warning"><span class="wic">⚠️</span>{esc(_AI_WARNING)}</div>'
+        + "</section>"
+    )
+    for heading, kind, body in secs:
+        icon, cls = _KINDS.get(kind.lower(), ("📄", "kind-generic"))
+        slides.append(
+            f'<section class="slide {cls}">'
+            + (f"<h2><span class=\"ic\">{icon}</span>{esc(heading)}</h2>" if heading else "")
+            + f'<div class="body">{_blocks_html(body, numbering)}</div></section>'
+        )
+    if image_urls or embedded_images:
+        figs = "".join(f'<img src="{esc(u)}" alt="">' for u in image_urls)
+        figs += "".join(f'<img src="{esc(src)}" alt="{esc(alt)}">' for src, alt in embedded_images)
+        slides.append(
+            '<section class="slide"><h2><span class="ic">🖼️</span>Figures</h2>'
+            f'<div class="body figures">{figs}</div></section>'
+        )
+    ref_items = "".join(f'<li>{esc(label)}</li>' for _href, label in refs) or "<li>(none)</li>"
+    slides.append(
+        '<section class="slide refs-slide"><h2><span class="ic">📎</span>References</h2>'
+        f'<div class="body"><ol class="refs">{ref_items}</ol></div></section>'
+    )
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{esc(title)}</title><style>{_CSS}{_SLIDE_CSS}</style></head><body>"
+        f'<div class="deck">{"".join(slides)}</div>'
+        '<div class="bar"></div>'
+        '<div class="hint">← → navigate · F full screen</div>'
+        '<div class="hud"><button class="pv">‹</button><span class="now"></span>'
+        '<button class="nx">›</button><button class="fs">⛶</button></div>'
+        f"<script>{_SLIDE_JS}</script></body></html>"
+    )

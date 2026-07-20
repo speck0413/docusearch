@@ -400,9 +400,14 @@ SCHEMA: tuple[_Node, ...] = (
             ),
             _Field(
                 "plot_backend",
-                "matplotlib",
-                inline="analytics plot backend: matplotlib (static PNG) | plotly (interactive HTML)",
-                choices=("matplotlib", "plotly"),
+                "plotly",
+                comment=(
+                    "Analytics plot backend.\n"
+                    "  plotly     : interactive — zoom, pan, hover tooltips, click a series in\n"
+                    "               the legend to isolate it (default; self-contained HTML)\n"
+                    "  matplotlib : a static PNG, for a smaller file or a print-only workflow"
+                ),
+                choices=("plotly", "matplotlib"),
             ),
             _Field(
                 "part_key",

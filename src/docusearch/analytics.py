@@ -230,7 +230,7 @@ def render_plot(
     title: str = "",
     xlabel: str = "",
     ylabel: str = "",
-    backend: str = "matplotlib",
+    backend: str = "plotly",
     bins: int = 20,
     vlines: Sequence[float] = (),
     include_js: bool = True,
