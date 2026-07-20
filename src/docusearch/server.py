@@ -283,16 +283,27 @@ class Service:
     def submit_feedback(
         self, *, user: str, text: str, doc_id: int | None = None,
         chunk_id: int | None = None, rating: int | None = None, make_global: bool = False,
-        store: str | None = None,
+        store: str | None = None, groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Record a user's feedback in the store (Phase 8). It is **private to ``user``** by default;
         ``make_global`` promotes it to everyone. A ``rating`` (-1/0/+1) with a ``doc_id`` target makes
         it ranking-eligible. In a federation, ``store`` names the member the target doc belongs to so
-        the feedback lands where that member's re-rank reads it. Also mirrored to JSONL for review."""
+        the feedback lands where that member's re-rank reads it. Also mirrored to JSONL for review.
+
+        Writing is gated on the target store's access policy (red-team #H1) — a caller who couldn't
+        search the store cannot write feedback into it — and absurd ids are refused (red-team #M1)."""
         import json
 
+        if (doc_id is not None and not _fits_i64(doc_id)) or (
+            chunk_id is not None and not _fits_i64(chunk_id)
+        ):
+            raise ValueError("doc_id/chunk_id out of range")
+        target = self._target_config(store)
+        if not target.access.permits(user=user or None, groups=groups or set()):
+            raise PermissionError(
+                f"access denied: cannot submit feedback to store {store or 'default'!r}")
         scope = "global" if make_global else "user"
-        target_db = self._target_config(store).paths.db_path
+        target_db = target.paths.db_path
         with Store.open(target_db) as db:
             fb_id = db.add_feedback(
                 author=user, scope=scope, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating,
@@ -1053,9 +1064,12 @@ def _annotate_conflict_tiers(
         ta, tb = tier(p.doc_a), tier(p.doc_b)
         is_cross = ta != tb
         cross += int(is_cross)
+        # only claim an authoritative doc when one tier actually OUTRANKS the other — two docs whose
+        # tiers are both unrecognized (rank 0) have no clear authority (red-team #L1).
+        ra, rb = _TIER_RANK.get(ta, 0), _TIER_RANK.get(tb, 0)
         authoritative = None
-        if is_cross:
-            authoritative = p.doc_a if _TIER_RANK.get(ta, 0) >= _TIER_RANK.get(tb, 0) else p.doc_b
+        if is_cross and ra != rb:
+            authoritative = p.doc_a if ra > rb else p.doc_b
         rows.append({
             "chunk_a": p.chunk_a, "chunk_b": p.chunk_b, "doc_a": p.doc_a, "doc_b": p.doc_b,
             "doc_a_path": meta.get(p.doc_a, ("", ""))[0],
@@ -1532,14 +1546,16 @@ def build_mcp(service: Service, config: Config) -> Any:
     def submit_feedback(
         text: str, user: str, doc_id: int | None = None, chunk_id: int | None = None,
         rating: int | None = None, make_global: bool = False, store: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Record a user's feedback (attributed to `user`). Private to that user by default; set
         `make_global=true` to share with everyone. A `rating` (-1/0/+1) on a `doc_id` nudges ranking.
-        In a federation, pass the `store` the doc came from so the feedback lands in that member."""
+        In a federation, pass the `store` the doc came from so the feedback lands in that member.
+        Gated on the target store's access policy — you can only give feedback where you may search."""
         try:
             return service.submit_feedback(
                 user=user, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating,
-                make_global=make_global, store=store,
+                make_global=make_global, store=store, groups=_grp(groups),
             )
         except (ValueError, PermissionError) as err:
             return {"error": "FEEDBACK", "message": str(err)}
@@ -1827,11 +1843,14 @@ def create_app(config: Config) -> FastAPI:
     def feedback_route(req: FeedbackRequest, request: Request) -> dict[str, Any]:
         """Record user feedback (attributed to X-Docusearch-User)."""
         user = _require_user(request)
+        _, req_groups = _request_identity(request)
         try:
             return service.submit_feedback(
                 user=user, text=req.text, doc_id=req.doc_id, chunk_id=req.chunk_id,
-                rating=req.rating, make_global=req.make_global, store=req.store,
+                rating=req.rating, make_global=req.make_global, store=req.store, groups=req_groups,
             )
+        except PermissionError as err:
+            raise HTTPException(status_code=403, detail=str(err)) from err
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
 

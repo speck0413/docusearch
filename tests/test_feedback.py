@@ -40,13 +40,18 @@ def test_feedback_private_by_default_and_global_opt_in(tmp_path: Path) -> None:
         assert store.feedback_scores(author="bob") == {7: 1}
 
 
-def test_feedback_scores_aggregate_and_cleanup(tmp_path: Path) -> None:
+def test_feedback_scores_one_vote_per_account_and_cleanup(tmp_path: Path) -> None:
     svc = _service(tmp_path)
-    for r in (1, 1, -1):  # net +1 on doc 3, all global
+    # a single account cannot STACK votes — its latest rating counts once (red-team #H2). carol
+    # votes +1, +1, -1 on doc 3 → she nets -1 (her latest), not +1 (the old, exploitable sum).
+    for r in (1, 1, -1):
         svc.submit_feedback(user="carol", text="note", doc_id=3, rating=r, make_global=True)
+    # a DIFFERENT account still contributes independently
+    svc.submit_feedback(user="dave", text="agree", doc_id=3, rating=1, make_global=True)
     with Store.open(svc.config.paths.db_path) as store:
-        assert store.feedback_scores() == {3: 1} and store.count_feedback() == 3
-        store.delete_document(3)  # deleting the target removes its feedback
+        assert store.feedback_scores() == {3: 0}       # carol -1 + dave +1
+        assert store.count_feedback() == 4             # all 4 rows still stored (dedup is at score time)
+        store.delete_document(3)                        # deleting the target removes its feedback
         assert store.count_feedback() == 0
 
 
@@ -68,3 +73,56 @@ def test_cross_tier_discrepancy_annotation() -> None:
     assert a["cross_tier"] is True and a["authoritative_doc"] == 2  # internal wins over vendor
     assert a["doc_a_tier"] == "vendor" and a["doc_b_tier"] == "internal"
     assert b["cross_tier"] is False and b["authoritative_doc"] is None
+
+
+def test_phase8_redteam_regressions(tmp_path: Path) -> None:
+    # H2: an out-of-range rating is clamped to -1/0/+1, and one account counts at most once per doc
+    svc = _service(tmp_path)
+    svc.submit_feedback(user="a", text="x", doc_id=1, rating=-10_000)          # clamped
+    for _ in range(9):
+        svc.submit_feedback(user="a", text="x", doc_id=1, rating=-1)           # spam
+    with Store.open(svc.config.paths.db_path) as store:
+        assert store.feedback_scores(author="a") == {1: -1}                    # bounded, not -19
+        # L2: a malformed rating row (bypassing add_feedback) must not crash ranking, just be skipped
+        store._conn.execute(  # noqa: SLF001
+            "INSERT INTO feedback(ts, author, scope, doc_id, chunk_id, rating, text) "
+            "VALUES ('t','b','global',1,NULL,'oops','bad')")
+        assert store.feedback_scores(author="a") == {1: -1}                    # no crash, bad row ignored
+
+    # M1: an absurd doc_id is a clean ValueError, not an uncaught OverflowError
+    import pytest
+    with pytest.raises(ValueError, match="out of range"):
+        svc.submit_feedback(user="a", text="x", doc_id=2**100, rating=1)
+
+
+def test_feedback_write_gated_on_private_store(tmp_path: Path) -> None:
+    # H1: a caller who may not read a private store may not write feedback into it
+    src = tmp_path / "seed"
+    src.mkdir()
+    path = tmp_path / "d.yaml"
+    path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        'access:\n  visibility: "private"\n  allowed_users: ["owner"]\n'
+        f'sources:\n  - name: seed\n    location: "{src.as_posix()}"\n    min_content_chars: 1\n'
+        'embed:\n  model: "none"\n', encoding="utf-8")
+    svc = Service(cfg.load(path))
+    import pytest
+    with pytest.raises(PermissionError):
+        svc.submit_feedback(user="intruder", text="x", doc_id=1, rating=1)
+    assert svc.submit_feedback(user="owner", text="ok", doc_id=1, rating=1)["recorded"] is True
+
+
+def test_tier_typo_is_a_config_error(tmp_path: Path) -> None:
+    # M2: a mistyped tier must fail config load (closed enum), not silently score as vendor
+    import pytest
+    src = tmp_path / "seed"
+    src.mkdir()
+    path = tmp_path / "d.yaml"
+    path.write_text(
+        f'paths:\n  staging_dir: "{(tmp_path / "s").as_posix()}"\n'
+        f'  db_path: "{(tmp_path / "c.db").as_posix()}"\n  tmp_dir: "{(tmp_path / "t").as_posix()}"\n'
+        f'sources:\n  - name: seed\n    location: "{src.as_posix()}"\n    min_content_chars: 1\n'
+        '    tier: "gold"\nembed:\n  model: "none"\n', encoding="utf-8")
+    with pytest.raises(cfg.ConfigError):
+        cfg.load(path)

@@ -711,7 +711,13 @@ class Store:
         chunk_id: int | None = None, rating: int | None = None,
     ) -> int:
         """Record one piece of feedback and return its id. ``scope`` is ``user`` (private to
-        ``author``) or ``global`` (visible to everyone)."""
+        ``author``) or ``global`` (visible to everyone). ``rating`` is clamped to the documented
+        -1/0/+1 range so a single call can't inject an unbounded score (red-team #H2)."""
+        if rating is not None:
+            try:
+                rating = max(-1, min(1, int(rating)))
+            except (TypeError, ValueError):
+                rating = None
         cur = self._conn.execute(
             "INSERT INTO feedback(ts, author, scope, doc_id, chunk_id, rating, text) "
             "VALUES (?,?,?,?,?,?,?)",
@@ -741,12 +747,22 @@ class Store:
 
     def feedback_scores(self, *, author: str | None = None) -> dict[int, int]:
         """Net rating per **document** visible to ``author`` (own private + global) — the signal that
-        nudges search ranking. ``{doc_id: sum(rating)}``, skipping entries with no doc target."""
+        nudges search ranking. Each **account** counts at most **once** per document (its latest
+        rating), so no single account can spam a doc up or down (red-team #H2); a malformed rating row
+        is skipped, never crashing ranking (red-team #L2)."""
+        latest: dict[tuple[str, int], int] = {}  # (author, doc_id) -> that account's latest rating
+        for r in self.feedback_entries(author=author, include_global=True):  # ordered by id asc
+            did, rating, who = r["doc_id"], r["rating"], r["author"]
+            if did is None or rating is None:
+                continue
+            try:
+                rv = max(-1, min(1, int(rating)))
+            except (TypeError, ValueError):
+                continue
+            latest[(str(who), int(did))] = rv
         scores: dict[int, int] = {}
-        for r in self.feedback_entries(author=author, include_global=True):
-            did, rating = r["doc_id"], r["rating"]
-            if did is not None and rating is not None:
-                scores[int(did)] = scores.get(int(did), 0) + int(rating)
+        for (_who, did), rv in latest.items():
+            scores[did] = scores.get(did, 0) + rv
         return scores
 
     def count_feedback(self) -> int:

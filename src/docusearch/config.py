@@ -171,6 +171,7 @@ SCHEMA: tuple[_Node, ...] = (
                     "A search re-ranks so feedback > internal > vendor — an `internal` source's hits\n"
                     "get a boost over `vendor` ones (tune under `ranking:`); user feedback outranks both."
                 ),
+                choices=("internal", "vendor"),
             ),
             _Field(
                 "csv",
@@ -402,7 +403,8 @@ SCHEMA: tuple[_Node, ...] = (
         (
             _Field("name", "", inline="label for this member store, e.g. python | rust | internal"),
             _Field("config", "", inline="path to that store's docusearch.yaml"),
-            _Field("tier", "vendor", inline="authority tier of this member: internal | vendor"),
+            _Field("tier", "vendor", inline="authority tier of this member: internal | vendor",
+                   choices=("internal", "vendor")),
         ),
         comment=(
             "OPTIONAL — federate several independent stores into one searchable set (R-TEST-3).\n"
