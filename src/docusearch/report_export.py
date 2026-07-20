@@ -232,6 +232,7 @@ def _numbered(
 # continues on another slide rather than overflowing off the bottom.
 _SLIDE_BULLETS = 6
 _SLIDE_CHARS = 160  # a "point" longer than this is prose, not a bullet
+_SOURCE_LINES = 10  # a source list is one line each, so it packs tighter than bullets
 
 
 def _points(body: str) -> list[tuple[int, str]]:
@@ -262,14 +263,16 @@ def _points(body: str) -> list[tuple[int, str]]:
     return points
 
 
-def _slide_chunks(points: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+def _slide_chunks(
+    points: list[tuple[int, str]], per_slide: int = _SLIDE_BULLETS
+) -> list[list[tuple[int, str]]]:
     """Split points across slides, keeping long prose points on lighter slides."""
     chunks: list[list[tuple[int, str]]] = []
     current: list[tuple[int, str]] = []
     budget = 0
     for level, text in points:
         cost = 2 if len(text) > _SLIDE_CHARS else 1
-        if current and budget + cost > _SLIDE_BULLETS:
+        if current and budget + cost > per_slide:
             chunks.append(current)
             current, budget = [], 0
         current.append((level, text))
@@ -554,15 +557,28 @@ def _to_pptx(
             _figure_slide(prs, pic_layout, path, caption)
 
     if refs:
-        numbered = [(0, f"{i}. {r}") for i, r in enumerate(refs, 1)]
-        for n, chunk in enumerate(_slide_chunks(numbered)):
+        # A deck that ends in eight slides of numbered chunk references is unreadable, but the
+        # numbering has to survive because the inline markers point at it. So the SLIDE lists the
+        # distinct source documents — what an audience can actually use — and the complete
+        # numbered list goes in the speaker notes, where it stays auditable and matches the
+        # inline numbers exactly.
+        seen: dict[str, None] = {}
+        for ref in refs:
+            seen.setdefault(" — ".join(ref.split(" — ")[:2]).strip(), None)
+        documents = [(0, name) for name in seen]
+        full = "\n".join(f"{i}. {r}" for i, r in enumerate(refs, 1))
+        for n, chunk in enumerate(_slide_chunks(documents, _SOURCE_LINES)):
             slide = prs.slides.add_slide(body_layout)
             if slide.shapes.title is not None:
-                slide.shapes.title.text = "References" if n == 0 else "References (cont.)"
+                label = f"Sources ({len(seen)} documents, {len(refs)} citations)"
+                slide.shapes.title.text = label if n == 0 else "Sources (cont.)"
             holders = _content_holders(slide)
             if holders:
                 _fill(holders[0], chunk)
                 _fit(holders[0].text_frame, chunk)
+            if n == 0:
+                with suppress(AttributeError, KeyError):
+                    slide.notes_slide.notes_text_frame.text = full
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
