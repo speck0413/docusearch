@@ -37,6 +37,17 @@ catalog.db
 corpora/data/
 corpora/models/
 
+# Internal build/verification scaffolding + private-dataset material.
+# Kept locally for continued work, never tracked.
+/WORKLOG.md
+/CLAUDE.md
+/docusearch-architecture.md
+/CHANGELOG.md
+/RUNBOOK-private-dataset.md
+/redteam/
+/harness/
+/.claude/agents/redteam.md
+
 # OS noise
 .DS_Store
 Thumbs.db

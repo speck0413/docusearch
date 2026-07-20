@@ -9,11 +9,10 @@ Target users are electrical engineers who write code, not software engineers. Ev
 interface biases toward simple, discoverable, low-ceremony use. Runs on Windows 11
 laptops and on servers; heavy ingestion belongs on the server, clients stay light.
 
-> **Status:** Phases 0–2 complete — HTML ingest, BM25, and local **hybrid** (vector +
-> RRF) search, all with citations/relations/image retention. `serve` (REST + MCP) and
-> other formats (PDF/DOCX/MD) are upcoming phases. See `docusearch-architecture.md` for
-> the contract, `WORKLOG.md` for current state, and `RUNBOOK-private-dataset.md` for the
-> full operator guide (PowerShell **and** bash).
+> Ingests HTML, PDF, DOCX, and Markdown; BM25 with optional local **hybrid** (vector +
+> RRF) search, all with citations/relations/image retention; `serve` exposes REST + MCP.
+> See [`GETTING_STARTED.md`](GETTING_STARTED.md) for the full operator and user guide
+> (PowerShell **and** bash).
 
 ## Run it on your documents (macOS)
 

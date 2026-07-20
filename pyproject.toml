@@ -11,8 +11,7 @@ requires-python = ">=3.11"
 license = { text = "Proprietary" }
 authors = [{ name = "Stephen" }]
 
-# Runtime dependencies are added phase-by-phase (R-REUSE-1/4), each justified in
-# WORKLOG DECISIONS.
+# Runtime dependencies, each added and justified when introduced.
 #   pyyaml     - config (no stdlib YAML parser)                      [Phase 0]
 #   selectolax - fast HTML parsing/extraction (lexbor backend, §7)   [Phase 1]
 #   numpy      - vector serialization + hybrid math (light)          [Phase 2]

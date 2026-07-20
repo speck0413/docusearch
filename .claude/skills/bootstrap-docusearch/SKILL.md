@@ -36,7 +36,7 @@ Read the generated file with the user. It is a starting point, not the final ans
   own git, no token in the config).
 - **"also found N …"** → the repo is **mixed** (e.g. code *and* docs). One config has one
   `store_type`. To index the secondary content too, make a **second** config for it and combine them
-  under a `federation:` block (see `RUNBOOK-private-dataset.md` → federation). Don't force everything
+  under a `federation:` block. Don't force everything
   into one store.
 
 ## 3. Verify — always
