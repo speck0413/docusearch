@@ -61,3 +61,23 @@ def test_font_profile_multiple_pdfs_and_bad_bytes(tmp_path: Path) -> None:
     prof = ingest.pdf_font_profile([good.read_bytes(), b"not a pdf at all", good.read_bytes()])
     assert prof.sampled == 2  # the garbage bytes are skipped, not fatal
     assert prof.detected and prof.pages == 2
+
+
+def test_font_profile_encrypted_pdf_is_skipped(tmp_path: Path) -> None:
+    # red-team #H2: an encrypted PDF opens but raises on page read — it must be skipped, not crash
+    # `docusearch inspect`, and must not poison the other (good) PDFs in the same sample.
+    from reportlab.lib import pdfencrypt
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    enc = tmp_path / "locked.pdf"
+    c = canvas.Canvas(str(enc), pagesize=letter,
+                      encrypt=pdfencrypt.StandardEncryption("u", "o", canPrint=0))
+    c.setFont("Helvetica", 11)
+    c.drawString(72, 700, "secret")
+    c.showPage()
+    c.save()
+    good = tmp_path / "b.pdf"
+    _multi_font_pdf(good)
+    prof = ingest.pdf_font_profile([enc.read_bytes(), good.read_bytes()])
+    assert prof.sampled == 1 and prof.detected  # only the readable PDF counted; no crash

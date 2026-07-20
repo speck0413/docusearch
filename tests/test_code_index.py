@@ -158,6 +158,23 @@ def test_vba_class_module_members_are_methods() -> None:
     assert syms["Widget.Run"].kind == "method" and syms["Widget.Run"].parent == "Widget"
 
 
+def test_vba_unterminated_blocks_are_fast() -> None:
+    # red-team #H1: a file full of declarations missing their `End` used to be O(n^2) (a plain typo,
+    # 50k lines → 75s). The single-pass parser closes them at the next decl / EOF in linear time.
+    import time
+    src = "\n".join(f"Public Sub P{i}()" for i in range(20000))  # 20k Subs, zero End Sub
+    t0 = time.perf_counter()
+    syms = code_index.parse_symbols(src, "vba", path="m.bas")
+    assert time.perf_counter() - t0 < 1.0  # was tens of seconds
+    assert len(syms) == 20000  # every declaration still extracted
+
+
+def test_c_deep_declarator_still_resolves() -> None:
+    # red-team #L1: the declarator-descent bound must be well past any realistic nesting depth
+    src = "int " + "(" * 60 + "deep" + ")" * 60 + "(void) { return 0; }"
+    assert any(s.name == "deep" for s in code_index.parse_symbols(src, "c", path="x.c"))
+
+
 def test_unsupported_language_raises() -> None:
     import pytest
     with pytest.raises(ValueError, match="unsupported"):

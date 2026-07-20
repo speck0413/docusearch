@@ -485,13 +485,18 @@ def pdf_font_profile(datas: Sequence[bytes]) -> PdfFontProfile:
         except Exception:  # noqa: BLE001 - a bad PDF is skipped, the sample still profiles
             continue
         try:
-            sampled += 1
-            total_pages += doc_obj.page_count
-            for i in range(doc_obj.page_count):
+            pages = doc_obj.page_count
+            per_pdf: Counter[float] = Counter()
+            for i in range(pages):  # a page/get_text failure (encrypted, corrupt) skips this PDF
                 for size, _bold, text in _pdf_page_lines(doc_obj.load_page(i)):
-                    weight[size] += len(text)
+                    per_pdf[size] += len(text)
+        except Exception:  # noqa: BLE001 - one unreadable PDF must not poison the whole sample
+            continue
         finally:
             doc_obj.close()
+        sampled += 1  # only count a PDF we actually read
+        total_pages += pages
+        weight.update(per_pdf)
     body = max(weight.items(), key=lambda kv: kv[1])[0] if weight else 0.0
     return PdfFontProfile(sampled=sampled, pages=total_pages, body_size=body,
                           levels=_heading_levels_from_weight(weight), coverage=dict(weight))

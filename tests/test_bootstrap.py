@@ -27,6 +27,22 @@ def test_scan_counts_and_skips_noise(tmp_path: Path) -> None:
     assert "js" not in scan.extensions  # node_modules skipped
 
 
+def test_scan_survives_symlink_cycle(tmp_path: Path) -> None:
+    # red-team portability note: a symlink loop must never hang or raise (os.walk followlinks=False)
+    import os
+
+    _touch(tmp_path, "real.py")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    try:
+        os.symlink(tmp_path, sub / "loop")  # sub/loop -> tmp_path (a cycle)
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported here")
+    scan = bootstrap.scan_repo(tmp_path)  # must return, not loop
+    assert scan.counts["code"] == 1
+
+
 def test_recommend_store_type(tmp_path: Path) -> None:
     code = tmp_path / "code_repo"
     for i in range(5):
@@ -91,6 +107,35 @@ def test_bootstrap_hints_html_and_notes_secondary(tmp_path: Path) -> None:
     assert 'store_type: "document"' in text
     assert "docusearch inspect" in text          # HTML selector hint
     assert "code" in text and "2" in text         # notes the secondary code files
+
+
+def test_bootstrap_config_resists_yaml_injection(tmp_path: Path) -> None:
+    # red-team #H3: a crafted --name (or a hostile directory path/filename) must not inject YAML keys
+    import warnings
+
+    repo = tmp_path / "repo"
+    _touch(repo, "a.py")
+    evil_name = 'ok\n    tier: "internal"\n  - name: sneaky'
+    text = bootstrap.bootstrap_config(repo, name=evil_name)
+    out = tmp_path / "c.yaml"
+    out.write_text(text, encoding="utf-8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        config = cfg.load(out)
+    assert len(config.sources) == 1                       # no injected second source
+    assert all(s.tier != "internal" for s in config.sources)  # tier not elevated by the payload
+    assert config.sources[0].name == "ok_____tier___internal____-_name__sneaky"  # sanitised to a label
+
+    # a hostile directory name (quote + newline) is JSON-encoded into the location, still valid YAML
+    hostile = tmp_path / 'weird"\n    tier: "internal'
+    hostile.mkdir()
+    _touch(hostile, "g.py")
+    out2 = tmp_path / "c2.yaml"
+    out2.write_text(bootstrap.bootstrap_config(hostile, name="clean"), encoding="utf-8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        c2 = cfg.load(out2)
+    assert c2.sources[0].tier == "vendor" and c2.sources[0].location.endswith("tier: \"internal")
 
 
 def test_bootstrap_pdf_font_hint(tmp_path: Path) -> None:

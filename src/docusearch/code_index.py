@@ -155,7 +155,7 @@ def _name(node: Node) -> str | None:
         return field_node.text.decode("utf-8", "replace")
     # C/C++: no "name" field — descend the `declarator` chain to the identifier that names it.
     cur = node.child_by_field_name("declarator")
-    for _ in range(40):  # bounded: guards against a cyclic/pathological tree
+    for _ in range(512):  # bounded (guards a pathological tree) but well past any real nesting depth
         if cur is None:
             return None
         if cur.type in _C_NAME_NODES:
@@ -302,36 +302,48 @@ def _parse_vba(text: str, path: str) -> list[Symbol]:
     out: list[Symbol] = []
     if cls:
         out.append(Symbol("vba", "class", cls, cls, f"Class {cls}", "", 1, n or 1, "", path))
+
+    def _emit(start_i: int, base: str, name: str, signature: str, end_i: int) -> None:
+        kind = _VBA_KIND[base]
+        if cls and kind == "function":
+            kind = "method"
+        qual = f"{cls}.{name}" if cls else name
+        out.append(Symbol("vba", kind, name, qual, signature, _vba_leading_comment(lines, start_i),
+                          start_i + 1, end_i + 1, cls, path))
+
+    # Single pass (O(n)): at most one procedure/block is open at a time (VBA doesn't nest them). A
+    # missing `End` is closed at the next declaration or at EOF — never a per-declaration re-scan to
+    # the end of the file (red-team #H1: that was O(n²) on unterminated blocks).
+    pending: tuple[int, str, str, str] | None = None  # (start_i, base, name, signature)
     i = 0
     while i < n:
-        m = _VBA_DECL.match(lines[i])
+        line = lines[i]
+        if pending is not None:
+            end_m = _VBA_END.match(line)
+            if end_m and end_m.group("kw").lower() == pending[1]:
+                _emit(*pending, end_i=i)
+                pending = None
+                i += 1
+                continue
+            if _VBA_DECL.match(line):  # a new decl before the End: close the old one at the prior line
+                _emit(*pending, end_i=i - 1)
+                pending = None
+                continue  # re-read this line as the new declaration
+            i += 1
+            continue
+        m = _VBA_DECL.match(line)
         if not m:
             i += 1
             continue
         base = m.group("kw").split()[0].lower()  # sub | function | property | type | enum
-        name = m.group("name")
-        # signature: the declaration line, joining VBA's ` _` line continuations
-        sig_parts = [lines[i].strip()]
+        sig_parts = [line.strip()]  # signature: join VBA's ` _` line continuations
         j = i
         while sig_parts[-1].endswith("_") and j + 1 < n:
             sig_parts[-1] = sig_parts[-1][:-1].rstrip()
             j += 1
             sig_parts.append(lines[j].strip())
-        signature = " ".join(sig_parts).strip()
-        # scan to the matching End <keyword> (procedures don't nest, so the next one closes it)
-        end_line = j
-        k = j + 1
-        while k < n:
-            em = _VBA_END.match(lines[k])
-            if em and em.group("kw").lower() == base:
-                end_line = k
-                break
-            k += 1
-        kind = _VBA_KIND[base]
-        if cls and kind == "function":
-            kind = "method"
-        qual = f"{cls}.{name}" if cls else name
-        out.append(Symbol("vba", kind, name, qual, signature, _vba_leading_comment(lines, i),
-                          i + 1, end_line + 1, cls, path))
-        i = end_line + 1
+        pending = (i, base, m.group("name"), " ".join(sig_parts).strip())
+        i = j + 1
+    if pending is not None:  # unterminated block runs to the end of the file
+        _emit(*pending, end_i=n - 1)
     return out
