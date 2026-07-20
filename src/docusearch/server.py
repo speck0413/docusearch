@@ -15,6 +15,8 @@ Public surface:
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -973,6 +975,105 @@ def _hit_dict(hit: SearchHit, base_url: str) -> dict[str, Any]:
     }
 
 
+# The MCP tool-output ceiling. A flat list of self-describing hits costs ~0.65 KB each, so the
+# batched searching the skill asks for (8 queries x top_k=10) overran the client's cap, which then
+# spilled the result to a temp file and burned the agent's run parsing it. Hits are compacted below
+# and the payload is trimmed to fit this budget no matter the top_k or snippet length.
+_MCP_PAYLOAD_BUDGET = 24_000  # bytes of compact JSON
+# Batched searching is what overruns the cap, so a wide batch buys depth per query back down.
+_MCP_BATCH_QUERIES = 4  # above this many queries in one call…
+_MCP_BATCH_TOP_K = 5  # …top_k is clamped to this
+_MCP_SNIPPET_FLOOR = 600  # last-resort snippet clamp, only when trimming hits isn't enough
+
+
+def _compact_hit(hit: SearchHit, snippet_cap: int | None = None) -> dict[str, Any]:
+    """One hit minus everything hoisted to the response or the ``documents`` map. The snippet is
+    normally kept whole — it averages ~145 B and is the one field the model actually reads;
+    ``snippet_cap`` is a last resort for a runaway snippet that alone overruns the budget."""
+    snippet = hit.snippet
+    if snippet_cap is not None and len(snippet) > snippet_cap:
+        snippet = snippet[:snippet_cap] + " …"
+    out: dict[str, Any] = {
+        "doc_id": hit.doc_id,
+        "chunk_id": hit.chunk_id,
+        "citation": hit.citation,
+        "locator": hit.locator,
+        "kind": hit.kind,
+        "snippet": snippet,
+        "score": hit.score,
+    }
+    if hit.store:  # federation only — omitted rather than repeated as ""
+        out["store"] = hit.store
+    if hit.images:
+        out["images"] = hit.images
+    return out
+
+
+def _compact_search_payload(
+    results: Sequence[Sequence[SearchHit]], base_url: str, model_used: str, mode: str,
+) -> dict[str, Any]:
+    """The MCP ``search_docs`` response: per-document fields deduplicated into ``documents``,
+    per-response fields at the top level, and a hard ceiling of ``_MCP_PAYLOAD_BUDGET``
+    bytes. Over budget, every query keeps the same number of its best hits so no query
+    loses its slot, and ``truncated`` tells the agent to lower ``top_k`` (R-API-1)."""
+
+    def build(keep: int | None, snippet_cap: int | None = None) -> dict[str, Any]:
+        kept = [list(lst if keep is None else lst[:keep]) for lst in results]
+        documents: dict[str, Any] = {}
+        for lst in kept:
+            for hit in lst:
+                key = str(hit.doc_id)
+                if key not in documents:
+                    store_q = f"?store={hit.store}" if hit.store else ""
+                    documents[key] = {
+                        "title": hit.title,
+                        "path": hit.path,
+                        "fmt": hit.fmt,
+                        "url": f"{base_url}/v1/documents/{hit.doc_id}{store_q}",
+                    }
+        return {
+            "documents": documents,
+            "results": [[_compact_hit(h, snippet_cap) for h in lst] for lst in kept],
+            "embed_model_used": model_used,
+            "search_mode": mode,
+        }
+
+    def size(payload: dict[str, Any]) -> int:
+        return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+    payload = build(None)
+    if size(payload) <= _MCP_PAYLOAD_BUDGET:
+        return payload
+
+    total = sum(len(lst) for lst in results)
+    longest = max(len(lst) for lst in results)
+    low, high = 1, longest  # largest per-query keep that still fits
+    while low < high:
+        mid = (low + high + 1) // 2
+        if size(build(mid)) <= _MCP_PAYLOAD_BUDGET:
+            low = mid
+        else:
+            high = mid - 1
+    payload = build(low)
+    note: dict[str, Any] = {}
+    if size(payload) > _MCP_PAYLOAD_BUDGET:  # one hit per query, and the snippets alone overrun it
+        cap = _MCP_SNIPPET_FLOOR
+        while cap > 80 and size(build(low, cap)) > _MCP_PAYLOAD_BUDGET:
+            cap //= 2
+        payload = build(low, cap)
+        note["snippet_chars"] = cap
+    note.update(
+        kept_per_query=low,
+        dropped=total - sum(len(lst) for lst in payload["results"]),
+        hint=(
+            f"payload capped at {_MCP_PAYLOAD_BUDGET // 1000} KB; lower top_k or send fewer "
+            "queries per call to see more per query"
+        ),
+    )
+    payload["truncated"] = note
+    return payload
+
+
 class SearchRequest(BaseModel):
     query_texts: list[str] = []
     query_vectors: list[list[float]] | None = None
@@ -1157,9 +1258,13 @@ knowledge of the domain.
 - `list_stores()` -> the document stores you can search. In a FEDERATION (e.g. python / rust /
   internal) you may scope any search to a subset by name. Call this first if the user names a store.
 - `search_docs(queries, top_k=10, prefix=False, stores=None, bm25_only=False, roles=None)` ->
-  per-query hits {doc_id, chunk_id, citation, title, path, locator, kind, snippet, score}. ALWAYS
-  pass a LIST of query phrasings (batched). `stores=["internal"]` searches only those members; omit for
-  all. `prefix` = partial-term matching; `bm25_only` = skip vectors; `roles` = cooperative filter.
+  `{documents, results, embed_model_used, search_mode}`. ALWAYS pass a LIST of query phrasings
+  (batched). Each per-query hit is {doc_id, chunk_id, citation, locator, kind, snippet, score};
+  **title/path/fmt/url live once per document in `documents` — look them up by `doc_id`** (that
+  deduplication is what keeps a batched reply inside your tool-output cap). Batches over 4 queries
+  clamp top_k to 5; if `truncated` is present the reply hit its byte budget — narrow the batch.
+  `stores=["internal"]` searches only those members; omit for all. `prefix` = partial-term matching;
+  `bm25_only` = skip vectors; `roles` = cooperative filter.
 - `get_document(doc_id, chunk=None)` -> full chunk text — use it to fill a card with real code / a
   full procedure, not just a snippet.
 - `related_documents(doc_id, direction="both", depth=1)` -> cross-referenced docs (follow leads);
@@ -1231,8 +1336,12 @@ def build_mcp(service: Service, config: Config) -> Any:
         user: str | None = None,
         groups: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Search the catalog (batch: pass a LIST). `stores` scopes to federation members; `user`/
-        `groups` gate access to private stores (forward the authenticated user)."""
+        """Search the catalog (batch: pass a LIST). Hits carry `doc_id`/`chunk_id`/`citation`/
+        `locator`/`snippet`; title+path live once per doc in `documents`. `stores` scopes to
+        federation members; `user`/`groups` gate access to private stores (forward the
+        authenticated user)."""
+        if len(queries) > _MCP_BATCH_QUERIES:  # wide batch -> less depth, so the reply still fits
+            top_k = min(top_k, _MCP_BATCH_TOP_K)
         try:
             results, model_used, mode = service.search(
                 queries, top_k=top_k, prefix=prefix, bm25_only=bm25_only,
@@ -1241,11 +1350,7 @@ def build_mcp(service: Service, config: Config) -> Any:
             )
         except (ValueError, PermissionError) as err:
             return {"error": "ACCESS", "message": str(err), "results": []}
-        return {
-            "results": [[_hit_dict(h, base) for h in lst] for lst in results],
-            "embed_model_used": model_used,
-            "search_mode": mode,
-        }
+        return _compact_search_payload(results, base, model_used, mode)
 
     @mcp.tool()
     def get_document(

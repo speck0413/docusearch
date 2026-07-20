@@ -32,8 +32,10 @@ The user picks an effort level (default **medium**):
 
 ## Tools (docusearch MCP)
 
-- `search_docs(queries: list[str], top_k=10)` → per-query hits with `doc_id`, `chunk_id`,
-  `citation`, `title`, `locator`, `snippet`. **Always pass a list.**
+- `search_docs(queries: list[str], top_k=10)` → `{documents, results}`: per-query hits with
+  `doc_id`, `chunk_id`, `citation`, `locator`, `snippet`, plus a `documents` map holding each
+  document's `title`/`path`/`url` once — join on `doc_id`. **Always pass a list.** Over 4
+  queries per call, `top_k` clamps to 5; a `truncated` key means the reply hit its byte budget.
 - `get_document(doc_id, chunk=None)` → full text of a document or one chunk (use it to fill
   a card with real code / a full procedure, not just a snippet).
 - `related_documents(doc_id, direction="both")` → cross-referenced docs (follow leads).

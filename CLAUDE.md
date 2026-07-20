@@ -9,8 +9,11 @@ first. Claude Code reads the connection from `.mcp.json`; VS Code / Copilot from
 ## Tools (names are stable — depend on them)
 
 - `search_docs(queries: list[str], top_k=10)` — **always pass a list**; batch related
-  queries in one call instead of many round-trips. Returns ranked hits, each with a
-  `citation` (`D:<doc>#<chunk>`), a clickable `url`, a `snippet`, and a `locator`.
+  queries in one call instead of many round-trips. Returns `{documents, results}`: each
+  ranked hit carries a `citation` (`D:<doc>#<chunk>`), a `snippet`, and a `locator`, while
+  the title, path and clickable `url` live once per document under `documents[doc_id]` —
+  join the two on `doc_id`. Batches over 4 queries clamp `top_k` to 5, and a `truncated`
+  key means the reply hit its size budget: search again with fewer queries.
 - `get_document(doc_id, chunk=None)` — full metadata + chunks for one document.
 - `related_documents(doc_id, direction="both")` — linked / linking documents.
 - `catalog_stats()` — counts + which embedding model the index uses.
