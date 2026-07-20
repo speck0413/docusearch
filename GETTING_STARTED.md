@@ -33,6 +33,19 @@ docusearch turns a folder of documentation into a local, cited search service th
 
 ## 1.1 Install
 
+**Quickest — the wizard.** From the project folder, run:
+
+```bash
+./install.sh
+```
+
+It creates the `.venv`, installs docusearch, writes a starter `docusearch.yaml`, asks
+whether your MCP server is **local or remote**, writes the matching client configs
+(`.mcp.json`, `.vscode/mcp.json`), and prints how to connect each client. On Windows, use
+the manual steps below in PowerShell.
+
+**Manual.**
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate                 # Windows: .venv\Scripts\Activate.ps1
@@ -79,9 +92,19 @@ docusearch audit                            # counts + a loud list of anything s
 
 ## 1.3 Run the MCP + REST server
 
+The MCP server speaks **HTTP**, so it must be running **before** you open Claude Code /
+Claude Desktop / VS Code — a client connects to its URL, it does not launch it. Start it
+with the helper (starts in the background, offers to restart if already running):
+
+```bash
+./start-server.sh                           # binds 0.0.0.0:8321 by default; start/restart
+```
+
+Or run it in the foreground directly:
+
 ```bash
 docusearch serve                            # REST + MCP over HTTP on port 8321
-docusearch serve --port 9000                # override host/port
+docusearch serve --host 127.0.0.1 --port 9000   # override bind host/port
 ```
 
 - **REST** (OpenAPI docs at `http://localhost:8321/docs`): `POST /v1/search`,

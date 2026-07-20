@@ -88,8 +88,12 @@ incremental, so only changed files (by SHA-256) are re-processed.
 
 ## 4. Run `serve` as a managed service
 
-Foreground (to smoke-test): `docusearch serve --config /srv/docusearch/docusearch.yaml`.
-For production, keep it running under a supervisor so it restarts on crash/reboot.
+Quick launcher: **`./start-server.sh`** starts the server in the background (binding
+`0.0.0.0:8321` so non-local clients can connect) and, if one is already running, asks
+whether to restart it. Override with `DOCUSEARCH_CONFIG` / `DOCUSEARCH_HOST` /
+`DOCUSEARCH_PORT`. Foreground smoke-test: `docusearch serve --config /srv/docusearch/docusearch.yaml`.
+
+For an always-on production service that survives reboots, put it under a supervisor:
 
 **Linux — systemd** (`/etc/systemd/system/docusearch.service`):
 
