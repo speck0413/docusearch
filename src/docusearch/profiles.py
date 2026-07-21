@@ -26,8 +26,9 @@ from dataclasses import dataclass, field
 class DocFacts:
     """What a profile recognised. Empty fields mean "not stated", never "false"."""
 
-    instrument: str = ""      # comma-joined, normalised instrument names
-    applies_from: str = ""    # earliest release a page's rules apply to, e.g. "11.00.00"
+    instrument: str = ""  # comma-joined, normalised instrument names
+    applies_from: str = ""  # earliest release a page's rules apply to, e.g. "11.00.00"
+    excludes: str = ""  # instruments this page states do NOT support its subject
     restricts: list[int] = field(default_factory=list)  # indexes of chunks stating a limit
 
 
@@ -52,10 +53,49 @@ _RESTRICT_RE = re.compile(
 # word after Instrument:") is what keeps "Support" and "HPM" out — those came from headings
 # running into the label during an earlier scan of the real catalog.
 _IGXL_INSTRUMENTS = (
-    "HSD1000", "HSDM", "HSDP", "UltraPin800", "UltraPin1600", "UltraPin2200", "UltraPin4000",
-    "UltraVS256", "UltraSerial10G", "SB6G", "DC07", "VHFAC", "UltraFLEX", "UltraFLEXplus",
+    "HSD1000",
+    "HSDM",
+    "HSDP",
+    "UltraPin800",
+    "UltraPin1600",
+    "UltraPin2200",
+    "UltraPin4000",
+    "UltraVS256",
+    "UltraSerial10G",
+    "SB6G",
+    "DC07",
+    "VHFAC",
+    "UltraFLEX",
+    "UltraFLEXplus",
 )
 _INSTRUMENT_LINE_RE = re.compile(r"Instrument\s*:\s*([^\n]{0,160})", re.I)
+
+
+# A page's `Instrument:` header lists what it is ABOUT, which is not the same as what it
+# SUPPORTS: every SCAN page headers all four digital instruments while the body excludes
+# UltraPin2200. Reading only the header is how a rule gets applied to hardware that errors on
+# it. So negative scope is extracted too — but it is recorded, never used to drop a page: a
+# page saying "UltraPin2200 does not support X" is the most relevant page there is to a
+# UltraPin2200 question, and filtering it away would hide the very answer.
+#
+# The instrument must be the SUBJECT of the negation, or its object via on/for/with. Looser
+# matching is wrong in a way that is easy to miss: "UltraUSB does not support real time
+# compare like UltraPin2200" says UltraPin2200 DOES support it.
+def _exclusion_res(name: str) -> tuple[re.Pattern[str], ...]:
+    esc = re.escape(name)
+    return (
+        re.compile(
+            rf"\b{esc}\b\s+(?:digital instrument\s*\([^)]*\)\s*,?\s*)?"
+            r"(?:does not support|is not supported|does not allow|cannot support)",
+            re.I,
+        ),
+        re.compile(
+            r"(?:not supported|not available|not allowed|unsupported)\s+(?:on|for|with)\s+"
+            rf"(?:the\s+)?\b{esc}\b",
+            re.I,
+        ),
+    )
+
 
 # "V11.00.00 and later", "IG-XL 11.00 or later" -> the release a rule starts applying at.
 # Only forward-looking phrasings count: a bare version mention is a reference, not a bound.
@@ -87,10 +127,15 @@ class IgxlProfile(Profile):
         whole = " ".join(" ".join(str(t).split()) for t in chunk_texts)[:20000]
         versions = sorted({m.group(1) for m in _APPLIES_FROM_RE.finditer(whole)})
 
+        excluded = [
+            name for name in _IGXL_INSTRUMENTS if any(p.search(whole) for p in _exclusion_res(name))
+        ]
+
         restricts = [i for i, t in enumerate(chunk_texts) if _RESTRICT_RE.search(str(t))]
         return DocFacts(
             instrument=", ".join(found),
             applies_from=versions[0] if versions else "",
+            excludes=", ".join(excluded),
             restricts=restricts,
         )
 

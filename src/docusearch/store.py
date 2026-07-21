@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _MEMORY = ":memory:"
 
@@ -346,6 +346,14 @@ INSERT OR IGNORE INTO image_vision(sha256, vision_text, vision_model, origin, up
   FROM images WHERE vision_text IS NOT NULL AND vision_text != '';
 """
 
+# Migration 12 = negative scope. A page's `Instrument:` header says what it is ABOUT; the body
+# says what actually supports it, and on SCAN pages those disagree. `excludes` records the
+# instruments a page states do NOT support its subject. It is surfaced, never used to filter:
+# such a page is the most relevant one to a question about that instrument.
+_SCHEMA_V12 = """
+ALTER TABLE documents ADD COLUMN excludes TEXT;
+"""
+
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
@@ -358,6 +366,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (9, _SCHEMA_V9),
     (10, _SCHEMA_V10),
     (11, _SCHEMA_V11),
+    (12, _SCHEMA_V12),
 )
 
 
@@ -513,6 +522,7 @@ class Store:
         status: str = "active",
         instrument: str = "",
         applies_from: str = "",
+        excludes: str = "",
         profile: str = "",
     ) -> int:
         """Insert a document row; returns its new integer id. ``path`` must be unique.
@@ -522,8 +532,8 @@ class Store:
         cur = self._conn.execute(
             "INSERT INTO documents"
             "(path, source, source_version, title, doc_id, content_hash, content_type, fmt, "
-            " audience, mtime, ingested_at, status, instrument, applies_from, profile) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " audience, mtime, ingested_at, status, instrument, applies_from, excludes, profile) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 source,
@@ -539,6 +549,7 @@ class Store:
                 status,
                 instrument or None,
                 applies_from or None,
+                excludes or None,
                 profile or None,
             ),
         )
@@ -649,8 +660,7 @@ class Store:
         """``{chunk_id: document_id}`` for every chunk — used to tell same-doc near-duplicates
         (uninteresting) from cross-document conflict candidates in the discrepancy scan."""
         return {
-            int(r[0]): int(r[1])
-            for r in self._conn.execute("SELECT id, document_id FROM chunks")
+            int(r[0]): int(r[1]) for r in self._conn.execute("SELECT id, document_id FROM chunks")
         }
 
     def flagged_chunks(self, kind: str, limit: int = 0) -> list[sqlite3.Row]:
@@ -699,7 +709,8 @@ class Store:
         """The run's MIR header (lot, sublot, part type, job, insertion)."""
         self._conn.execute(
             "INSERT OR REPLACE INTO stdf_runs(doc_id, lot_id, sublot_id, part_typ, job_nam, "
-            "insertion) VALUES (?,?,?,?,?,?)", (doc_id, *row),
+            "insertion) VALUES (?,?,?,?,?,?)",
+            (doc_id, *row),
         )
         self._maybe_commit()
 
@@ -726,7 +737,8 @@ class Store:
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         return self._conn.execute(
             f"SELECT doc_id, ord, rec_type, fields FROM stdf_records {clause} "
-            "ORDER BY doc_id, ord LIMIT ?", (*args, limit),
+            "ORDER BY doc_id, ord LIMIT ?",
+            (*args, limit),
         ).fetchall()
 
     def stdf_record_types(self, doc_id: int | None = None) -> list[sqlite3.Row]:
@@ -735,7 +747,8 @@ class Store:
         args = (doc_id,) if doc_id is not None else ()
         return self._conn.execute(
             f"SELECT rec_type, COUNT(*) AS n FROM stdf_records {clause} "
-            "GROUP BY rec_type ORDER BY n DESC", args,
+            "GROUP BY rec_type ORDER BY n DESC",
+            args,
         ).fetchall()
 
     def stdf_run_header(self, doc_id: int) -> sqlite3.Row | None:
@@ -757,11 +770,13 @@ class Store:
             "SELECT test_num, test_txt, result, units, head, site, part_id, passed, lo, hi, "
             "rec_type, pin, conditions FROM stdf_results WHERE doc_id=? "
             + ("" if with_results else "GROUP BY test_txt ")
-            + "ORDER BY id", (doc_id,)
+            + "ORDER BY id",
+            (doc_id,),
         ).fetchall()
         parts = self._conn.execute(
             "SELECT part_id, insertion, lot, sublot, wafer, x, y, head, site, hard_bin, "
-            "soft_bin, passed, test_time_ms FROM stdf_parts WHERE doc_id=? ORDER BY id", (doc_id,)
+            "soft_bin, passed, test_time_ms FROM stdf_parts WHERE doc_id=? ORDER BY id",
+            (doc_id,),
         ).fetchall()
         return results, parts
 
@@ -773,12 +788,20 @@ class Store:
         ).fetchall()
 
     def stdf_results_query(
-        self, *, test_num: int | None = None, insertion: str | None = None,
-        doc_id: int | None = None, limit: int = 100000,
+        self,
+        *,
+        test_num: int | None = None,
+        insertion: str | None = None,
+        doc_id: int | None = None,
+        limit: int = 100000,
     ) -> list[sqlite3.Row]:
         """Numeric results with optional filters — the data behind a plot, queryable without AI."""
         clauses, params = [], []
-        for col, val in (("r.test_num", test_num), ("r.insertion", insertion), ("r.doc_id", doc_id)):
+        for col, val in (
+            ("r.test_num", test_num),
+            ("r.insertion", insertion),
+            ("r.doc_id", doc_id),
+        ):
             if val is not None:
                 clauses.append(f"{col}=?")
                 params.append(val)
@@ -858,7 +881,8 @@ class Store:
         """Raw values for ONE test — only the handful being plotted are ever pulled."""
         rows = self._conn.execute(
             "SELECT result FROM stdf_results WHERE doc_id=? AND test_txt=? AND result IS NOT NULL "
-            "LIMIT ?", (doc_id, test_txt, limit),
+            "LIMIT ?",
+            (doc_id, test_txt, limit),
         ).fetchall()
         return [float(r[0]) for r in rows]
 
@@ -868,7 +892,8 @@ class Store:
         """(value, site) for one test — for the per-site comparison plot."""
         rows = self._conn.execute(
             "SELECT result, site FROM stdf_results WHERE doc_id=? AND test_txt=? "
-            "AND result IS NOT NULL LIMIT ?", (doc_id, test_txt, limit),
+            "AND result IS NOT NULL LIMIT ?",
+            (doc_id, test_txt, limit),
         ).fetchall()
         return [(float(r[0]), int(r[1])) for r in rows]
 
@@ -881,7 +906,8 @@ class Store:
         out: dict[str, list[float]] = {}
         for name, value in self._conn.execute(
             "SELECT test_txt, result FROM stdf_results "
-            "WHERE doc_id=? AND result IS NOT NULL ORDER BY test_txt", (doc_id,)
+            "WHERE doc_id=? AND result IS NOT NULL ORDER BY test_txt",
+            (doc_id,),
         ):
             out.setdefault(str(name), []).append(float(value))
         return out
@@ -891,8 +917,8 @@ class Store:
         return {
             str(r[0]): str(r[1] or "PTR")
             for r in self._conn.execute(
-                "SELECT test_txt, MAX(rec_type) FROM stdf_results WHERE doc_id=? "
-                "GROUP BY test_txt", (doc_id,)
+                "SELECT test_txt, MAX(rec_type) FROM stdf_results WHERE doc_id=? GROUP BY test_txt",
+                (doc_id,),
             )
         }
 
@@ -901,7 +927,8 @@ class Store:
         out: dict[str, dict[int, list[float]]] = {}
         for name, site, value in self._conn.execute(
             "SELECT test_txt, site, result FROM stdf_results "
-            "WHERE doc_id=? AND result IS NOT NULL ORDER BY test_txt, site", (doc_id,)
+            "WHERE doc_id=? AND result IS NOT NULL ORDER BY test_txt, site",
+            (doc_id,),
         ):
             out.setdefault(str(name), {}).setdefault(int(site), []).append(float(value))
         return out
@@ -912,7 +939,8 @@ class Store:
             "SELECT COUNT(*) AS parts, SUM(CASE WHEN hard_bin=1 THEN 1 ELSE 0 END) AS bin1, "
             "AVG(CASE WHEN test_time_ms>0 THEN test_time_ms END) AS t_all, "
             "AVG(CASE WHEN hard_bin=1 AND test_time_ms>0 THEN test_time_ms END) AS t_bin1 "
-            "FROM stdf_parts WHERE doc_id=?", (doc_id,),
+            "FROM stdf_parts WHERE doc_id=?",
+            (doc_id,),
         ).fetchone()
         return row
 
@@ -939,8 +967,13 @@ class Store:
             self._maybe_commit()
 
     def code_symbols_query(
-        self, *, language: str | None = None, kind: str | None = None, name_like: str | None = None,
-        doc_id: int | None = None, limit: int = 100000,
+        self,
+        *,
+        language: str | None = None,
+        kind: str | None = None,
+        name_like: str | None = None,
+        doc_id: int | None = None,
+        limit: int = 100000,
     ) -> list[sqlite3.Row]:
         """Symbols with optional filters (language / kind / name glob / doc), in source order —
         the data behind ``code ls`` and the style-guide deriver, queryable without AI."""
@@ -956,7 +989,8 @@ class Store:
         params.append(limit)
         return self._conn.execute(
             "SELECT doc_id, chunk_id, language, kind, name, qualname, signature, docstring, "
-            "start_line, end_line, parent, path FROM code_symbols" + where
+            "start_line, end_line, parent, path FROM code_symbols"
+            + where
             + " ORDER BY doc_id, start_line LIMIT ?",
             params,
         ).fetchall()
@@ -967,8 +1001,17 @@ class Store:
     # ---- generic columnar data (Phase 10): any CSV/table, queryable + plottable by non-AI tools ---
 
     def add_data_column(
-        self, *, doc_id: int, dataset: str, name: str, kind: str, units: str,
-        lo: float | None, hi: float | None, values: Sequence[float], groups: Sequence[str] = (),
+        self,
+        *,
+        doc_id: int,
+        dataset: str,
+        name: str,
+        kind: str,
+        units: str,
+        lo: float | None,
+        hi: float | None,
+        values: Sequence[float],
+        groups: Sequence[str] = (),
     ) -> int:
         """Persist one column (metadata + its values) and return the new ``data_columns`` id.
         ``values``/``groups`` are stored row-per-value so plain SQL (or a thin web UI) can query them."""
@@ -994,7 +1037,9 @@ class Store:
         params = (doc_id,) if doc_id is not None else ()
         return self._conn.execute(
             "SELECT id, doc_id, dataset, name, kind, units, lo, hi, n FROM data_columns"
-            + where + " ORDER BY id", params,
+            + where
+            + " ORDER BY id",
+            params,
         ).fetchall()
 
     def data_values(self, *, column_id: int) -> list[sqlite3.Row]:
@@ -1010,8 +1055,14 @@ class Store:
     # ---- feedback (Phase 8): per-user + global, ranking-eligible -----------------------------
 
     def add_feedback(
-        self, *, author: str, scope: str, text: str, doc_id: int | None = None,
-        chunk_id: int | None = None, rating: int | None = None,
+        self,
+        *,
+        author: str,
+        scope: str,
+        text: str,
+        doc_id: int | None = None,
+        chunk_id: int | None = None,
+        rating: int | None = None,
     ) -> int:
         """Record one piece of feedback and return its id. ``scope`` is ``user`` (private to
         ``author``) or ``global`` (visible to everyone). ``rating`` is clamped to the documented
@@ -1081,7 +1132,8 @@ class Store:
         return {
             int(r["id"]): str(r["source"] or "")
             for r in self._conn.execute(
-                f"SELECT id, source FROM documents WHERE id IN ({placeholders})", ids  # noqa: S608
+                f"SELECT id, source FROM documents WHERE id IN ({placeholders})",
+                ids,  # noqa: S608
             )
         }
 
@@ -1176,7 +1228,9 @@ class Store:
             c.execute("DELETE FROM stdf_parts WHERE doc_id=?", (doc_id,))
             c.execute(
                 "DELETE FROM data_values WHERE col_id IN "
-                "(SELECT id FROM data_columns WHERE doc_id=?)", (doc_id,))
+                "(SELECT id FROM data_columns WHERE doc_id=?)",
+                (doc_id,),
+            )
             c.execute("DELETE FROM data_columns WHERE doc_id=?", (doc_id,))
             c.execute("DELETE FROM feedback WHERE doc_id=?", (doc_id,))
             c.execute("DELETE FROM documents WHERE id=?", (doc_id,))
@@ -1328,9 +1382,7 @@ class Store:
             return self._conn.execute(sql + " LIMIT ?", (limit,)).fetchall()
         return self._conn.execute(sql).fetchall()
 
-    def set_image_vision(
-        self, sha256: str, text: str, model: str, origin: str = "ingest"
-    ) -> None:
+    def set_image_vision(self, sha256: str, text: str, model: str, origin: str = "ingest") -> None:
         """Persist an image's description keyed by CONTENT sha, so a re-ingest cannot drop it.
 
         Also mirrored onto the current `images` row so existing readers/exports keep working;
@@ -1501,7 +1553,6 @@ class Store:
         ).fetchone()
         return row
 
-
     def relations_out(self, doc_id: int) -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT dst_doc, dst_raw, link_type FROM relations WHERE src_doc=? ORDER BY id",
@@ -1566,8 +1617,7 @@ class Store:
         meta = {
             int(m["id"]): m
             for m in self._conn.execute(
-                "SELECT id, path, title FROM documents WHERE id IN "
-                f"({','.join('?' * len(reach))})",
+                f"SELECT id, path, title FROM documents WHERE id IN ({','.join('?' * len(reach))})",
                 tuple(reach),
             ).fetchall()
         }

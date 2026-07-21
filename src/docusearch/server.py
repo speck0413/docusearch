@@ -26,7 +26,16 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import citations, embed, report, report_export, report_store, runlog, search
+from . import (
+    citations,
+    embed,
+    igxl_rules,
+    report,
+    report_export,
+    report_store,
+    runlog,
+    search,
+)
 from ._version import __version__
 from .catalog import Catalog, open_federation
 from .config import Config, SourceConfig, load
@@ -171,15 +180,14 @@ class Service:
         grp = groups or set()
         if cfg.federation:
             accessible = {
-                m.name for m in cfg.federation
+                m.name
+                for m in cfg.federation
                 if load(Path(m.config)).access.permits(user=user, groups=grp)
             }
             if stores:  # a forbidden store looks 'unknown' — never reveal a private store exists
                 unknown = [s for s in stores if s not in accessible]
                 if unknown:
-                    raise ValueError(
-                        f"unknown store(s) {unknown}; available: {sorted(accessible)}"
-                    )
+                    raise ValueError(f"unknown store(s) {unknown}; available: {sorted(accessible)}")
                 effective: list[str] = list(stores)
             else:
                 effective = sorted(accessible)
@@ -243,8 +251,7 @@ class Service:
         scope = {int(r[0]): str(r[1] or "") for r in rows}
         want = instrument.strip().lower()
         return [
-            h for h in hits
-            if not scope.get(h.doc_id) or want in scope.get(h.doc_id, "").lower()
+            h for h in hits if not scope.get(h.doc_id) or want in scope.get(h.doc_id, "").lower()
         ]
 
     def _rerank_federated(
@@ -286,9 +293,7 @@ class Service:
         tier_of = {s.name: s.tier for s in self.config.sources}
         boost = {"internal": rk.internal_boost, "vendor": rk.vendor_boost}
         fb = store.feedback_scores(author=user)
-        src = store.document_source_map(
-            [h.doc_id for lst in result_lists for h in lst]
-        )
+        src = store.document_source_map([h.doc_id for lst in result_lists for h in lst])
         out: list[list[SearchHit]] = []
         for lst in result_lists:
             scored = []
@@ -310,21 +315,31 @@ class Service:
         ):
             raise PermissionError("access denied: this store is private")
 
-    def list_stores(self, *, user: str | None = None, groups: set[str] | None = None) -> dict[str, Any]:
+    def list_stores(
+        self, *, user: str | None = None, groups: set[str] | None = None
+    ) -> dict[str, Any]:
         """The document stores a query can target. In a federation, lists only the member names the
         requester may access (a private member the caller isn't whitelisted for is omitted — its
         existence isn't leaked, red-team H2). Empty for a single store."""
         grp = groups or set()
         names = [
-            m.name for m in self.config.federation
+            m.name
+            for m in self.config.federation
             if load(Path(m.config)).access.permits(user=user, groups=grp)
         ]
         return {"federated": bool(self.config.federation), "stores": names}
 
     def submit_feedback(
-        self, *, user: str, text: str, doc_id: int | None = None,
-        chunk_id: int | None = None, rating: int | None = None, make_global: bool = False,
-        store: str | None = None, groups: set[str] | None = None,
+        self,
+        *,
+        user: str,
+        text: str,
+        doc_id: int | None = None,
+        chunk_id: int | None = None,
+        rating: int | None = None,
+        make_global: bool = False,
+        store: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Record a user's feedback in the store (Phase 8). It is **private to ``user``** by default;
         ``make_global`` promotes it to everyone. A ``rating`` (-1/0/+1) with a ``doc_id`` target makes
@@ -342,16 +357,27 @@ class Service:
         target = self._target_config(store)
         if not target.access.permits(user=user or None, groups=groups or set()):
             raise PermissionError(
-                f"access denied: cannot submit feedback to store {store or 'default'!r}")
+                f"access denied: cannot submit feedback to store {store or 'default'!r}"
+            )
         scope = "global" if make_global else "user"
         target_db = target.paths.db_path
         with Store.open(target_db) as db:
             fb_id = db.add_feedback(
-                author=user, scope=scope, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating,
+                author=user,
+                scope=scope,
+                text=text,
+                doc_id=doc_id,
+                chunk_id=chunk_id,
+                rating=rating,
             )
         entry = {
-            "id": fb_id, "user": user, "scope": scope, "text": text,
-            "doc_id": doc_id, "chunk_id": chunk_id, "rating": rating,
+            "id": fb_id,
+            "user": user,
+            "scope": scope,
+            "text": text,
+            "doc_id": doc_id,
+            "chunk_id": chunk_id,
+            "rating": rating,
         }
         fb_dir = Path(self.config.paths.tmp_dir) / "feedback"
         fb_dir.mkdir(parents=True, exist_ok=True)
@@ -361,8 +387,12 @@ class Service:
         return {"recorded": True, **entry}
 
     def discrepancies(
-        self, *, store: str | None = None, persist: bool = False,
-        user: str | None = None, groups: set[str] | None = None,
+        self,
+        *,
+        store: str | None = None,
+        persist: bool = False,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Discrepancy scan for one store (§17 Phase 5) — duplicate active docs + conflict
         candidates. Read-gated for a private store; ``persist`` records ``discrepancy`` flags."""
@@ -450,23 +480,42 @@ class Service:
         elif _is_archive(src_path):
             uploads = (Path(target.paths.staging_dir) / "uploads").resolve()
             location = uploads / label
-            if not location.resolve().is_relative_to(uploads):  # defence in depth beyond the check above
+            if not location.resolve().is_relative_to(
+                uploads
+            ):  # defence in depth beyond the check above
                 raise ValueError(f"invalid SKU/label {label!r}: escapes the store's uploads dir")
             location.mkdir(parents=True, exist_ok=True)
             _safe_extract(src_path, location)
         else:
             raise ValueError("provide a folder or a .zip / .tar.gz archive")
         source = SourceConfig(
-            type="fs", name=label, version=uploaded_by, location=str(location),
-            include=[], exclude=[], content_selector="", strip_selectors=[],
-            min_content_chars=min_content_chars, audience=[], insertion=insertion,
+            type="fs",
+            name=label,
+            version=uploaded_by,
+            location=str(location),
+            include=[],
+            exclude=[],
+            content_selector="",
+            strip_selectors=[],
+            min_content_chars=min_content_chars,
+            audience=[],
+            insertion=insertion,
         )
         result = Catalog(replace(target, sources=[source])).ingest()
-        runlog.log("api.ingest", store=store or "default", label=label, docs=result.documents,
-                   by=uploaded_by)
+        runlog.log(
+            "api.ingest",
+            store=store or "default",
+            label=label,
+            docs=result.documents,
+            by=uploaded_by,
+        )
         return {
-            "store": store or "default", "label": label, "uploaded_by": uploaded_by,
-            "documents": result.documents, "chunks": result.chunks, "images": result.images,
+            "store": store or "default",
+            "label": label,
+            "uploaded_by": uploaded_by,
+            "documents": result.documents,
+            "chunks": result.chunks,
+            "images": result.images,
         }
 
     def build_report_file(
@@ -523,8 +572,10 @@ class Service:
             # Resolve to files so a deck/document can SHOW the diagram, not just describe it.
             # Anything unresolvable is skipped, never an error.
             figure_map: dict[str, tuple[str, str]] = {}
-            order = report.number_figures(report._norm_sections(spec.get("sections"), ""),
-                                          [str(x) for x in spec.get("images", []) or []])
+            order = report.number_figures(
+                report._norm_sections(spec.get("sections"), ""),
+                [str(x) for x in spec.get("images", []) or []],
+            )
             fig_dir = report_store.reports_dir(cfg.paths.tmp_dir) / "figures"
             for sha in dict.fromkeys(shas):
                 if sha.startswith("data:"):
@@ -540,8 +591,10 @@ class Service:
                     row = _db.get_image(sha)
                 caption = str(row["caption"] or row["alt"] or "") if row is not None else ""
                 # one numbering for every format: the source's own "Figure 1" is stripped
-                figure_map[sha] = (str(found[0]),
-                                   report.figure_label(order.get(sha, len(figure_map) + 1), caption))
+                figure_map[sha] = (
+                    str(found[0]),
+                    report.figure_label(order.get(sha, len(figure_map) + 1), caption),
+                )
             # PDF is built from the MARKDOWN rendering — a document flow, not the web layout.
             # Its figures are written beside the report so the print step can load them.
             markdown = ""
@@ -561,7 +614,9 @@ class Service:
                 requested_by=str(spec.get("requested_by", "")),
                 model=str(spec.get("model", "")),
                 classification=str(spec.get("classification", "Confidential")),
-                ref_targets=report.reference_targets(cfg.paths.db_path, evidence, base_url=base_url),
+                ref_targets=report.reference_targets(
+                    cfg.paths.db_path, evidence, base_url=base_url
+                ),
                 markdown=markdown,
                 pptx_template=cfg.reports.pptx_template,
                 figure_map=figure_map,
@@ -579,7 +634,9 @@ class Service:
             embed_model=self.embed_info()["model"],
             sources=sources,
             images=list(spec.get("images", [])),
-            embedded_images=report.evidence_images(cfg.paths.db_path, cfg.paths.staging_dir, evidence),
+            embedded_images=report.evidence_images(
+                cfg.paths.db_path, cfg.paths.staging_dir, evidence
+            ),
             request=str(spec.get("request", "")),
             requested_by=str(spec.get("requested_by", "")),
             model=str(spec.get("model", "")),
@@ -650,9 +707,7 @@ class Service:
         vectors = provider.embed(texts)
         return {"model": provider.model_id, "dim": provider.dim, "vectors": vectors.tolist()}
 
-    def _db_for_read(
-        self, store: str | None, user: str | None, groups: set[str] | None
-    ) -> str:
+    def _db_for_read(self, store: str | None, user: str | None, groups: set[str] | None) -> str:
         """The db_path to read from, with an access gate: route to a named federation member (or
         this single store) and deny a private store the requester isn't whitelisted for. Raises
         ValueError (unknown store) / PermissionError (denied). Used by every by-id read so a
@@ -663,8 +718,13 @@ class Service:
         return cfg.paths.db_path
 
     def get_document(
-        self, doc_id: int, *, chunk: int | None = None, store: str | None = None,
-        user: str | None = None, groups: set[str] | None = None,
+        self,
+        doc_id: int,
+        *,
+        chunk: int | None = None,
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any] | None:
         if not _fits_i64(doc_id):  # absurd id -> 404, not a sqlite OverflowError (500)
             return None
@@ -695,7 +755,11 @@ class Service:
         }
 
     def document_path(
-        self, doc_id: int, *, store: str | None = None, user: str | None = None,
+        self,
+        doc_id: int,
+        *,
+        store: str | None = None,
+        user: str | None = None,
         groups: set[str] | None = None,
     ) -> Path | None:
         if not _fits_i64(doc_id):
@@ -708,7 +772,12 @@ class Service:
         return path if path.is_file() else None
 
     def _stdf_run(
-        self, doc_id: int, *, store: str | None, user: str | None, groups: set[str] | None,
+        self,
+        doc_id: int,
+        *,
+        store: str | None,
+        user: str | None,
+        groups: set[str] | None,
         values: bool = True,
     ) -> Any:
         """Resolve an STDF document id to its run (access-gated via document_path).
@@ -738,8 +807,13 @@ class Service:
         return backend or self.config.stdf.plot_backend
 
     def list_stdf_documents(
-        self, *, glob: str = "", sku: str = "", store: str | None = None,
-        user: str | None = None, groups: set[str] | None = None,
+        self,
+        *,
+        glob: str = "",
+        sku: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """The STDF file catalog for a store, optionally narrowed by ``sku`` (the part SKU/name the
         file was filed under — its ``source`` label) and/or a ``glob`` on the file path/name
@@ -756,17 +830,31 @@ class Service:
                 continue
             if glob and not _match_glob(path, glob):
                 continue
-            docs.append({
-                "doc_id": int(r["doc_id"]), "path": path, "title": str(r["title"] or ""),
-                "sku": doc_sku, "lot": str(r["lot"] or ""),
-                "insertions": str(r["insertions"] or ""), "status": str(r["status"] or ""),
-                "tests": int(r["n_results"]), "parts": int(r["n_parts"]),
-            })
+            docs.append(
+                {
+                    "doc_id": int(r["doc_id"]),
+                    "path": path,
+                    "title": str(r["title"] or ""),
+                    "sku": doc_sku,
+                    "lot": str(r["lot"] or ""),
+                    "insertions": str(r["insertions"] or ""),
+                    "status": str(r["status"] or ""),
+                    "tests": int(r["n_results"]),
+                    "parts": int(r["n_parts"]),
+                }
+            )
         return {"documents": docs, "skus": sorted(s for s in skus if s)}
 
     def upload_archive(
-        self, *, data: bytes, filename: str, sku: str, insertion: str = "",
-        store: str | None = None, user: str = "", groups: set[str] | None = None,
+        self,
+        *,
+        data: bytes,
+        filename: str,
+        sku: str,
+        insertion: str = "",
+        store: str | None = None,
+        user: str = "",
+        groups: set[str] | None = None,
         max_bytes: int = 512 * 1024 * 1024,
     ) -> dict[str, Any]:
         """Receive an uploaded ``.zip``/``.tar.gz`` bundle (bytes) and ingest it into ``store`` under
@@ -793,28 +881,53 @@ class Service:
         tmp.write_bytes(data)
         try:
             return self.ingest_from_path(
-                tmp, store=store, label=sku, uploaded_by=user, groups=groups, insertion=insertion,
+                tmp,
+                store=store,
+                label=sku,
+                uploaded_by=user,
+                groups=groups,
+                insertion=insertion,
             )
         finally:
             tmp.unlink(missing_ok=True)
 
     def stdf_plot(
-        self, doc_id: int, test_num: int, *, kind: str = "histogram", backend: str = "",
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        self,
+        doc_id: int,
+        test_num: int,
+        *,
+        kind: str = "histogram",
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Distribution plot + stats for one test in an STDF document (R-STDF-2)."""
         from . import stdf_analytics
 
         run = self._stdf_run(doc_id, store=store, user=user, groups=groups)
-        html = stdf_analytics.plot_test_html(run, test_num, kind=kind, backend=self._backend(backend))
+        html = stdf_analytics.plot_test_html(
+            run, test_num, kind=kind, backend=self._backend(backend)
+        )
         return {"html": html, "backend": self._backend(backend)}
 
     def stdf_audit_report(
-        self, doc_a: int, doc_b: int, *, fmt: str = "pptx", base_url: str = "",
-        label_a: str = "", label_b: str = "", max_tests: int = 8,
-        mode: str = "problems", plot_cap: int = 40, sort: str = "severity",
+        self,
+        doc_a: int,
+        doc_b: int,
+        *,
+        fmt: str = "pptx",
+        base_url: str = "",
+        label_a: str = "",
+        label_b: str = "",
+        max_tests: int = 8,
+        mode: str = "problems",
+        plot_cap: int = 40,
+        sort: str = "severity",
         plot_cache: dict[str, str] | None = None,
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """An STDF audit as a saved report file, built ENTIRELY IN CODE.
 
@@ -832,9 +945,15 @@ class Service:
         cfg = self._target_config(store)
         with Store.open(cfg.paths.db_path) as db:
             spec = stdf_analytics.audit_spec_from_store(
-                db, doc_a, doc_b,
-                label_a=label_a or f"document {doc_a}", label_b=label_b or f"document {doc_b}",
-                max_tests=max_tests, mode=mode, plot_cap=plot_cap, sort=sort,
+                db,
+                doc_a,
+                doc_b,
+                label_a=label_a or f"document {doc_a}",
+                label_b=label_b or f"document {doc_b}",
+                max_tests=max_tests,
+                mode=mode,
+                plot_cap=plot_cap,
+                sort=sort,
                 plot_cache=plot_cache,
             )
         spec["theme"] = self.config.reports.theme
@@ -843,8 +962,14 @@ class Service:
         return self.build_report_file(spec, base_url=base_url, fmt=fmt)
 
     def stdf_audit(
-        self, doc_a: int, doc_b: int, *, backend: str = "",
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        self,
+        doc_a: int,
+        doc_b: int,
+        *,
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Drill-down audit comparing two STDF documents (yield/alignment/condition-diff/per-test).
 
@@ -860,24 +985,45 @@ class Service:
             recs = {**db.stdf_rec_types(doc_a), **db.stdf_rec_types(doc_b)}
             sites = db.stdf_site_values_by_test(doc_b)
         html = stdf_analytics.audit_report_html(
-            ra, rb, backend=self._backend(backend), label_a=f"doc {doc_a}",
-            label_b=f"doc {doc_b}", values=maps, rec_types=recs, site_values=sites,
+            ra,
+            rb,
+            backend=self._backend(backend),
+            label_a=f"doc {doc_a}",
+            label_b=f"doc {doc_b}",
+            values=maps,
+            rec_types=recs,
+            site_values=sites,
         )
         return {"html": html}
 
     def stdf_site_compare(
-        self, doc_id: int, test_num: int, *, backend: str = "",
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        self,
+        doc_id: int,
+        test_num: int,
+        *,
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Site-to-site box comparison of one test in an STDF document."""
         from . import stdf_analytics
 
         run = self._stdf_run(doc_id, store=store, user=user, groups=groups)
-        return {"html": stdf_analytics.site_compare_html(run, test_num, backend=self._backend(backend))}
+        return {
+            "html": stdf_analytics.site_compare_html(run, test_num, backend=self._backend(backend))
+        }
 
     def stdf_trend(
-        self, doc_ids: list[int], test_num: int, *, stat: str = "mean", backend: str = "",
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        self,
+        doc_ids: list[int],
+        test_num: int,
+        *,
+        stat: str = "mean",
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Long-run trend of a test's ``stat`` across an ordered list of STDF documents."""
         from . import stdf_analytics
@@ -891,8 +1037,15 @@ class Service:
         return {"html": html}
 
     def wafer_map(
-        self, doc_id: int, *, wafer_id: str = "", color_by: str = "pass", test_num: int = 0,
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        self,
+        doc_id: int,
+        *,
+        wafer_id: str = "",
+        color_by: str = "pass",
+        test_num: int = 0,
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """A wafer map from an STDF document's parts: coloured by pass/fail or soft bin, or — when
         ``test_num`` is given — a **parametric** (WAT-style) map coloured by that test's value."""
@@ -906,8 +1059,13 @@ class Service:
         return _wafer_result(html)
 
     def mother_lot(
-        self, doc_id: int, *, backend: str = "", store: str | None = None,
-        user: str | None = None, groups: set[str] | None = None,
+        self,
+        doc_id: int,
+        *,
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Every wafer's yield across the lot in one STDF document (the mother-lot view)."""
         from . import wafer
@@ -916,8 +1074,13 @@ class Service:
         return _wafer_result(wafer.mother_lot_html(run.parts, backend=self._backend(backend)))
 
     def production_trend(
-        self, doc_ids: list[int], *, backend: str = "", store: str | None = None,
-        user: str | None = None, groups: set[str] | None = None,
+        self,
+        doc_ids: list[int],
+        *,
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Long-term yield trend across an ordered list of STDF documents (one point per lot/date)."""
         from . import wafer
@@ -931,15 +1094,29 @@ class Service:
         return _wafer_result(wafer.production_trend_html(lots, backend=self._backend(backend)))
 
     def plot_data(
-        self, *, kind: str, series: Any = None, x: Any = None, y: Any = None,
-        title: str = "", xlabel: str = "", ylabel: str = "", backend: str = "",
+        self,
+        *,
+        kind: str,
+        series: Any = None,
+        x: Any = None,
+        y: Any = None,
+        title: str = "",
+        xlabel: str = "",
+        ylabel: str = "",
+        backend: str = "",
     ) -> dict[str, Any]:
         """General plot of caller-supplied data (any engine): the agent charts a column from a text
         or Excel file for embedding in a report. Returns a self-contained HTML fragment."""
         from . import analytics
 
         html = analytics.render_plot(
-            kind, series=series, x=x, y=y, title=title, xlabel=xlabel, ylabel=ylabel,
+            kind,
+            series=series,
+            x=x,
+            y=y,
+            title=title,
+            xlabel=xlabel,
+            ylabel=ylabel,
             backend=self._backend(backend),
         )
         return {"html": html, "backend": self._backend(backend)}
@@ -958,8 +1135,13 @@ class Service:
         return {"tests": tests}
 
     def stdf_data_results(
-        self, *, test_num: int | None = None, insertion: str | None = None,
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        self,
+        *,
+        test_num: int | None = None,
+        insertion: str | None = None,
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Numeric results (optionally filtered) as plain JSON — the data behind a plot, queryable
         without AI so a thin web UI can chart it directly."""
@@ -968,17 +1150,27 @@ class Service:
         return {
             "results": [
                 {
-                    "test_num": r["test_num"], "test_txt": r["test_txt"], "result": r["result"],
-                    "units": r["units"], "head": r["head"], "site": r["site"],
-                    "part_id": r["part_id"], "insertion": r["insertion"], "passed": bool(r["passed"]),
+                    "test_num": r["test_num"],
+                    "test_txt": r["test_txt"],
+                    "result": r["result"],
+                    "units": r["units"],
+                    "head": r["head"],
+                    "site": r["site"],
+                    "part_id": r["part_id"],
+                    "insertion": r["insertion"],
+                    "passed": bool(r["passed"]),
                 }
                 for r in rows
             ]
         }
 
     def stdf_data_yield(
-        self, *, part_key: str = "", store: str | None = None,
-        user: str | None = None, groups: set[str] | None = None,
+        self,
+        *,
+        part_key: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """First-pass + final yield per insertion, computed from the structured parts table."""
         from . import stdf as stdf_mod
@@ -988,10 +1180,17 @@ class Service:
             rows = db.stdf_parts_all()
         parts = [
             stdf_mod.StdfPart(
-                lot_id=str(r["lot"] or ""), sublot_id=str(r["sublot"] or ""),
-                wafer_id=str(r["wafer"] or ""), x=r["x"], y=r["y"], part_id=str(r["part_id"] or ""),
-                head=int(r["head"] or 0), site=int(r["site"] or 0), hard_bin=int(r["hard_bin"] or 0),
-                soft_bin=int(r["soft_bin"] or 0), passed=bool(r["passed"]),
+                lot_id=str(r["lot"] or ""),
+                sublot_id=str(r["sublot"] or ""),
+                wafer_id=str(r["wafer"] or ""),
+                x=r["x"],
+                y=r["y"],
+                part_id=str(r["part_id"] or ""),
+                head=int(r["head"] or 0),
+                site=int(r["site"] or 0),
+                hard_bin=int(r["hard_bin"] or 0),
+                soft_bin=int(r["soft_bin"] or 0),
+                passed=bool(r["passed"]),
                 insertion=str(r["insertion"] or ""),
             )
             for r in rows
@@ -1008,28 +1207,49 @@ class Service:
         catalog a caller (agent, thin web UI, script) lists to pick something to query or plot."""
         with Store.open(self._db_for_read(store, user, groups)) as db:
             cols = [
-                {"id": int(r["id"]), "dataset": str(r["dataset"] or ""), "name": str(r["name"] or ""),
-                 "kind": str(r["kind"] or ""), "units": str(r["units"] or ""),
-                 "lo": r["lo"], "hi": r["hi"], "n": int(r["n"] or 0)}
+                {
+                    "id": int(r["id"]),
+                    "dataset": str(r["dataset"] or ""),
+                    "name": str(r["name"] or ""),
+                    "kind": str(r["kind"] or ""),
+                    "units": str(r["units"] or ""),
+                    "lo": r["lo"],
+                    "hi": r["hi"],
+                    "n": int(r["n"] or 0),
+                }
                 for r in db.data_columns()
             ]
         return {"columns": cols}
 
     def data_values(
-        self, column_id: int, *, store: str | None = None,
-        user: str | None = None, groups: set[str] | None = None,
+        self,
+        column_id: int,
+        *,
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """One column's values (+ group per row) as plain JSON — the data behind a plot/query, no AI."""
         if not _fits_i64(column_id):  # absurd id -> a clean ValueError (404 / DATA error), not an
             raise ValueError(f"no data column with id {column_id}")  # OverflowError (red-team #H2)
         with Store.open(self._db_for_read(store, user, groups)) as db:
             rows = db.data_values(column_id=column_id)
-        return {"values": [{"row": int(r["row_idx"]), "value": r["value"], "group": r["grp"]}
-                           for r in rows]}
+        return {
+            "values": [
+                {"row": int(r["row_idx"]), "value": r["value"], "group": r["grp"]} for r in rows
+            ]
+        }
 
     def data_plot(
-        self, column_id: int, *, kind: str = "histogram", backend: str = "", by_group: bool = False,
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        self,
+        column_id: int,
+        *,
+        kind: str = "histogram",
+        backend: str = "",
+        by_group: bool = False,
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Plot one stored data column with the general engine (histogram/whisker/quantile/…): red
         limit lines for lo/hi, capability stats, and — with ``by_group`` — one series per group
@@ -1054,45 +1274,77 @@ class Service:
             html = analytics.render_plot(
                 kind if kind != "histogram" else "whisker",
                 series=[(g, v) for g, v in sorted(grouped.items())],
-                title=f"{name} by group", ylabel=name, backend=be, vlines=vlines,
+                title=f"{name} by group",
+                ylabel=name,
+                backend=be,
+                vlines=vlines,
             )
         else:
             html = analytics.render_plot(
-                kind, y=vals, series=None, title=f"{name} distribution", xlabel=name,
-                ylabel="count", backend=be, vlines=vlines,
+                kind,
+                y=vals,
+                series=None,
+                title=f"{name} distribution",
+                xlabel=name,
+                ylabel="count",
+                backend=be,
+                vlines=vlines,
             )
         return {
-            "html": html, "column": name, "n": len(vals),
+            "html": html,
+            "column": name,
+            "n": len(vals),
             "stats": analytics.summary_stats(vals),
             "capability": analytics.capability(vals, lo, hi),
         }
 
     def list_code(
-        self, *, language: str | None = None, kind: str | None = None, name_like: str | None = None,
-        doc_id: int | None = None, limit: int = 100000,
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        self,
+        *,
+        language: str | None = None,
+        kind: str | None = None,
+        name_like: str | None = None,
+        doc_id: int | None = None,
+        limit: int = 100000,
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Symbols in a **code store** (functions/classes/methods/…), optionally filtered by language,
         kind, name glob (SQL LIKE, e.g. ``open%``), or document — the catalog the ``code`` CLI/MCP
         lists and an agent browses to find a snippet to code against. Gated for a private store."""
-        if doc_id is not None and not _fits_i64(doc_id):  # absurd id -> no symbols, not OverflowError
+        if doc_id is not None and not _fits_i64(
+            doc_id
+        ):  # absurd id -> no symbols, not OverflowError
             return {"symbols": [], "count": 0}
         with Store.open(self._db_for_read(store, user, groups)) as db:
-            rows = db.code_symbols_query(language=language, kind=kind, name_like=name_like,
-                                         doc_id=doc_id, limit=limit)
+            rows = db.code_symbols_query(
+                language=language, kind=kind, name_like=name_like, doc_id=doc_id, limit=limit
+            )
         symbols = [
-            {"qualname": str(r["qualname"]), "name": str(r["name"]), "kind": str(r["kind"]),
-             "language": str(r["language"]), "signature": str(r["signature"] or ""),
-             "docstring": str(r["docstring"] or ""), "parent": str(r["parent"] or ""),
-             "path": str(r["path"] or ""), "start_line": int(r["start_line"] or 0),
-             "end_line": int(r["end_line"] or 0)}
+            {
+                "qualname": str(r["qualname"]),
+                "name": str(r["name"]),
+                "kind": str(r["kind"]),
+                "language": str(r["language"]),
+                "signature": str(r["signature"] or ""),
+                "docstring": str(r["docstring"] or ""),
+                "parent": str(r["parent"] or ""),
+                "path": str(r["path"] or ""),
+                "start_line": int(r["start_line"] or 0),
+                "end_line": int(r["end_line"] or 0),
+            }
             for r in rows
         ]
         return {"symbols": symbols, "count": len(symbols)}
 
     def code_style_guide(
-        self, *, language: str | None = None, store: str | None = None,
-        user: str | None = None, groups: set[str] | None = None,
+        self,
+        *,
+        language: str | None = None,
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Derive the house **style guide** from a code store's symbols (naming conventions, docstring
         coverage, typing discipline, structure) and render a themed report. One language or all."""
@@ -1101,14 +1353,25 @@ class Service:
         with Store.open(self._db_for_read(store, user, groups)) as db:
             rows = db.code_symbols_query(language=language)
         symbols = [code_index.symbol_from_row(r) for r in rows]
-        guides = ([code_style.derive_style(symbols, language)] if language
-                  else code_style.derive_all(symbols))
-        return {"html": code_style.style_guide_html(guides),
-                "languages": [g.language for g in guides if g.counts]}
+        guides = (
+            [code_style.derive_style(symbols, language)]
+            if language
+            else code_style.derive_all(symbols)
+        )
+        return {
+            "html": code_style.style_guide_html(guides),
+            "languages": [g.language for g in guides if g.counts],
+        }
 
     def relations(
-        self, doc_id: int, direction: str = "both", *, depth: int = 1,
-        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+        self,
+        doc_id: int,
+        direction: str = "both",
+        *,
+        depth: int = 1,
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Cross-referenced documents over the relations graph (R-ING-5, N-hop §17). direction:
         out | in | both; ``depth`` walks N hops. Each row carries the neighbor's id, path, title,
@@ -1123,7 +1386,11 @@ class Service:
         return [{**r, "neighbor": r["doc_id"]} for r in rows]
 
     def image(
-        self, sha256: str, *, store: str | None = None, user: str | None = None,
+        self,
+        sha256: str,
+        *,
+        store: str | None = None,
+        user: str | None = None,
         groups: set[str] | None = None,
     ) -> tuple[Path, str] | None:
         cfg = self._target_config(store)
@@ -1153,8 +1420,14 @@ class Service:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                _json.dumps({"sha256": sha256, "vision_text": text, "vision_model": model,
-                             "origin": "agent"}),
+                _json.dumps(
+                    {
+                        "sha256": sha256,
+                        "vision_text": text,
+                        "vision_model": model,
+                        "origin": "agent",
+                    }
+                ),
                 encoding="utf-8",
             )
         except OSError as err:  # never fail the caller over a cache write
@@ -1171,7 +1444,11 @@ class Service:
         return str(data.get("vision_text") or ""), str(data.get("vision_model") or "")
 
     def image_meta(
-        self, sha256: str, *, store: str | None = None, user: str | None = None,
+        self,
+        sha256: str,
+        *,
+        store: str | None = None,
+        user: str | None = None,
         groups: set[str] | None = None,
     ) -> dict[str, Any] | None:
         """Caption/alt/locator plus any cached ``vision_text`` for a retained figure.
@@ -1204,8 +1481,14 @@ class Service:
         }
 
     def describe_image(
-        self, sha256: str, description: str, *, model: str = "", store: str | None = None,
-        user: str | None = None, groups: set[str] | None = None,
+        self,
+        sha256: str,
+        description: str,
+        *,
+        model: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """Cache a description an agent produced by actually looking at the figure.
 
@@ -1255,7 +1538,10 @@ def _doc_key(hit: SearchHit) -> str:
 
 
 def _search_payload(
-    results: Sequence[Sequence[SearchHit]], base_url: str, model_used: str, mode: str,
+    results: Sequence[Sequence[SearchHit]],
+    base_url: str,
+    model_used: str,
+    mode: str,
 ) -> dict[str, Any]:
     """The `search_docs` reply: ranked rows plus a document table to join them against.
 
@@ -1398,6 +1684,7 @@ def _annotate_conflict_tiers(
     are **cross-tier** (a disagreement between e.g. internal and vendor), the ``authoritative_doc``
     (the higher tier wins — feedback > internal > vendor). Returns (rows, cross_tier_count) — the
     "log which system says what" output for #63."""
+
     def tier(doc: int) -> str:
         return tier_of.get(meta.get(doc, ("", ""))[1], "vendor")
 
@@ -1413,13 +1700,21 @@ def _annotate_conflict_tiers(
         authoritative = None
         if is_cross and ra != rb:
             authoritative = p.doc_a if ra > rb else p.doc_b
-        rows.append({
-            "chunk_a": p.chunk_a, "chunk_b": p.chunk_b, "doc_a": p.doc_a, "doc_b": p.doc_b,
-            "doc_a_path": meta.get(p.doc_a, ("", ""))[0],
-            "doc_b_path": meta.get(p.doc_b, ("", ""))[0],
-            "doc_a_tier": ta, "doc_b_tier": tb, "cross_tier": is_cross,
-            "authoritative_doc": authoritative, "similarity": p.similarity,
-        })
+        rows.append(
+            {
+                "chunk_a": p.chunk_a,
+                "chunk_b": p.chunk_b,
+                "doc_a": p.doc_a,
+                "doc_b": p.doc_b,
+                "doc_a_path": meta.get(p.doc_a, ("", ""))[0],
+                "doc_b_path": meta.get(p.doc_b, ("", ""))[0],
+                "doc_a_tier": ta,
+                "doc_b_tier": tb,
+                "cross_tier": is_cross,
+                "authoritative_doc": authoritative,
+                "similarity": p.similarity,
+            }
+        )
     return rows, cross
 
 
@@ -1606,9 +1901,14 @@ def build_mcp(service: Service, config: Config) -> Any:
             top_k = min(top_k, _MCP_BATCH_TOP_K)
         try:
             results, model_used, mode = service.search(
-                queries, top_k=top_k, prefix=prefix, bm25_only=bm25_only,
-                roles=set(roles) if roles else None, stores=stores,
-                user=user, groups=set(groups) if groups else None,
+                queries,
+                top_k=top_k,
+                prefix=prefix,
+                bm25_only=bm25_only,
+                roles=set(roles) if roles else None,
+                stores=stores,
+                user=user,
+                groups=set(groups) if groups else None,
                 instrument=instrument,
             )
         except (ValueError, PermissionError) as err:
@@ -1617,14 +1917,20 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def get_document(
-        doc_id: int, chunk: int | None = None, store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        doc_id: int,
+        chunk: int | None = None,
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """Fetch a document's metadata + full chunk text by id (pass `store` for a federated
         citation). `user`/`groups` gate a private store."""
         try:
             return service.get_document(
-                doc_id, chunk=chunk, store=store, user=user,
+                doc_id,
+                chunk=chunk,
+                store=store,
+                user=user,
                 groups=set(groups) if groups else None,
             )
         except (PermissionError, ValueError) as err:
@@ -1632,15 +1938,23 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def related_documents(
-        doc_id: int, direction: str = "both", depth: int = 1, store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        doc_id: int,
+        direction: str = "both",
+        depth: int = 1,
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Documents cross-referenced from / to this one over the relations graph. direction:
         out (this doc links to) | in (links to this doc) | both; `depth` walks N hops (each row
         carries its shortest `hops`). Gated for a private store."""
         try:
             return service.relations(
-                doc_id, direction, depth=depth, store=store, user=user,
+                doc_id,
+                direction,
+                depth=depth,
+                store=store,
+                user=user,
                 groups=set(groups) if groups else None,
             )
         except (PermissionError, ValueError):
@@ -1648,15 +1962,19 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def check_discrepancies(
-        store: str | None = None, persist: bool = False,
-        user: str | None = None, groups: list[str] | None = None,
+        store: str | None = None,
+        persist: bool = False,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Scan a store for duplicate active documents + high-similarity conflict candidates
         (chunk pairs across docs that say near-identical things). `persist` records discrepancy
         flags. Gated for a private store."""
         try:
             return service.discrepancies(
-                store=store, persist=persist, user=user,
+                store=store,
+                persist=persist,
+                user=user,
                 groups=set(groups) if groups else None,
             )
         except (PermissionError, ValueError) as err:
@@ -1676,8 +1994,11 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def list_stdf(
-        glob: str = "", sku: str = "", store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        glob: str = "",
+        sku: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """List the STDF data files in a store, optionally narrowed by `sku` (the part SKU/name they
         were filed under) and/or a `glob` on the file name/path. Returns each file's doc_id, SKU, lot,
@@ -1691,8 +2012,13 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def upload_archive(
-        filename: str, data_b64: str, sku: str, insertion: str = "", store: str | None = None,
-        user: str = "", groups: list[str] | None = None,
+        filename: str,
+        data_b64: str,
+        sku: str,
+        insertion: str = "",
+        store: str | None = None,
+        user: str = "",
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Upload a base64 `.zip`/`.tar.gz` bundle (e.g. a set of STDF files) and ingest it into
         `store` under the part **`sku`** (required — the STDF equivalent of a document category; it
@@ -1709,15 +2035,22 @@ def build_mcp(service: Service, config: Config) -> Any:
             return {"error": "UPLOAD", "message": "data_b64 is not valid base64"}
         try:
             return service.upload_archive(
-                data=data, filename=filename, sku=sku, insertion=insertion, store=store,
-                user=user, groups=_grp(groups),
+                data=data,
+                filename=filename,
+                sku=sku,
+                insertion=insertion,
+                store=store,
+                user=user,
+                groups=_grp(groups),
             )
         except (ValueError, FileNotFoundError, PermissionError) as err:
             return {"error": "UPLOAD", "message": str(err)}
 
     @mcp.tool()
     def list_data(
-        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """List the numeric columns in a **data store** (any ingested CSV/table, not just STDF): each
         column's id, dataset, name, units, spec limits, and count. Pick a column id to query
@@ -1729,8 +2062,10 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def data_values(
-        column_id: int, store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        column_id: int,
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Pull one data column's values (+ per-row group) as plain JSON — the raw data behind a plot
         or your own analysis, from any ingested table."""
@@ -1741,100 +2076,156 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def data_plot(
-        column_id: int, kind: str = "histogram", backend: str = "", by_group: bool = False,
-        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+        column_id: int,
+        kind: str = "histogram",
+        backend: str = "",
+        by_group: bool = False,
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Plot one stored data column (any CSV/table) with the general engine. kind: histogram |
         whisker | quantile | qq | xy | linear. `by_group` draws one series per group (e.g. site).
         Red lines mark the column's lo/hi limits; returns a self-contained HTML fragment + stats."""
         try:
-            return service.data_plot(column_id, kind=kind, backend=backend, by_group=by_group,
-                                     store=store, user=user, groups=_grp(groups))
+            return service.data_plot(
+                column_id,
+                kind=kind,
+                backend=backend,
+                by_group=by_group,
+                store=store,
+                user=user,
+                groups=_grp(groups),
+            )
         except (PermissionError, ValueError) as err:
             return {"error": "DATA", "message": str(err)}
 
     @mcp.tool()
     def list_code(
-        language: str | None = None, kind: str | None = None, name_like: str | None = None,
-        doc_id: int | None = None, store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        language: str | None = None,
+        kind: str | None = None,
+        name_like: str | None = None,
+        doc_id: int | None = None,
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """List symbols in a **code store** (functions/classes/methods/…) with their qualified name,
         kind, language, signature, docstring, and line span. Filter by `language`, `kind`, a `name_like`
         glob (SQL LIKE, e.g. `open%`), or `doc_id`. The catalog to browse for a snippet to code
         against; pair with `search_docs` to find one by intent. Gated for a private store."""
         try:
-            return service.list_code(language=language, kind=kind, name_like=name_like,
-                                     doc_id=doc_id, store=store, user=user, groups=_grp(groups))
+            return service.list_code(
+                language=language,
+                kind=kind,
+                name_like=name_like,
+                doc_id=doc_id,
+                store=store,
+                user=user,
+                groups=_grp(groups),
+            )
         except (PermissionError, ValueError) as err:
             return {"error": "CODE", "message": str(err), "symbols": [], "count": 0}
 
     @mcp.tool()
     def code_styleguide(
-        language: str | None = None, store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        language: str | None = None,
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Derive the house **style guide** from a code store: dominant naming convention per symbol
         group, docstring coverage, typing discipline, and structure — the conventions to follow when
         writing new code that fits the repo. One `language` or all. Returns a self-contained HTML
         report + the languages covered."""
         try:
-            return service.code_style_guide(language=language, store=store, user=user,
-                                            groups=_grp(groups))
+            return service.code_style_guide(
+                language=language, store=store, user=user, groups=_grp(groups)
+            )
         except (PermissionError, ValueError) as err:
             return {"error": "CODE", "message": str(err)}
 
     @mcp.tool()
     def wafer_map(
-        doc_id: int, wafer_id: str = "", color_by: str = "pass", test_num: int = 0,
-        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+        doc_id: int,
+        wafer_id: str = "",
+        color_by: str = "pass",
+        test_num: int = 0,
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """A **wafer map** for an STDF document: a die grid at each part's (x,y), coloured by
         `pass` (default) or `softbin`. Pass `test_num` for a **parametric** (WAT-style) map coloured
         by that test's measured value. `wafer_id` picks the wafer (else the first). Returns HTML."""
         try:
-            return service.wafer_map(doc_id, wafer_id=wafer_id, color_by=color_by, test_num=test_num,
-                                     store=store, user=user, groups=_grp(groups))
+            return service.wafer_map(
+                doc_id,
+                wafer_id=wafer_id,
+                color_by=color_by,
+                test_num=test_num,
+                store=store,
+                user=user,
+                groups=_grp(groups),
+            )
         except (PermissionError, ValueError) as err:
             return {"error": "WAFER", "message": str(err)}
 
     @mcp.tool()
     def mother_lot(
-        doc_id: int, backend: str = "", store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        doc_id: int,
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """The **mother-lot** view for an STDF document: every wafer's yield across the lot + the
         pooled lot yield, flagging the lowest wafer. Returns an HTML report."""
         try:
-            return service.mother_lot(doc_id, backend=backend, store=store, user=user,
-                                      groups=_grp(groups))
+            return service.mother_lot(
+                doc_id, backend=backend, store=store, user=user, groups=_grp(groups)
+            )
         except (PermissionError, ValueError) as err:
             return {"error": "WAFER", "message": str(err)}
 
     @mcp.tool()
     def production_trend(
-        doc_ids: list[int], backend: str = "", store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        doc_ids: list[int],
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Long-term **production yield trend** across an ordered list of STDF documents (one point
         per lot/date) — drift detection over time. Returns an HTML report."""
         try:
-            return service.production_trend(doc_ids, backend=backend, store=store, user=user,
-                                            groups=_grp(groups))
+            return service.production_trend(
+                doc_ids, backend=backend, store=store, user=user, groups=_grp(groups)
+            )
         except (PermissionError, ValueError) as err:
             return {"error": "WAFER", "message": str(err)}
 
     @mcp.tool()
     def stdf_plot(
-        doc_id: int, test_num: int, kind: str = "histogram", backend: str = "",
-        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+        doc_id: int,
+        test_num: int,
+        kind: str = "histogram",
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Plot one test's distribution from an STDF data document. kind: histogram | whisker |
         quantile | qq | xy | linear. backend: matplotlib (PNG) | plotly (interactive); default from
         config. Returns a self-contained HTML fragment + stats — embed it in a report."""
         try:
             return service.stdf_plot(
-                doc_id, test_num, kind=kind, backend=backend, store=store, user=user,
+                doc_id,
+                test_num,
+                kind=kind,
+                backend=backend,
+                store=store,
+                user=user,
                 groups=_grp(groups),
             )
         except (PermissionError, ValueError) as err:
@@ -1842,10 +2233,18 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def stdf_audit_report(
-        doc_a: int, doc_b: int, fmt: str = "pptx", label_a: str = "", label_b: str = "",
-        max_tests: int = 8, mode: str = "problems", plot_cap: int = 40,
-        sort: str = "severity", store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        doc_a: int,
+        doc_b: int,
+        fmt: str = "pptx",
+        label_a: str = "",
+        label_b: str = "",
+        max_tests: int = 8,
+        mode: str = "problems",
+        plot_cap: int = 40,
+        sort: str = "severity",
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Compare two STDF documents and SAVE an audit report. Written entirely by code, so it
         is reproducible: hand the user the returned `url`.
@@ -1858,9 +2257,19 @@ def build_mcp(service: Service, config: Config) -> Any:
         the log runs them). fmt: pptx | docx | html | html-slide | pdf | md | xlsx."""
         try:
             return service.stdf_audit_report(
-                doc_a, doc_b, fmt=fmt, base_url=base, label_a=label_a, label_b=label_b,
-                max_tests=max_tests, mode=mode, plot_cap=plot_cap, sort=sort,
-                store=store, user=user, groups=_grp(groups),
+                doc_a,
+                doc_b,
+                fmt=fmt,
+                base_url=base,
+                label_a=label_a,
+                label_b=label_b,
+                max_tests=max_tests,
+                mode=mode,
+                plot_cap=plot_cap,
+                sort=sort,
+                store=store,
+                user=user,
+                groups=_grp(groups),
             )
         except (PermissionError, ValueError) as err:
             return {"error": "STDF", "message": str(err)}
@@ -1869,8 +2278,12 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def stdf_audit(
-        doc_a: int, doc_b: int, backend: str = "", store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        doc_a: int,
+        doc_b: int,
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Compare two STDF data documents: yield delta, test alignment, condition diff, and a
         collapsible per-test Q-Q drill-down. Returns a navigable HTML report to dig through."""
@@ -1883,8 +2296,12 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def stdf_site_compare(
-        doc_id: int, test_num: int, backend: str = "", store: str | None = None,
-        user: str | None = None, groups: list[str] | None = None,
+        doc_id: int,
+        test_num: int,
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Site-to-site distribution comparison of one test in an STDF document."""
         try:
@@ -1896,14 +2313,24 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def stdf_trend(
-        doc_ids: list[int], test_num: int, stat: str = "mean", backend: str = "",
-        store: str | None = None, user: str | None = None, groups: list[str] | None = None,
+        doc_ids: list[int],
+        test_num: int,
+        stat: str = "mean",
+        backend: str = "",
+        store: str | None = None,
+        user: str | None = None,
+        groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Trend a test's stat (mean/median/std/min/max) across an ordered list of STDF documents —
         long-run drift detection across loop runs."""
         try:
             return service.stdf_trend(
-                doc_ids, test_num, stat=stat, backend=backend, store=store, user=user,
+                doc_ids,
+                test_num,
+                stat=stat,
+                backend=backend,
+                store=store,
+                user=user,
                 groups=_grp(groups),
             )
         except (PermissionError, ValueError) as err:
@@ -1911,8 +2338,14 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def plot_data(
-        kind: str, series: list | None = None, x: list | None = None, y: list | None = None,  # type: ignore[type-arg]
-        title: str = "", xlabel: str = "", ylabel: str = "", backend: str = "",
+        kind: str,
+        series: list[Any] | None = None,
+        x: list[Any] | None = None,
+        y: list[Any] | None = None,
+        title: str = "",
+        xlabel: str = "",
+        ylabel: str = "",
+        backend: str = "",
     ) -> dict[str, Any]:
         """General-purpose plot of data YOU supply (any engine): chart a column pulled from a text
         or Excel document for embedding in a report. kind: histogram | whisker | quantile | qq | xy
@@ -1920,22 +2353,34 @@ def build_mcp(service: Service, config: Config) -> Any:
         try:
             tuples = [(str(s[0]), list(s[1])) for s in series] if series else None
             return service.plot_data(
-                kind=kind, series=tuples, x=x, y=y, title=title, xlabel=xlabel,
-                ylabel=ylabel, backend=backend,
+                kind=kind,
+                series=tuples,
+                x=x,
+                y=y,
+                title=title,
+                xlabel=xlabel,
+                ylabel=ylabel,
+                backend=backend,
             )
         except (ValueError, TypeError, IndexError) as err:
             return {"error": "PLOT", "message": str(err)}
 
     @mcp.tool()
     def ingest_docs(
-        path: str, user: str, store: str | None = None, label: str = "upload",
+        path: str,
+        user: str,
+        store: str | None = None,
+        label: str = "upload",
         groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Ingest a server-side folder or .zip/.tar.gz into `store`, labelled + attributed to `user`.
         Writing a private store requires `user`/`groups` be whitelisted for it."""
         try:
             return service.ingest_from_path(
-                path, store=store, label=label, uploaded_by=user,
+                path,
+                store=store,
+                label=label,
+                uploaded_by=user,
                 groups=set(groups) if groups else None,
             )
         except (ValueError, FileNotFoundError, PermissionError) as err:
@@ -1943,8 +2388,13 @@ def build_mcp(service: Service, config: Config) -> Any:
 
     @mcp.tool()
     def submit_feedback(
-        text: str, user: str, doc_id: int | None = None, chunk_id: int | None = None,
-        rating: int | None = None, make_global: bool = False, store: str | None = None,
+        text: str,
+        user: str,
+        doc_id: int | None = None,
+        chunk_id: int | None = None,
+        rating: int | None = None,
+        make_global: bool = False,
+        store: str | None = None,
         groups: list[str] | None = None,
     ) -> dict[str, Any]:
         """Record a user's feedback (attributed to `user`). Private to that user by default; set
@@ -1953,8 +2403,14 @@ def build_mcp(service: Service, config: Config) -> Any:
         Gated on the target store's access policy — you can only give feedback where you may search."""
         try:
             return service.submit_feedback(
-                user=user, text=text, doc_id=doc_id, chunk_id=chunk_id, rating=rating,
-                make_global=make_global, store=store, groups=_grp(groups),
+                user=user,
+                text=text,
+                doc_id=doc_id,
+                chunk_id=chunk_id,
+                rating=rating,
+                make_global=make_global,
+                store=store,
+                groups=_grp(groups),
             )
         except (ValueError, PermissionError) as err:
             return {"error": "FEEDBACK", "message": str(err)}
@@ -1996,6 +2452,48 @@ def build_mcp(service: Service, config: Config) -> Any:
             return {"error": "DESCRIBE", "message": str(err)}
 
     @mcp.tool()
+    def check_channel_map(spec: dict[str, Any]) -> dict[str, Any]:
+        """Check a proposed IG-XL channel map against the documented rules BEFORE you report it.
+
+        A citation is verified; a channel map you invent is not — so a map that breaks every
+        documented rule will otherwise render happily. Call this on any map, pin map or scan
+        configuration you propose, fix what it returns, and call it again until it is clean.
+
+        `spec` keys (all optional — a rule whose inputs are absent simply does not run):
+          instrument      "UltraPin1600" | "UltraPin2200" | "HexVS" | "UltraVS256" |
+                          "UltraVS64" | "UltraVI80"   ("UltraVS" alone is ambiguous)
+          scan_type       "X2"|"X4"|"X8"|"Extended"|"X3"|"X6"|"X12"|"X24"
+          scan            {"site0": {"scan_in": [ch...], "scan_out": [ch...]}, ...}
+          pa_ports        [{"name": "spi", "channels": [ch...], "site": "site0"}]
+          rows            [{"pin": "...", "channel_type": "...", "cells": ["16.ch0", ...]}]
+          groups, pin_types, fpga_load, timing_mode, site_copy, expected_sites
+
+        Returns findings with a severity each: `violation` (illegal per an explicit documented
+        rule), `warning` (derived or a documented "should"), `advisory` (an instrument caveat,
+        a doc conflict, or an exemption that was applied). Every finding names the rule and its
+        source document, so you can cite WHY a map is wrong."""
+        try:
+            findings = igxl_rules.validate(igxl_rules.channel_map_from_spec(spec))
+        except (TypeError, ValueError, KeyError) as err:
+            return {"error": "SPEC", "message": str(err)}
+        out = [
+            {
+                "rule": f.rule,
+                "severity": f.severity.value,
+                "detail": f.detail,
+                "source": f"{f.source} ({f.doc_title})" if f.doc_title else f.source,
+            }
+            for f in findings
+        ]
+        violations = [f for f in out if f["severity"] == "violation"]
+        return {
+            "ok": not violations,
+            "violations": len(violations),
+            "findings": out,
+            "checked": len(igxl_rules.RULES),
+        }
+
+    @mcp.tool()
     def report_format(fmt: str = "") -> dict[str, Any]:
         """Call BEFORE writing a report: how to author content for the target format. A deck
         needs short bullets, a spreadsheet needs one fact per row, a document takes prose — the
@@ -2011,12 +2509,19 @@ def build_mcp(service: Service, config: Config) -> Any:
         )
         themes = {"available": sorted(report.THEMES), "configured": config.reports.theme}
         if fmt:
-            return {"fmt": fmt, "guidance": report_export.guidance(fmt),
-                    "configured_default": config.reports.default_format,
-                    "themes": themes, "precedence": note}
-        return {"formats": report_export.FORMAT_GUIDANCE,
+            return {
+                "fmt": fmt,
+                "guidance": report_export.guidance(fmt),
                 "configured_default": config.reports.default_format,
-                "themes": themes, "precedence": note}
+                "themes": themes,
+                "precedence": note,
+            }
+        return {
+            "formats": report_export.FORMAT_GUIDANCE,
+            "configured_default": config.reports.default_format,
+            "themes": themes,
+            "precedence": note,
+        }
 
     @mcp.tool()
     def build_report(spec: dict[str, Any], fmt: str = "md") -> dict[str, Any]:
@@ -2130,7 +2635,10 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/v1/documents/{doc_id}")
     def get_document(
-        doc_id: int, request: Request, chunk: int | None = None, download: int = 0,
+        doc_id: int,
+        request: Request,
+        chunk: int | None = None,
+        download: int = 0,
         store: str | None = None,
     ) -> Any:
         # A federated citation carries ?store=<member>; the method routes there and gates access.
@@ -2166,7 +2674,10 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/v1/relations/{doc_id}")
     def relations(
-        doc_id: int, request: Request, direction: str = "both", depth: int = 1,
+        doc_id: int,
+        request: Request,
+        direction: str = "both",
+        depth: int = 1,
         store: str | None = None,
     ) -> list[dict[str, Any]]:
         user, groups = _read_identity(request)
@@ -2189,7 +2700,9 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/v1/data/stdf/results")
     def data_results(
-        request: Request, test_num: int | None = None, insertion: str | None = None,
+        request: Request,
+        test_num: int | None = None,
+        insertion: str | None = None,
         store: str | None = None,
     ) -> dict[str, Any]:
         user, groups = _read_identity(request)
@@ -2201,7 +2714,9 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(status_code=403, detail=str(err)) from err
 
     @app.get("/v1/data/stdf/yield")
-    def data_yield(request: Request, part_key: str = "", store: str | None = None) -> dict[str, Any]:
+    def data_yield(
+        request: Request, part_key: str = "", store: str | None = None
+    ) -> dict[str, Any]:
         user, groups = _read_identity(request)
         try:
             return service.stdf_data_yield(part_key=part_key, store=store, user=user, groups=groups)
@@ -2231,13 +2746,24 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/v1/data/columns/{column_id}/plot")
     def data_column_plot(
-        column_id: int, request: Request, kind: str = "histogram", backend: str = "",
-        by_group: bool = False, store: str | None = None,
+        column_id: int,
+        request: Request,
+        kind: str = "histogram",
+        backend: str = "",
+        by_group: bool = False,
+        store: str | None = None,
     ) -> dict[str, Any]:
         user, groups = _read_identity(request)
         try:
-            return service.data_plot(column_id, kind=kind, backend=backend, by_group=by_group,
-                                     store=store, user=user, groups=groups)
+            return service.data_plot(
+                column_id,
+                kind=kind,
+                backend=backend,
+                by_group=by_group,
+                store=store,
+                user=user,
+                groups=groups,
+            )
         except PermissionError as err:
             raise HTTPException(status_code=403, detail=str(err)) from err
         except ValueError as err:
@@ -2251,8 +2777,12 @@ def create_app(config: Config) -> FastAPI:
             series = req.get("series")
             tuples = [(str(s[0]), list(s[1])) for s in series] if series else None
             return service.plot_data(
-                kind=str(req.get("kind", "histogram")), series=tuples, x=req.get("x"),
-                y=req.get("y"), title=str(req.get("title", "")), backend=str(req.get("backend", "")),
+                kind=str(req.get("kind", "histogram")),
+                series=tuples,
+                x=req.get("x"),
+                y=req.get("y"),
+                title=str(req.get("title", "")),
+                backend=str(req.get("backend", "")),
             )
         except (ValueError, TypeError, IndexError, KeyError) as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
@@ -2263,9 +2793,7 @@ def create_app(config: Config) -> FastAPI:
     ) -> dict[str, Any]:
         user, groups = _read_identity(request)
         try:
-            return service.discrepancies(
-                store=store, persist=persist, user=user, groups=groups
-            )
+            return service.discrepancies(store=store, persist=persist, user=user, groups=groups)
         except PermissionError as err:
             raise HTTPException(status_code=403, detail=str(err)) from err
         except ValueError as err:
@@ -2307,14 +2835,17 @@ def create_app(config: Config) -> FastAPI:
         path = report_store.resolve(config.paths.tmp_dir, name)
         if path is None:
             raise HTTPException(status_code=404, detail="report not found (it may have aged out)")
-        return FileResponse(path, media_type=_REPORT_MEDIA.get(path.suffix.lower(),
-                                                               "application/octet-stream"))
+        return FileResponse(
+            path, media_type=_REPORT_MEDIA.get(path.suffix.lower(), "application/octet-stream")
+        )
 
     def _require_user(request: Request) -> str:
         # A write always records who did it — the username must be supplied (R write-auth).
         user, _ = _request_identity(request)
         if not user:
-            raise HTTPException(status_code=401, detail="X-Docusearch-User header required to ingest")
+            raise HTTPException(
+                status_code=401, detail="X-Docusearch-User header required to ingest"
+            )
         return user
 
     @app.post("/v1/feedback")
@@ -2324,8 +2855,14 @@ def create_app(config: Config) -> FastAPI:
         _, req_groups = _request_identity(request)
         try:
             return service.submit_feedback(
-                user=user, text=req.text, doc_id=req.doc_id, chunk_id=req.chunk_id,
-                rating=req.rating, make_global=req.make_global, store=req.store, groups=req_groups,
+                user=user,
+                text=req.text,
+                doc_id=req.doc_id,
+                chunk_id=req.chunk_id,
+                rating=req.rating,
+                make_global=req.make_global,
+                store=req.store,
+                groups=req_groups,
             )
         except PermissionError as err:
             raise HTTPException(status_code=403, detail=str(err)) from err
@@ -2338,10 +2875,16 @@ def create_app(config: Config) -> FastAPI:
         into a store, labelled + attributed. Writing a private store requires being whitelisted."""
         user, groups = _request_identity(request)
         if not user:
-            raise HTTPException(status_code=401, detail="X-Docusearch-User header required to ingest")
+            raise HTTPException(
+                status_code=401, detail="X-Docusearch-User header required to ingest"
+            )
         try:
             return service.ingest_from_path(
-                req.path, store=req.store, label=req.label, uploaded_by=user, groups=groups,
+                req.path,
+                store=req.store,
+                label=req.label,
+                uploaded_by=user,
+                groups=groups,
                 min_content_chars=req.min_content_chars,
             )
         except PermissionError as err:
@@ -2359,7 +2902,9 @@ def create_app(config: Config) -> FastAPI:
         """Upload a .zip/.tar.gz (multipart), uncompress it server-side, and ingest it labelled."""
         user, groups = _request_identity(request)
         if not user:
-            raise HTTPException(status_code=401, detail="X-Docusearch-User header required to ingest")
+            raise HTTPException(
+                status_code=401, detail="X-Docusearch-User header required to ingest"
+            )
         import tempfile
 
         suffix = _archive_suffix(file.filename or "upload.zip")  # keep .tar.gz whole (M3)

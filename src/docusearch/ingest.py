@@ -33,6 +33,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any, cast
 
 from selectolax.parser import HTMLParser, Node
 
@@ -499,8 +500,13 @@ def pdf_font_profile(datas: Sequence[bytes]) -> PdfFontProfile:
         total_pages += pages
         weight.update(per_pdf)
     body = max(weight.items(), key=lambda kv: kv[1])[0] if weight else 0.0
-    return PdfFontProfile(sampled=sampled, pages=total_pages, body_size=body,
-                          levels=_heading_levels_from_weight(weight), coverage=dict(weight))
+    return PdfFontProfile(
+        sampled=sampled,
+        pages=total_pages,
+        body_size=body,
+        levels=_heading_levels_from_weight(weight),
+        coverage=dict(weight),
+    )
 
 
 def extract_pdf(data: bytes) -> ExtractedDoc:
@@ -542,8 +548,14 @@ def extract_pdf(data: bytes) -> ExtractedDoc:
                 blob = extracted.get("image")
                 if blob:
                     images.append(
-                        ImageRef(src=f"pdf:xref{xref}", alt="", caption="", heading_path=locator,
-                                 data=bytes(blob), ext=str(extracted.get("ext") or "png"))
+                        ImageRef(
+                            src=f"pdf:xref{xref}",
+                            alt="",
+                            caption="",
+                            heading_path=locator,
+                            data=bytes(blob),
+                            ext=str(extracted.get("ext") or "png"),
+                        )
                     )
 
         level_of = _pdf_heading_levels(pages)
@@ -622,7 +634,9 @@ def _linearize_docx_table(table: object, links: list[LinkRef]) -> str:
     return "\n".join(rows)
 
 
-def _docx_para_images(para: object, heading_path: str, doc_obj: object, images: list[ImageRef]) -> None:
+def _docx_para_images(
+    para: object, heading_path: str, doc_obj: object, images: list[ImageRef]
+) -> None:
     """Retain inline images embedded in a paragraph's drawings (R-ING-6): pull each image part's
     bytes (carried inline for the vision stage) with its alt text (``wp:docPr`` descr/title)."""
     from docx.oxml.ns import qn
@@ -643,8 +657,14 @@ def _docx_para_images(para: object, heading_path: str, doc_obj: object, images: 
             continue
         ext = (Path(str(part.partname)).suffix or ".png").lstrip(".").lower()
         images.append(
-            ImageRef(src=str(rid), alt=alt, caption="", heading_path=heading_path,
-                     data=bytes(blob), ext=ext)
+            ImageRef(
+                src=str(rid),
+                alt=alt,
+                caption="",
+                heading_path=heading_path,
+                data=bytes(blob),
+                ext=ext,
+            )
         )
 
 
@@ -684,7 +704,9 @@ def extract_docx(data: bytes) -> ExtractedDoc:
             for hl in para.hyperlinks:
                 if hl.address:
                     links.append(
-                        LinkRef(target=hl.address, anchor=_clean(hl.text), link_type="docx_hyperlink")
+                        LinkRef(
+                            target=hl.address, anchor=_clean(hl.text), link_type="docx_hyperlink"
+                        )
                     )
         elif child.tag == qn("w:tbl"):
             table_text = _linearize_docx_table(Table(child, doc_obj), links)
@@ -866,8 +888,14 @@ def _pptx_add_image(shape: object, heading_path: str, images: list[ImageRef]) ->
         descr = shape._element.xpath(".//p:cNvPr/@descr")  # type: ignore[attr-defined] # noqa: SLF001
         alt = _clean(descr[0]) if descr else _clean(getattr(shape, "name", "") or "")
     images.append(
-        ImageRef(src="", alt=alt, caption="", heading_path=heading_path,
-                 data=img.blob, ext=(img.ext or "png")),
+        ImageRef(
+            src="",
+            alt=alt,
+            caption="",
+            heading_path=heading_path,
+            data=img.blob,
+            ext=(img.ext or "png"),
+        ),
     )
 
 
@@ -904,8 +932,12 @@ def extract_pptx(data: bytes) -> ExtractedDoc:
         if slide.has_notes_slide:
             notes = _clean(slide.notes_slide.notes_text_frame.text)
             if notes:
-                nhp = _heading_path([(1, f"Slide {idx}: {title}" if title else f"Slide {idx}"),
-                                     (2, "Speaker notes")])
+                nhp = _heading_path(
+                    [
+                        (1, f"Slide {idx}: {title}" if title else f"Slide {idx}"),
+                        (2, "Speaker notes"),
+                    ]
+                )
                 segments.append(Segment("body", notes, nhp))
     title = _clean(str(prs.core_properties.title or ""))
     if not title and segments:
@@ -1251,7 +1283,9 @@ def _write_stdf(
         store.delete_document(old)
     try:
         run = stdf_mod.parse_stdf_tests(
-            path.read_bytes(), scope=config.stdf.cond_scope, insertion=source.insertion,
+            path.read_bytes(),
+            scope=config.stdf.cond_scope,
+            insertion=source.insertion,
         )
     except Exception as exc:  # noqa: BLE001 - a corrupt STDF is reported, not fatal to the run
         result.parse_errors += 1
@@ -1261,7 +1295,9 @@ def _write_stdf(
         run.insertion = path.stem
         for prt in run.parts:
             prt.insertion = path.stem
-    if not source.insertion:  # not operator-verified — the WS1/WS1-RT split may be wrong (the operator)
+    if (
+        not source.insertion
+    ):  # not operator-verified — the WS1/WS1-RT split may be wrong (the operator)
         warnings.warn(
             f"STDF {path.name}: insertion {run.insertion!r} was not operator-provided — set "
             "`insertion:` on the source to reliably separate WS1 / WS1-RT / FT.",
@@ -1269,9 +1305,16 @@ def _write_stdf(
         )
     title = " / ".join(x for x in (run.lot_id, run.job_nam) if x) or path.name
     doc_id = store.add_document(
-        path=str(path), source=source.name, source_version=source.version, title=title,
-        content_hash=content_hash(path), content_type="test-data", fmt="stdf",
-        audience=source.audience, mtime=path.stat().st_mtime, status="active",
+        path=str(path),
+        source=source.name,
+        source_version=source.version,
+        title=title,
+        content_hash=content_hash(path),
+        content_type="test-data",
+        fmt="stdf",
+        audience=source.audience,
+        mtime=path.stat().st_mtime,
+        status="active",
     )
     result.documents += 1
     result_rows: list[tuple[object, ...]] = []  # structured results — non-AI-queryable (R-STDF-2)
@@ -1284,33 +1327,73 @@ def _write_stdf(
         chunk_id: int | None = None
         if per_test_chunks:
             chunk_id = store.add_chunk(
-                document_id=doc_id, ord=ordv, text=stdf_mod.stdf_test_text(test), kind="test",
+                document_id=doc_id,
+                ord=ordv,
+                text=stdf_mod.stdf_test_text(test),
+                kind="test",
                 locator=f"test {test.test_num} part {test.part_id}",
             )
             for key, value in test.conditions.items():
                 store.add_flag(
-                    doc_id=doc_id, chunk_id=chunk_id, kind="condition", source="stdf",
-                    rule_id=key, note=value,
+                    doc_id=doc_id,
+                    chunk_id=chunk_id,
+                    kind="condition",
+                    source="stdf",
+                    rule_id=key,
+                    note=value,
                 )
-        result_rows.append((
-            doc_id, chunk_id, test.test_num, test.test_txt, test.result, test.units,
-            test.head, test.site, test.part_id, run.insertion, int(test.passed),
-            test.lo_limit, test.hi_limit, test.rec_type, test.pin,
-            json.dumps(test.conditions) if test.conditions else None,
-        ))
+        result_rows.append(
+            (
+                doc_id,
+                chunk_id,
+                test.test_num,
+                test.test_txt,
+                test.result,
+                test.units,
+                test.head,
+                test.site,
+                test.part_id,
+                run.insertion,
+                int(test.passed),
+                test.lo_limit,
+                test.hi_limit,
+                test.rec_type,
+                test.pin,
+                json.dumps(test.conditions) if test.conditions else None,
+            )
+        )
     store.add_stdf_results(result_rows)
-    store.add_stdf_run(doc_id, (run.lot_id, run.sublot_id, run.part_typ, run.job_nam,
-                                run.insertion))
+    store.add_stdf_run(
+        doc_id, (run.lot_id, run.sublot_id, run.part_typ, run.job_nam, run.insertion)
+    )
     # Every record the log carried, so nothing in it is unrepresented in the database.
-    store.add_stdf_records([
-        (doc_id, ordv, name, json.dumps(fields))
-        for ordv, (name, fields) in enumerate(run.records)
-    ])
-    store.add_stdf_parts([
-        (doc_id, p.part_id, p.insertion, p.lot_id, p.sublot_id, p.wafer_id, p.x, p.y,
-         p.head, p.site, p.hard_bin, p.soft_bin, int(p.passed), p.test_time_ms)
-        for p in run.parts
-    ])
+    store.add_stdf_records(
+        [
+            (doc_id, ordv, name, json.dumps(fields))
+            for ordv, (name, fields) in enumerate(run.records)
+        ]
+    )
+    store.add_stdf_parts(
+        [
+            (
+                doc_id,
+                p.part_id,
+                p.insertion,
+                p.lot_id,
+                p.sublot_id,
+                p.wafer_id,
+                p.x,
+                p.y,
+                p.head,
+                p.site,
+                p.hard_bin,
+                p.soft_bin,
+                int(p.passed),
+                p.test_time_ms,
+            )
+            for p in run.parts
+        ]
+    )
     result.chunks += len(run.tests) if per_test_chunks else 0
     result.stdf_tests += len(run.tests)
     # Per-part rollup chunks when configured (stdf.granularity: part | both) — a part becomes its own
@@ -1328,7 +1411,10 @@ def _write_stdf(
                 f"{'PASS' if part.passed else 'FAIL'} {len(tests_p)} tests {n_pass} pass"
             )
             store.add_chunk(
-                document_id=doc_id, ord=len(run.tests) + pos, text=text, kind="part",
+                document_id=doc_id,
+                ord=len(run.tests) + pos,
+                text=text,
+                kind="part",
                 locator=f"part {part.part_id} {part.insertion}",
             )
         result.chunks += len(run.parts)
@@ -1336,9 +1422,11 @@ def _write_stdf(
 
 def _code_symbol_text(sym: object) -> str:
     """A searchable rendering of one symbol: its language/kind/qualname, signature, and docstring."""
-    s = sym
+    # A duck-typed symbol from the code index; cast once rather than pin a `type: ignore` to a
+    # line number that reformatting can move off the attribute accesses.
+    s = cast("Any", sym)
     return "\n".join(
-        p for p in (f"{s.language} {s.kind} {s.qualname}", s.signature, s.docstring) if p  # type: ignore[attr-defined]
+        p for p in (f"{s.language} {s.kind} {s.qualname}", s.signature, s.docstring) if p
     )
 
 
@@ -1369,25 +1457,48 @@ def _write_code(
         result.errors.append((str(path), f"code parse failed: {type(exc).__name__}: {exc}"))
         return
     doc_id = store.add_document(
-        path=str(path), source=source.name, source_version=source.version, title=rel,
-        content_hash=content_hash(path), content_type="source-code", fmt=language,
-        audience=source.audience, mtime=path.stat().st_mtime, status="active",
+        path=str(path),
+        source=source.name,
+        source_version=source.version,
+        title=rel,
+        content_hash=content_hash(path),
+        content_type="source-code",
+        fmt=language,
+        audience=source.audience,
+        mtime=path.stat().st_mtime,
+        status="active",
     )
     result.documents += 1
     rows: list[tuple[object, ...]] = []
     for ordv, sym in enumerate(symbols):
         chunk_id = store.add_chunk(
-            document_id=doc_id, ord=ordv, text=_code_symbol_text(sym), kind=sym.kind,
+            document_id=doc_id,
+            ord=ordv,
+            text=_code_symbol_text(sym),
+            kind=sym.kind,
             locator=f"{sym.qualname} @ {rel}:{sym.start_line}",
         )
-        rows.append((
-            doc_id, chunk_id, sym.language, sym.kind, sym.name, sym.qualname, sym.signature,
-            sym.docstring, sym.start_line, sym.end_line, sym.parent, sym.path,
-        ))
+        rows.append(
+            (
+                doc_id,
+                chunk_id,
+                sym.language,
+                sym.kind,
+                sym.name,
+                sym.qualname,
+                sym.signature,
+                sym.docstring,
+                sym.start_line,
+                sym.end_line,
+                sym.parent,
+                sym.path,
+            )
+        )
     store.add_code_symbols(rows)
     if not symbols:  # a script with only top-level statements — keep it findable by path/language
-        store.add_chunk(document_id=doc_id, ord=0, text=f"{language} source {rel}", kind="file",
-                        locator=rel)
+        store.add_chunk(
+            document_id=doc_id, ord=0, text=f"{language} source {rel}", kind="file", locator=rel
+        )
     result.chunks += max(len(symbols), 1)
     result.code_symbols += len(symbols)
 
@@ -1420,10 +1531,15 @@ def _write_table(
         store.delete_document(old)
     try:
         ds = ds_mod.read_table(
-            path, name=path.stem, delimiter=source.csv_delimiter or None,
+            path,
+            name=path.stem,
+            delimiter=source.csv_delimiter or None,
             fixed_widths=source.csv_widths or None,
-            label_column=source.csv_label, value_column=source.csv_value,
-            group_column=source.csv_group, lo_column=source.csv_lo, hi_column=source.csv_hi,
+            label_column=source.csv_label,
+            value_column=source.csv_value,
+            group_column=source.csv_group,
+            lo_column=source.csv_lo,
+            hi_column=source.csv_hi,
             units_column=source.csv_units,
         )
     except Exception as exc:  # noqa: BLE001 - a malformed table is reported, not fatal to the run
@@ -1431,20 +1547,34 @@ def _write_table(
         result.errors.append((str(path), f"table parse failed: {type(exc).__name__}: {exc}"))
         return
     doc_id = store.add_document(
-        path=str(path), source=source.name, source_version=source.version, title=ds.name,
-        content_hash=content_hash(path), content_type="data",
+        path=str(path),
+        source=source.name,
+        source_version=source.version,
+        title=ds.name,
+        content_hash=content_hash(path),
+        content_type="data",
         fmt=path.suffix.lstrip(".").lower() or "table",
-        audience=source.audience, mtime=path.stat().st_mtime, status="active",
+        audience=source.audience,
+        mtime=path.stat().st_mtime,
+        status="active",
     )
     result.documents += 1
-    store.add_chunk(document_id=doc_id, ord=0, text=_csv_summary(ds), kind="data",
-                    locator=f"dataset {ds.name}")
+    store.add_chunk(
+        document_id=doc_id, ord=0, text=_csv_summary(ds), kind="data", locator=f"dataset {ds.name}"
+    )
     result.chunks += 1
     numeric = ds.numeric()
     for col in numeric:
         store.add_data_column(
-            doc_id=doc_id, dataset=ds.name, name=col.name, kind=col.kind, units=col.units,
-            lo=col.lo, hi=col.hi, values=col.values, groups=col.groups,
+            doc_id=doc_id,
+            dataset=ds.name,
+            name=col.name,
+            kind=col.kind,
+            units=col.units,
+            lo=col.lo,
+            hi=col.hi,
+            values=col.values,
+            groups=col.groups,
         )
     result.data_columns += len(numeric)
 
@@ -1498,6 +1628,7 @@ def _write_parsed(
         status="active",
         instrument=facts.instrument if facts else "",
         applies_from=facts.applies_from if facts else "",
+        excludes=facts.excludes if facts else "",
         profile=source.profile if facts else "",
     )
     result.documents += 1
@@ -1507,8 +1638,11 @@ def _write_parsed(
         by_ord = {int(r["ord"]): int(r["id"]) for r in store.chunks_for_document(doc_id)}
         for ordv, label in matched:
             store.add_flag(
-                doc_id=doc_id, chunk_id=by_ord.get(ordv), kind="gotcha",
-                source="preflight", rule_id=label,
+                doc_id=doc_id,
+                chunk_id=by_ord.get(ordv),
+                kind="gotcha",
+                source="preflight",
+                rule_id=label,
             )
         result.gotchas += len(matched)
     image_chunks = _stage_images(
@@ -1657,7 +1791,9 @@ def run_ingest(
             continue
         runlog.log("ingest.git_fetch", url=source.location, ref=source.git_ref or "(default)")
         try:
-            local = gitfetch.fetch_repo(source.location, repos_dir, ref=source.git_ref, refresh=force)
+            local = gitfetch.fetch_repo(
+                source.location, repos_dir, ref=source.git_ref, refresh=force
+            )
         except gitfetch.GitFetchError as exc:
             result.errors.append((source.location, f"git fetch failed: {exc}"))
             continue
@@ -1691,6 +1827,7 @@ def run_ingest(
     # already a unit, like a test / a column); everything else in the store still chunks normally.
     def _is_code(p: Path, s: SourceConfig) -> bool:
         from . import code_index
+
         return config.store_type == "code" and code_index.detect_language(p.name) is not None
 
     stdf_work = [(p, s) for p, s in worklist if p.suffix.lower() in (".stdf", ".std")]
