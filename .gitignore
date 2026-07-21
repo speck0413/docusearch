@@ -34,3 +34,11 @@ catalog.db
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Deployment-specific profiles + verifiers. A customer's instrument rules are not part of the
+# generic product, so profiles/ is ignored by DEFAULT except the seam (__init__.py). To ship a
+# specific profile, opt it in with a `!` line below.
+/src/docusearch/profiles/*
+!/src/docusearch/profiles/__init__.py
+# Domain skills that pair with a profile are deployment-specific too.
+/.claude/skills/igxl/

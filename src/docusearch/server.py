@@ -29,13 +29,19 @@ from pydantic import BaseModel
 from . import (
     citations,
     embed,
-    igxl_rules,
     report,
     report_export,
     report_store,
     runlog,
     search,
 )
+
+# Deployment-specific channel-map verifier. Ships as a gitignored profile module, so the
+# generic product may not have it — its MCP tool is registered only when it is present.
+try:
+    from .profiles import igxl_rules
+except ImportError:
+    igxl_rules = None  # type: ignore[assignment]
 from ._version import __version__
 from .catalog import Catalog, open_federation
 from .config import Config, SourceConfig, load
@@ -2451,7 +2457,7 @@ def build_mcp(service: Service, config: Config) -> Any:
         except (PermissionError, ValueError) as err:
             return {"error": "DESCRIBE", "message": str(err)}
 
-    @mcp.tool()
+    # Registered below only when the igxl profile is installed (deployment-specific).
     def check_channel_map(spec: dict[str, Any]) -> dict[str, Any]:
         """Check a proposed IG-XL channel map against the documented rules BEFORE you report it.
 
@@ -2503,6 +2509,9 @@ def build_mcp(service: Service, config: Config) -> Any:
             "findings": out,
             "checked": len(igxl_rules.RULES),
         }
+
+    if igxl_rules is not None:
+        mcp.tool()(check_channel_map)
 
     @mcp.tool()
     def report_format(fmt: str = "") -> dict[str, Any]:
