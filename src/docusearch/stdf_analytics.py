@@ -1329,7 +1329,7 @@ def _data_uri(html: str) -> str:
 def audit_spec_from_store(
     store: Any, doc_a: int, doc_b: int, *, label_a: str = "A", label_b: str = "B",
     max_tests: int = 8, mode: str = "problems", plot_cap: int = 40,
-    sort: str = "severity",
+    sort: str = "severity", plot_cache: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """A pre-production audit computed with SQL aggregates instead of materialised runs.
 
@@ -1341,6 +1341,10 @@ def audit_spec_from_store(
     ``sort="severity"`` (default) puts the worst capability first, which is the order a reviewer
     wants. ``sort="stdf"`` keeps the order the tests appear in the log, which is the order the
     program runs them — the right one when reading alongside the test program itself.
+
+    Pass a ``plot_cache`` to reuse figures across calls. Rendering the plots is essentially the
+    whole cost of a book — 633s of the 633.13s it takes to build and render one — and the same
+    figures serve every format and both orderings, so building six books should draw them once.
 
     Deliberately not flagged: a test simply failing parts. Failures are a limit doing its job;
     what needs investigating is a test behaving abnormally.
@@ -1503,11 +1507,18 @@ def audit_spec_from_store(
         row, reasons, cats = info["row"], info["reasons"], info["cats"]
         images: list[str] = []
         if plotted < plot_cap:
-            with suppress(Exception):  # a plot must never cost the finding it illustrates
-                uri = _relevant_plot(store, name, info, doc_a, doc_b, label_a, label_b)
-                if uri:
-                    images = [uri]
-                    plotted += 1
+            cached = plot_cache.get(name) if plot_cache is not None else None
+            if cached:
+                images = [cached]
+                plotted += 1
+            else:
+                with suppress(Exception):  # a plot must never cost the finding it illustrates
+                    uri = _relevant_plot(store, name, info, doc_a, doc_b, label_a, label_b)
+                    if uri:
+                        images = [uri]
+                        plotted += 1
+                        if plot_cache is not None:
+                            plot_cache[name] = uri
         lo = "—" if row["lo"] is None else f"{float(row['lo']):g}"
         hi = "—" if row["hi"] is None else f"{float(row['hi']):g}"
         cap_txt = "—" if capability >= 99 else f"{capability:.2f}"

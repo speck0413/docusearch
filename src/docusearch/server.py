@@ -783,6 +783,7 @@ class Service:
         self, doc_a: int, doc_b: int, *, fmt: str = "pptx", base_url: str = "",
         label_a: str = "", label_b: str = "", max_tests: int = 8,
         mode: str = "problems", plot_cap: int = 40, sort: str = "severity",
+        plot_cache: dict[str, str] | None = None,
         store: str | None = None, user: str | None = None, groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """An STDF audit as a saved report file, built ENTIRELY IN CODE.
@@ -804,6 +805,7 @@ class Service:
                 db, doc_a, doc_b,
                 label_a=label_a or f"document {doc_a}", label_b=label_b or f"document {doc_b}",
                 max_tests=max_tests, mode=mode, plot_cap=plot_cap, sort=sort,
+                plot_cache=plot_cache,
             )
         spec["theme"] = self.config.reports.theme
         spec["model"] = "computed by docusearch (no model)"
