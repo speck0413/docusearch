@@ -331,16 +331,26 @@ def _points(body: str) -> list[tuple[int, str]]:
 def _slide_chunks(
     points: list[tuple[int, str]], per_slide: int = _SLIDE_BULLETS
 ) -> list[list[tuple[int, str]]]:
-    """Split points across slides, keeping long prose points on lighter slides."""
+    """Split points across slides, BALANCED, keeping long prose points on lighter slides.
+
+    Filling each slide to the limit and spilling the remainder leaves orphans — a seven-point
+    section became six slides plus one carrying three lines, which looks like a mistake. Work out
+    how many slides are needed, then spread the points evenly across them."""
+    costs = [2 if len(text) > _SLIDE_CHARS else 1 for _l, text in points]
+    total = sum(costs)
+    if total <= per_slide:
+        return [list(points)] if points else [[]]
+    slides = -(-total // per_slide)  # ceil
+    target = total / slides
     chunks: list[list[tuple[int, str]]] = []
     current: list[tuple[int, str]] = []
     budget = 0
-    for level, text in points:
-        cost = 2 if len(text) > _SLIDE_CHARS else 1
-        if current and budget + cost > per_slide:
+    for point, cost in zip(points, costs, strict=True):
+        # start a new slide once this one has had its share and others still need points
+        if current and budget >= target and len(chunks) < slides - 1:
             chunks.append(current)
             current, budget = [], 0
-        current.append((level, text))
+        current.append(point)
         budget += cost
     if current:
         chunks.append(current)
@@ -716,7 +726,9 @@ def _to_pptx(
         for n, chunk in enumerate(_slide_chunks(documents, _SOURCE_LINES)):
             slide = prs.slides.add_slide(body_layout)
             if slide.shapes.title is not None:
-                label = f"Sources ({len(seen)} documents, {len(refs)} citations)"
+                docs_word = "document" if len(seen) == 1 else "documents"
+                cite_word = "citation" if len(refs) == 1 else "citations"
+                label = f"Sources ({len(seen)} {docs_word}, {len(refs)} {cite_word})"
                 slide.shapes.title.text = label if n == 0 else "Sources (cont.)"
             holders = _content_holders(slide)
             if holders:
