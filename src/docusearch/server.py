@@ -496,7 +496,14 @@ class Service:
             figure_map: dict[str, tuple[str, str]] = {}
             order = report.number_figures(report._norm_sections(spec.get("sections"), ""),
                                           [str(x) for x in spec.get("images", []) or []])
+            fig_dir = report_store.reports_dir(cfg.paths.tmp_dir) / "figures"
             for sha in dict.fromkeys(shas):
+                if sha.startswith("data:"):
+                    # a generated plot: the OOXML writers need a file on disk, not a URI
+                    written = report_store.write_data_uri(fig_dir, sha)
+                    if written is not None:
+                        figure_map[sha] = (str(written), "")
+                    continue
                 found = self.image(sha)
                 if found is None:
                     continue

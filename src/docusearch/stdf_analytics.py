@@ -5,8 +5,10 @@ tools — audit (two-file compare), site-to-site, trend across runs — built on
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from html import escape
 from typing import Any
@@ -908,3 +910,155 @@ def audit_report_html(
         f"STDF audit — {label_a} vs {label_b}", body,
         subtitle="explore + diff + capability plots at scale",
     )
+
+
+# --------------------------------------------------------------- problem-only audit report
+
+
+# What counts as worth a reviewer's attention. Everything else is signal-free: a test that is
+# identical, correlated and inside its limits does not need a slide.
+_PROBLEM_FLAGS = ("added", "removed", "changed", "shifted", "uncorrelated", "site-shift",
+                  "bimodal", "long-tail", "outliers")
+_CPK_MARGINAL = 1.33  # the usual capability floor; below this a test is a yield risk
+
+
+def audit_problems(analyses: list[TestAnalysis]) -> list[TestAnalysis]:
+    """Only the tests a reviewer needs to look at, worst first.
+
+    A clean test tells you nothing you did not already assume, so an audit report that lists
+    every test buries the handful that matter. Severity orders by capability first (a low Cpk is
+    a yield risk today), then by how far the distribution moved."""
+
+    def severity(a: TestAnalysis) -> tuple[float, float]:
+        cpk = a.cpk if a.cpk is not None else 99.0
+        shift = abs(float(a.comp.get("pct_shift") or 0.0))
+        return (cpk, -shift)
+
+    flagged = [
+        a for a in analyses
+        if any(f in _PROBLEM_FLAGS for f in a.flags)
+        or (a.cpk is not None and a.cpk < _CPK_MARGINAL)
+    ]
+    return sorted(flagged, key=severity)
+
+
+def _problem_reason(a: TestAnalysis) -> str:
+    """One line saying why this test is on the list."""
+    bits: list[str] = []
+    if a.cpk is not None and a.cpk < _CPK_MARGINAL:
+        bits.append(f"Cpk {a.cpk:.2f} (below {_CPK_MARGINAL})")
+    if "added" in a.flags:
+        bits.append("new test in this run")
+    if "removed" in a.flags:
+        bits.append("dropped since the last run")
+    if "changed" in a.flags:
+        bits.append("limits or test number changed")
+    shift = a.comp.get("pct_shift")
+    if "shifted" in a.flags and shift is not None:
+        bits.append(f"mean moved {float(shift):+.1f}%")
+    if "uncorrelated" in a.flags:
+        bits.append("run-to-run correlation lost")
+    if "site-shift" in a.flags:
+        bits.append("site-to-site spread")
+    for shape in ("bimodal", "long-tail", "outliers"):
+        if shape in a.flags:
+            bits.append(shape.replace("-", " "))
+    return "; ".join(bits) or "flagged"
+
+
+def audit_report_spec(
+    run_a: StdfRun,
+    run_b: StdfRun,
+    *,
+    label_a: str = "A",
+    label_b: str = "B",
+    max_tests: int = 8,
+    plots: bool = True,
+) -> dict[str, Any]:
+    """A report spec for an STDF audit that shows ONLY what is wrong.
+
+    Built for a review meeting: the yield delta, then one section per problem test with its
+    distribution plotted beside the reason it is flagged. Marked ``[GK]`` throughout because
+    these are computed measurements of the operator's own data, not claims from the catalog —
+    there is nothing to cite and nothing to hallucinate."""
+    rep = audit_runs(run_a, run_b)
+    _keys, rows = diff_tests(run_a, run_b)
+    da, db = _defs(run_a), _defs(run_b)
+    va_map, rec_a = _values_by_name(run_a)
+    vb_map, rec_b = _values_by_name(run_b)
+    analyses = _analyze(rows, va_map, vb_map, {**rec_a, **rec_b}, da, db,
+                        _site_values_by_name(run_b))
+    problems = audit_problems(analyses)[:max_tests]
+
+    pass_a, tot_a = rep.yield_a
+    pass_b, tot_b = rep.yield_b
+    ya = 100.0 * pass_a / tot_a if tot_a else 0.0
+    yb = 100.0 * pass_b / tot_b if tot_b else 0.0
+    sections: list[dict[str, Any]] = [{
+        "heading": "Where this run stands",
+        "kind": "overview",
+        "body": (
+            f"- Yield {yb:.1f}% ({pass_b}/{tot_b}), was {ya:.1f}% ({pass_a}/{tot_a}) [GK]\n"
+            f"- {len(problems)} test(s) need review out of {len(analyses)} [GK]\n"
+            f"- {len(rep.added)} added, {len(rep.removed)} removed since {label_a} [GK]"
+        ),
+    }]
+    if not problems:
+        sections.append({
+            "heading": "Nothing flagged",
+            "kind": "overview",
+            "layout": "statement",
+            "body": f"No test in {label_b} met a review threshold. [GK]",
+        })
+        return {"title": f"STDF audit — {label_b}", "subtitle": f"compared with {label_a}",
+                "audience": ["test-eng"], "evidence": [], "sections": sections}
+
+    for a in problems:
+        images: list[str] = []
+        if plots:
+            with suppress(Exception):  # a plot must never cost the finding it illustrates
+                # a REMOVED test has no data in the new run, so show what it looked like before
+                src, lbl = ((run_a, label_a) if "removed" in a.flags else (run_b, label_b))
+                images = [_problem_plot(src, a, lbl)]
+        sections.append({
+            "heading": a.name,
+            "kind": "warning" if (a.cpk is not None and a.cpk < 1.0) else "test-program",
+            "body": (
+                f"- {_problem_reason(a)} [GK]\n"
+                f"- Shape: {a.shape}; limits {_limits_text(a)} [GK]\n"
+                f"- Status vs {label_a}: {a.status} [GK]"
+            ),
+            "images": [i for i in images if i],
+        })
+    return {
+        "title": f"STDF audit — {label_b}",
+        "subtitle": f"{len(problems)} test(s) to review, compared with {label_a}",
+        "audience": ["test-eng"],
+        "evidence": [],
+        "sections": sections,
+    }
+
+
+def _limits_text(a: TestAnalysis) -> str:
+    lo = "—" if a.lo is None else f"{a.lo:g}"
+    hi = "—" if a.hi is None else f"{a.hi:g}"
+    return f"{lo} … {hi}"
+
+
+def _problem_plot(run: StdfRun, a: TestAnalysis, label: str) -> str:
+    """A static histogram of this test as a data: URI, for embedding in a deck or document.
+
+    matplotlib, not plotly: a slide or a Word page needs a picture, not an interactive widget."""
+    tnum = next((t.test_num for t in run.tests if t.test_txt == a.name), None)
+    if tnum is None:
+        return ""
+    values = [t.result for t in run.tests if t.test_txt == a.name and t.result is not None]
+    if not values:
+        return ""
+    limits = [v for v in (a.lo, a.hi) if v is not None]  # spec limits drawn on the histogram
+    html = analytics.render_plot(
+        "histogram", y=values, title=f"{a.name} — {label}", xlabel=a.name, ylabel="parts",
+        vlines=limits, backend="matplotlib",
+    )
+    match = re.search(r'src="(data:image/[^"]+)"', html)
+    return match.group(1) if match else ""

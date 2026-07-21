@@ -127,6 +127,14 @@ def figure_sources(
     from .store import Store
 
     out: dict[str, tuple[str, str]] = {}
+    if not shas:
+        return out
+    # An entry that is already a data: URI is a GENERATED figure — a plot rendered for this
+    # report rather than an image ingested from a document — so it needs no catalog lookup.
+    inline = [s for s in shas if str(s).startswith("data:")]
+    for src in inline:
+        out[str(src)] = (str(src), "")
+    shas = [s for s in shas if not str(s).startswith("data:")]
     if db_path == ":memory:" or not shas:
         return out
     images_dir = (Path(staging_dir) / "images").resolve()

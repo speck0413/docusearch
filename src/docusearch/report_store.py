@@ -73,6 +73,32 @@ def resolve(tmp_dir: Path | str, name: str) -> Path | None:
     return path
 
 
+def write_data_uri(directory: Path | str, uri: str) -> Path | None:
+    """Materialise a ``data:`` URI as a file, named by content hash; None if it is unusable.
+
+    Generated figures (plots rendered for a report) arrive as URIs, but python-docx and
+    python-pptx can only place a file. Hashing the payload means the same plot written twice is
+    one file."""
+    import base64
+    import hashlib
+
+    head, _, payload = uri.partition(",")
+    if not payload:
+        return None
+    mime = head[5:].split(";")[0]
+    ext = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif",
+           "image/webp": "webp", "image/svg+xml": "svg"}.get(mime, "png")
+    try:
+        raw = base64.b64decode(payload)
+        target = Path(directory)
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / f"{hashlib.sha256(raw).hexdigest()[:16]}.{ext}"
+        path.write_bytes(raw)
+        return path
+    except (OSError, ValueError):
+        return None
+
+
 def expires_at(written: datetime, retain_days: int) -> datetime | None:
     """When a file written at ``written`` becomes deletable, or None if it is kept forever.
 
