@@ -90,6 +90,12 @@ The user picks an effort level (default **medium**):
    `kind` for how it should read (`overview`, `procedure`, `code`, `hardware`, `config`,
    `test-program`, `warning`, `reference`) — it sets the icon and accent.
 
+   **A deck is for an audience, not a reader.** Code belongs on a slide only when it is a few
+   lines someone could read from the back of a room; a long listing is kept off the slide
+   automatically and preserved in the speaker notes. When the listing IS the deliverable, put it
+   in the document formats and let the deck point at them — tailoring to the format means
+   deciding what does *not* belong, not just reformatting the same content.
+
    **For a deck, the builder picks the slide** — a section with `images` is automatically laid
    out with the figure beside its points, which is usually the right answer. A section *may*
    override with `layout: statement` (one large centred claim) or `layout: compare` (two lists

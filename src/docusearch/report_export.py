@@ -80,8 +80,11 @@ FORMAT_GUIDANCE: dict[str, str] = {
         "  * PUT THE DEPTH IN THE PROSE, not on the slide: the full section text is preserved in "
         "the speaker notes, so a short slide loses nothing. Write the slide for the eye and the "
         "notes for the presenter.\n"
-        "  * Code: only the lines that matter, in its own section. A full listing does not fit a "
-        "slide and never reads well on one.\n"
+        "  * CODE ON A SLIDE ONLY IF IT IS SHORT — a handful of lines that can be read from the "
+        "back of a room. A full listing is unreadable at any font size, so a long one is kept "
+        "OFF the slide automatically and preserved in the speaker notes; the audience gets the "
+        "shape and the presenter has the text. If the listing IS the deliverable, say so and "
+        "point at the document version rather than trying to fit it on slides.\n"
         "  * A section MAY set `layout`: \"statement\" for one large centred line, \"compare\" "
         "for two lists side by side. These are RARE — at most one or two in a whole deck, and "
         "only when the content genuinely is a single claim or a real this-versus-that. Reaching "
@@ -297,26 +300,40 @@ def _numbered(
 _SLIDE_BULLETS = 6
 _SLIDE_CHARS = 160  # a "point" longer than this is prose, not a bullet
 _SOURCE_LINES = 10  # a source list is one line each, so it packs tighter than bullets
+# A listing longer than this does not belong on a slide at all — it goes to the speaker notes
+# with only its shape shown. Short snippets still read fine, so they stay.
+_SLIDE_CODE_LINES = 6
 _DIVIDER_MIN_SECTIONS = 8  # below this a deck is short enough that dividers just pad it
 
 
-def _points(body: str) -> list[tuple[int, str]]:
+def _points(body: str, *, code_limit: int | None = None) -> list[tuple[int, str]]:
     """A body as ``(indent level, text)`` bullet points.
 
     Markdown list markers become real bullet levels; a fenced code block keeps its lines
     verbatim. Prose that is not a list still yields one point per paragraph, so a document-shaped
-    section degrades to readable bullets instead of one unbroken blob."""
+    section degrades to readable bullets instead of one unbroken blob.
+
+    With ``code_limit`` set, a listing longer than that is replaced by a one-line placeholder:
+    a long code listing on a slide is unreadable at any font size, and splitting it across
+    continuation slides is worse. The full text still reaches the speaker notes."""
     points: list[tuple[int, str]] = []
     in_code = False
+    code_buf: list[str] = []
     for raw in body.splitlines():
         line = raw.rstrip()
         if line.strip().startswith("```"):
             in_code = not in_code
+            if not in_code and code_buf:  # a block just closed
+                if code_limit is not None and len(code_buf) > code_limit:
+                    points.append((0, f"[ {len(code_buf)}-line listing — see the notes ]"))
+                else:
+                    points.extend((1, ln) for ln in code_buf)
+                code_buf = []
             continue
         if not line.strip():
             continue
         if in_code:
-            points.append((1, xml_safe(line.strip())))
+            code_buf.append(xml_safe(line.strip()))
             continue
         indent = (len(line) - len(line.lstrip())) // 2
         text = line.strip()
@@ -651,7 +668,7 @@ def _to_pptx(
                 divider.shapes.title.text = xml_safe(heading)
             for extra in _content_holders(divider):
                 extra._element.getparent().remove(extra._element)
-        points = _points(bdy)
+        points = _points(bdy, code_limit=_SLIDE_CODE_LINES)
         figs = [(sha, figure_map[sha]) for sha in sec_imgs if sha in figure_map]
         head = xml_safe(heading) or xml_safe(title)
         want = layouts[idx] if idx < len(layouts) else ""
@@ -701,6 +718,8 @@ def _to_pptx(
             for extra in holders[2:]:  # unused placeholders would show prompt text
                 extra._element.getparent().remove(extra._element)
             if n == 0 and bdy.strip():
+                # The full section text — INCLUDING any listing kept off the slide — belongs
+                # here, so nothing is lost by keeping the slide readable.
                 with suppress(AttributeError, KeyError):  # a template without a notes master
                     slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
         for sha, (path, caption) in figs:  # any further figure gets its own slide
