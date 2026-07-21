@@ -1806,6 +1806,8 @@ def run_ingest(
         relations_unresolved=result.relations_unresolved,
         took_ms=round(result.timings_ms["total"], 1),
     )
+    if config.store_type == "data":
+        store.compact()  # bulk STDF inserts leave a lot of free pages behind
     return result
 
 

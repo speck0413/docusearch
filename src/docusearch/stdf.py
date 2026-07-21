@@ -316,9 +316,12 @@ def parse_stdf_tests(
     pending: list[StdfTest] = []
     defaults: dict[int, _StaticFields] = {}  # first-record static fields per test number (run-scoped)
     for name, f in collected:
-        # TSR is skipped by request: those counters are routinely corrupt in real logs, so
-        # storing them would mean storing something known to be wrong.
-        if name != "Tsr":
+        # Keep the records that have no typed home. The bulk ones already round-trip through
+        # stdf_results / stdf_parts, so copying them here as JSON as well would multiply the
+        # store for nothing — six million PTRs would cost more than the numbers themselves.
+        # TSR is skipped by request: those counters are routinely corrupt in real logs, and
+        # storing something known to be wrong is worse than not storing it.
+        if name not in _TYPED_RECORDS:
             run.records.append((name, {str(k): _plain(v) for k, v in dict(f).items()}))
         if name == "Mir":
             run.lot_id = str(f.get("LOT_ID") or "")
@@ -369,6 +372,11 @@ def stdf_test_text(t: StdfTest) -> str:
     if t.conditions:
         parts.append("COND " + " ".join(f"{k}={v}" for k, v in sorted(t.conditions.items())))
     return " ".join(parts)
+
+
+# Records with a dedicated table: Ptr/Mpr/Ftr -> stdf_results, Prr -> stdf_parts (bins, site,
+# coordinates and elapsed time), Pir -> implied by its Prr. Tsr is excluded by request.
+_TYPED_RECORDS = frozenset({"Ptr", "Mpr", "Ftr", "Prr", "Pir", "Tsr"})
 
 
 def _plain(value: Any) -> Any:

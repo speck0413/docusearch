@@ -15,6 +15,7 @@ Public surface:
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -679,12 +680,22 @@ class Service:
     def _stdf_run(
         self, doc_id: int, *, store: str | None, user: str | None, groups: set[str] | None
     ) -> Any:
-        """Resolve an STDF document id to its parsed run (access-gated via document_path)."""
+        """Resolve an STDF document id to its run (access-gated via document_path).
+
+        Prefers the DATA path: the log was parsed once at ingest into stdf_results/stdf_parts, so
+        rebuilding from those tables is two indexed queries instead of re-reading a file that may
+        be hundreds of megabytes. Falls back to parsing for a document ingested before schema 8,
+        or one whose rows are missing."""
         from . import stdf
 
         path = self.document_path(doc_id, store=store, user=user, groups=groups)
         if path is None:
             raise ValueError(f"no readable STDF document with id {doc_id}")
+        cfg = self._target_config(store)
+        with contextlib.suppress(Exception), Store.open(cfg.paths.db_path) as db:
+            rebuilt = stdf.run_from_store(db, doc_id)
+            if rebuilt.tests:
+                return rebuilt
         try:
             return stdf.parse_stdf_tests(path.read_bytes(), scope=self.config.stdf.cond_scope)
         except Exception as exc:  # noqa: BLE001 - a non-STDF doc in a mixed store must fail clean (H2)
