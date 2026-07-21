@@ -796,6 +796,16 @@ class Store:
         ).fetchall()
         return [float(r[0]) for r in rows]
 
+    def stdf_test_site_values(
+        self, doc_id: int, test_txt: str, limit: int = 20000
+    ) -> list[tuple[float, int]]:
+        """(value, site) for one test — for the per-site comparison plot."""
+        rows = self._conn.execute(
+            "SELECT result, site FROM stdf_results WHERE doc_id=? AND test_txt=? "
+            "AND result IS NOT NULL LIMIT ?", (doc_id, test_txt, limit),
+        ).fetchall()
+        return [(float(r[0]), int(r[1])) for r in rows]
+
     def stdf_part_summary(self, doc_id: int) -> sqlite3.Row:
         """Yield and mean test time (bin 1 and all bins) for one document, in one query."""
         row: sqlite3.Row = self._conn.execute(

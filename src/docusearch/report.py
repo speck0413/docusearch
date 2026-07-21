@@ -986,6 +986,9 @@ color:var(--accent);display:flex;align-items:center;gap:.4em;}
 .slide .figures.inline img{max-width:100%;max-height:44vh;height:auto;border-radius:10px;
 background:#fff;padding:6px;}
 .slide.has-figure .body{font-size:clamp(14px,1.35vw,19px);}
+.slide.figure-slide{justify-content:flex-start;}
+.slide .figure-only{display:flex;justify-content:center;align-items:center;flex:1;margin-top:.4em;}
+.slide .figure-only img{max-height:66vh;max-width:96%;}
 .slide figure{margin:0;text-align:center;}
 .slide figcaption{color:var(--muted);font-size:12.5px;margin-top:4px;}
 @media (max-width:820px){
@@ -1116,6 +1119,7 @@ def _render_slides(
     )
     for heading, kind, body, sec_imgs in secs:
         icon, cls = _KINDS.get(kind.lower(), ("📄", "kind-generic"))
+        figure_only = kind.lower() == "figure"
         figs = "".join(
             f'<figure><img src="{esc(src)}" alt="{esc(alt)}">'
             + (f"<figcaption>{esc(alt)}</figcaption>" if alt else "")
@@ -1124,6 +1128,14 @@ def _render_slides(
         )
         # the figure sits on its section's slide, illustrating that point as it is made
         fig_html = f'<div class="figures inline">{figs}</div>' if figs else ""
+        if figure_only and figs:
+            # deterministic findings slide: name, reason, plot — nothing else competing
+            slides.append(
+                f'<section class="slide figure-slide">'
+                f"<h2>{esc(heading)}</h2>"
+                f'<div class="body figure-only">{fig_html}</div></section>'
+            )
+            continue
         slides.append(
             f'<section class="slide {cls}{" has-figure" if figs else ""}">'
             + (f"<h2><span class=\"ic\">{icon}</span>{esc(heading)}</h2>" if heading else "")

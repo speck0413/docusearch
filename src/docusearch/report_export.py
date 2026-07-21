@@ -662,7 +662,10 @@ def _to_pptx(
     # A divider every few sections gives a long deck rhythm; on a short one it is just noise.
     divide_every = 4 if len(secs) >= _DIVIDER_MIN_SECTIONS else 0
     for idx, (heading, bdy, sec_imgs) in enumerate(secs):
-        if divide_every and idx and idx % divide_every == 0:
+        # A divider marks a change of subject. It is noise in a run of findings that all look
+        # the same, so it only fires for sections that chose no layout of their own.
+        if (divide_every and idx and idx % divide_every == 0
+                and not (layouts[idx] if idx < len(layouts) else "")):
             divider = prs.slides.add_slide(section_layout)
             if divider.shapes.title is not None:
                 divider.shapes.title.text = xml_safe(heading)
@@ -681,6 +684,39 @@ def _to_pptx(
             _statement(prs, slide, " ".join(t for _l, t in points))
             with suppress(AttributeError, KeyError):
                 slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
+            continue
+        if want == "notes":
+            # A long reference list is not a talk. One slide states what it is; the whole list
+            # goes to the speaker notes, where it stays with the deck and stays readable.
+            slide = prs.slides.add_slide(body_layout)
+            if slide.shapes.title is not None:
+                slide.shapes.title.text = head
+            holders = _content_holders(slide)
+            if holders:
+                _fill(holders[0], [(0, "Full list in the speaker notes.")])
+                for extra in holders[1:]:
+                    extra._element.getparent().remove(extra._element)
+            with suppress(AttributeError, KeyError):
+                slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
+            continue
+        if want == "figure" and figs:
+            # A findings slide is not an authoring decision: the test name, the reason it was
+            # flagged, and the plot that shows it. Same shape every time so a reviewer can page
+            # through fifty of them without re-reading the layout.
+            sha, (path, _caption) = figs[0]
+            slide = prs.slides.add_slide(_layout(prs, "Title Only", "Title and Content",
+                                                 fallback=5))
+            if slide.shapes.title is not None:
+                slide.shapes.title.text = head
+            for holder in _content_holders(slide):
+                holder._element.getparent().remove(holder._element)
+            _place_picture(prs, slide, path)
+            placed.add(sha)
+            with suppress(AttributeError, KeyError):
+                slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
+            for extra_sha, (extra_path, extra_cap) in figs[1:]:
+                _figure_slide(prs, pic_layout, extra_path, extra_cap)
+                placed.add(extra_sha)
             continue
         if want == "compare" and points:
             left, right = _split_columns(points)

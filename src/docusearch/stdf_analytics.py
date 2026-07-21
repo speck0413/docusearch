@@ -1156,6 +1156,55 @@ _CATEGORIES = (
 )
 
 
+def _relevant_plot(
+    store: Any, name: str, info: dict[str, Any], doc_a: int, doc_b: int,
+    label_a: str, label_b: str,
+) -> str:
+    """The plot that actually shows THIS finding, chosen by what was wrong.
+
+    A histogram explains a capability or shape problem; it explains nothing about a site
+    disagreement or a distribution that stopped tracking the previous revision."""
+    cats, row = info["cats"], info["row"]
+    doc = info["doc"]
+    limits = [float(v) for v in (row["lo"], row["hi"]) if v is not None]
+
+    if "site" in cats:  # per-site spread is the point — show the sites side by side
+        groups: dict[int, list[float]] = {}
+        for value, site in store.stdf_test_site_values(doc, name):
+            groups.setdefault(site, []).append(value)
+        if len(groups) > 1:
+            series = [(f"site {s}", vals) for s, vals in sorted(groups.items())]
+            html = analytics.render_plot(
+                "whisker", series=series, title=f"{name} — by site ({label_b})",
+                ylabel=name, backend="matplotlib",
+            )
+            return _data_uri(html)
+
+    if {"uncorrelated", "shifted"} & set(cats):  # both revisions, overlaid
+        va = store.stdf_test_values(doc_a, name)
+        vb = store.stdf_test_values(doc_b, name)
+        if va and vb:
+            html = analytics.render_plot(
+                "whisker", series=[(label_a, va), (label_b, vb)],
+                title=f"{name} — {label_a} vs {label_b}", ylabel=name, backend="matplotlib",
+            )
+            return _data_uri(html)
+
+    values = store.stdf_test_values(doc, name)   # capability, shape, changed limits
+    if not values:
+        return ""
+    html = analytics.render_plot(
+        "histogram", y=values, title=f"{name} — {label_b}", xlabel=name, ylabel="parts",
+        vlines=limits, backend="matplotlib",
+    )
+    return _data_uri(html)
+
+
+def _data_uri(html: str) -> str:
+    match = re.search(r'src="(data:image/[^"]+)"', html)
+    return match.group(1) if match else ""
+
+
 def audit_spec_from_store(
     store: Any, doc_a: int, doc_b: int, *, label_a: str = "A", label_b: str = "B",
     max_tests: int = 8, mode: str = "problems", plot_cap: int = 40,
@@ -1319,21 +1368,16 @@ def audit_spec_from_store(
             f"the rest are listed in the appendix [GK]"
         )
 
+    plotted = 0
     for capability, name, info in shown:
-        row, reasons = info["row"], info["reasons"]
+        row, reasons, cats = info["row"], info["reasons"], info["cats"]
         images: list[str] = []
-        if len(images) == 0 and (mode != "full" or len([s for s in sections if s.get("images")]) < plot_cap):
+        if plotted < plot_cap:
             with suppress(Exception):  # a plot must never cost the finding it illustrates
-                values = store.stdf_test_values(info["doc"], name)
-                if values:
-                    limits = [float(v) for v in (row["lo"], row["hi"]) if v is not None]
-                    html = analytics.render_plot(
-                        "histogram", y=values, title=f"{name} — {label_b}", xlabel=name,
-                        ylabel="parts", vlines=limits, backend="matplotlib",
-                    )
-                    match = re.search(r'src="(data:image/[^"]+)"', html)
-                    if match:
-                        images = [match.group(1)]
+                uri = _relevant_plot(store, name, info, doc_a, doc_b, label_a, label_b)
+                if uri:
+                    images = [uri]
+                    plotted += 1
         lo = "—" if row["lo"] is None else f"{float(row['lo']):g}"
         hi = "—" if row["hi"] is None else f"{float(row['hi']):g}"
         cap_txt = "—" if capability >= 99 else f"{capability:.2f}"
@@ -1343,8 +1387,10 @@ def audit_spec_from_store(
             f"{row['units'] or ''} [GK]"
         )
         sections.append({
-            "heading": name,
-            "kind": "warning" if capability < 1.0 else "test-program",
+            # A findings slide is fixed: the test, why it is flagged, and the plot that shows it.
+            "heading": f"{name} — {reasons[0]}" if reasons else name,
+            "kind": "figure" if images else ("warning" if capability < 1.0 else "test-program"),
+            "layout": "figure" if images else "",
             "body": body,
             "images": images,
         })
@@ -1355,6 +1401,7 @@ def audit_spec_from_store(
         sections.append({
             "heading": f"Also flagged ({len(rest):,})",
             "kind": "reference",
+            "layout": "notes",  # one slide in a deck; the full list rides in the notes
             "body": "\n".join(
                 f"- {name}: {'; '.join(info['reasons'])} [GK]" for _c, name, info in rest[:400]
             ),
