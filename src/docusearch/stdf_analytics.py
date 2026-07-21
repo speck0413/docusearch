@@ -994,12 +994,14 @@ def audit_report_spec(
     pass_b, tot_b = rep.yield_b
     ya = 100.0 * pass_a / tot_a if tot_a else 0.0
     yb = 100.0 * pass_b / tot_b if tot_b else 0.0
+    time_lines = _test_time_lines(run_a, run_b)
     sections: list[dict[str, Any]] = [{
         "heading": "Where this run stands",
         "kind": "overview",
         "body": (
             f"- Yield {yb:.1f}% ({pass_b}/{tot_b}), was {ya:.1f}% ({pass_a}/{tot_a}) [GK]\n"
-            f"- {len(problems)} test(s) need review out of {len(analyses)} [GK]\n"
+            + "".join(f"- {line} [GK]\n" for line in time_lines)
+            + f"- {len(problems)} test(s) need review out of {len(analyses)} [GK]\n"
             f"- {len(rep.added)} added, {len(rep.removed)} removed since {label_a} [GK]"
         ),
     }]
@@ -1037,6 +1039,42 @@ def audit_report_spec(
         "evidence": [],
         "sections": sections,
     }
+
+
+def _mean_test_ms(run: StdfRun, *, bin1_only: bool) -> float | None:
+    """Mean TEST_T in milliseconds, over passing parts or over every part."""
+    times = [
+        p.test_time_ms for p in run.parts
+        if p.test_time_ms and (p.hard_bin == 1 or not bin1_only)
+    ]
+    return sum(times) / len(times) if times else None
+
+
+def _test_time_lines(run_a: StdfRun, run_b: StdfRun) -> list[str]:
+    """Average test time new vs old, split bin 1 versus all bins.
+
+    The two are worth separating: bin-1 time is what a good part costs, while the all-bins
+    figure includes the parts that failed — so a gap between them, or a gap that grows, says
+    failures are eating throughput rather than the test itself getting slower.
+
+    Empty when the logs carry no TEST_T, which is common; claiming 0.00s would be worse than
+    saying nothing."""
+    out: list[str] = []
+    for label, bin1 in (("bin 1", True), ("all bins", False)):
+        now, before = _mean_test_ms(run_b, bin1_only=bin1), _mean_test_ms(run_a, bin1_only=bin1)
+        if now is None and before is None:
+            continue
+        if now is not None and before:
+            delta = 100.0 * (now - before) / before
+            out.append(
+                f"Test time ({label}) {now / 1000:.2f}s/part, was {before / 1000:.2f}s "
+                f"({delta:+.1f}%)"
+            )
+        else:
+            value = now if now is not None else before
+            assert value is not None
+            out.append(f"Test time ({label}) {value / 1000:.2f}s/part")
+    return out
 
 
 def _limits_text(a: TestAnalysis) -> str:

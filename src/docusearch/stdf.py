@@ -135,6 +135,7 @@ class StdfPart:
     soft_bin: int
     passed: bool
     insertion: str
+    test_time_ms: int = 0  # PRR TEST_T: how long this part took to test
 
     def key(self, fields: Sequence[str] = ("lot", "sublot", "wafer", "x", "y")) -> tuple[str, ...]:
         """The unique part id from the chosen ``fields`` (default wafer x/y). Falls back to part_id
@@ -334,6 +335,7 @@ def parse_stdf_tests(
                     part_id=part_id, head=_as_int(f.get("HEAD_NUM")), site=_as_int(f.get("SITE_NUM")),
                     hard_bin=_as_int(f.get("HARD_BIN")), soft_bin=_as_int(f.get("SOFT_BIN")),
                     passed=not (part_flg & 0x08), insertion=run.insertion,
+                    test_time_ms=_as_int(f.get("TEST_T")),
                 )
             )
             for t in pending:

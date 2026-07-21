@@ -767,6 +767,31 @@ class Service:
         html = stdf_analytics.plot_test_html(run, test_num, kind=kind, backend=self._backend(backend))
         return {"html": html, "backend": self._backend(backend)}
 
+    def stdf_audit_report(
+        self, doc_a: int, doc_b: int, *, fmt: str = "pptx", base_url: str = "",
+        label_a: str = "", label_b: str = "", max_tests: int = 8,
+        store: str | None = None, user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """An STDF audit as a saved report file, built ENTIRELY IN CODE.
+
+        No model writes any part of this: the findings, their ordering, the wording and the plots
+        all come from the analytics layer, so the same two logs always produce the same report.
+        Every line is tagged ``[GK]`` because these are measurements of the operator's own data
+        rather than claims from the catalog — there is nothing to cite and nothing to invent."""
+        from . import stdf_analytics
+
+        run_a = self._stdf_run(doc_a, store=store, user=user, groups=groups)
+        run_b = self._stdf_run(doc_b, store=store, user=user, groups=groups)
+        spec = stdf_analytics.audit_report_spec(
+            run_a, run_b,
+            label_a=label_a or f"document {doc_a}", label_b=label_b or f"document {doc_b}",
+            max_tests=max_tests,
+        )
+        spec["theme"] = self.config.reports.theme
+        spec["model"] = "computed by docusearch (no model)"
+        spec["request"] = f"STDF audit: document {doc_b} against document {doc_a}"
+        return self.build_report_file(spec, base_url=base_url, fmt=fmt)
+
     def stdf_audit(
         self, doc_a: int, doc_b: int, *, backend: str = "",
         store: str | None = None, user: str | None = None, groups: set[str] | None = None,
@@ -1655,6 +1680,26 @@ def build_mcp(service: Service, config: Config) -> Any:
             )
         except (PermissionError, ValueError) as err:
             return {"error": "STDF", "message": str(err)}
+
+    @mcp.tool()
+    def stdf_audit_report(
+        doc_a: int, doc_b: int, fmt: str = "pptx", label_a: str = "", label_b: str = "",
+        max_tests: int = 8, store: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Compare two STDF documents and SAVE an audit report showing only what needs review —
+        yield, test time (bin 1 and all bins), then one section per problem test with its
+        distribution plotted. Written entirely by code, so it is reproducible: hand the user the
+        returned `url`. fmt: pptx | docx | html | html-slide | pdf | md | xlsx."""
+        try:
+            return service.stdf_audit_report(
+                doc_a, doc_b, fmt=fmt, base_url=base, label_a=label_a, label_b=label_b,
+                max_tests=max_tests, store=store, user=user, groups=_grp(groups),
+            )
+        except (PermissionError, ValueError) as err:
+            return {"error": "STDF", "message": str(err)}
+        except citations.CitationError as err:
+            return {"error": "HALLUCINATED_CITATION", "message": str(err)}
 
     @mcp.tool()
     def stdf_audit(

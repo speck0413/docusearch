@@ -1274,16 +1274,23 @@ def _write_stdf(
     )
     result.documents += 1
     result_rows: list[tuple[object, ...]] = []  # structured results — non-AI-queryable (R-STDF-2)
+    # `granularity` decides what becomes a searchable CHUNK. The numbers always land in the
+    # structured stdf_results table either way, because that is the data path the analytics and
+    # any plain-SQL tool read — a chunk exists only so a human can find a test by name. At
+    # `part`, one insertion of 2,000 devices x 3,000 tests is 2,000 chunks instead of 6,000,000.
+    per_test_chunks = config.stdf.granularity in ("test", "both")
     for ordv, test in enumerate(run.tests):
-        chunk_id = store.add_chunk(
-            document_id=doc_id, ord=ordv, text=stdf_mod.stdf_test_text(test), kind="test",
-            locator=f"test {test.test_num} part {test.part_id}",
-        )
-        for key, value in test.conditions.items():
-            store.add_flag(
-                doc_id=doc_id, chunk_id=chunk_id, kind="condition", source="stdf",
-                rule_id=key, note=value,
+        chunk_id: int | None = None
+        if per_test_chunks:
+            chunk_id = store.add_chunk(
+                document_id=doc_id, ord=ordv, text=stdf_mod.stdf_test_text(test), kind="test",
+                locator=f"test {test.test_num} part {test.part_id}",
             )
+            for key, value in test.conditions.items():
+                store.add_flag(
+                    doc_id=doc_id, chunk_id=chunk_id, kind="condition", source="stdf",
+                    rule_id=key, note=value,
+                )
         result_rows.append((
             doc_id, chunk_id, test.test_num, test.test_txt, test.result, "",
             test.head, test.site, test.part_id, run.insertion, int(test.passed),
@@ -1294,7 +1301,7 @@ def _write_stdf(
          p.head, p.site, p.hard_bin, p.soft_bin, int(p.passed))
         for p in run.parts
     ])
-    result.chunks += len(run.tests)
+    result.chunks += len(run.tests) if per_test_chunks else 0
     result.stdf_tests += len(run.tests)
     # Per-part rollup chunks when configured (stdf.granularity: part | both) — a part becomes its own
     # searchable unit alongside/instead of the per-test chunks (R-STDF-2).
