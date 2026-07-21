@@ -1414,6 +1414,7 @@ class Store:
         ).fetchone()
         return row
 
+
     def relations_out(self, doc_id: int) -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT dst_doc, dst_raw, link_type FROM relations WHERE src_doc=? ORDER BY id",

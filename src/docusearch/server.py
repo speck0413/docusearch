@@ -555,6 +555,8 @@ class Service:
             request=str(spec.get("request", "")),
             requested_by=str(spec.get("requested_by", "")),
             model=str(spec.get("model", "")),
+            effort=str(spec.get("effort", "")),
+            model_effort=str(spec.get("model_effort", "")),
             classification=str(spec.get("classification", "Confidential")),
             # Rich reference labels (store — title — heading), but served /v1/documents HTTP links a
             # remote client can open — identical to the CLI report save for the link host.
@@ -1110,6 +1112,59 @@ class Service:
         if not path.is_relative_to(images_dir) or not path.is_file():
             return None
         return path, _MEDIA_TYPES.get(ext, "application/octet-stream")
+
+    def image_meta(
+        self, sha256: str, *, store: str | None = None, user: str | None = None,
+        groups: set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Caption/alt/locator plus any cached ``vision_text`` for a retained figure.
+
+        Lazy enrichment reads this first: a figure already described costs nothing to reuse,
+        and only an undescribed one is worth sending through a vision pass."""
+        cfg = self._target_config(store)
+        if not cfg.access.permits(user=user, groups=groups or set()):
+            raise PermissionError("access denied: this store is private")
+        with Store.open(cfg.paths.db_path) as store_db:
+            row = store_db.get_image(sha256)
+        if row is None:
+            return None
+        keys = row.keys() if hasattr(row, "keys") else []
+        return {
+            "sha256": sha256,
+            "caption": str(row["caption"] or "") if "caption" in keys else "",
+            "alt": str(row["alt"] or "") if "alt" in keys else "",
+            "locator": str(row["locator"] or "") if "locator" in keys else "",
+            "doc_id": row["doc_id"] if "doc_id" in keys else None,
+            "vision_text": str(row["vision_text"] or "") if "vision_text" in keys else "",
+            "vision_model": str(row["vision_model"] or "") if "vision_model" in keys else "",
+        }
+
+    def describe_image(
+        self, sha256: str, description: str, *, model: str = "", store: str | None = None,
+        user: str | None = None, groups: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Cache a description an agent produced by actually looking at the figure.
+
+        Write-once-then-reuse: the first agent that needs an undescribed figure pays the
+        vision cost, every later search benefits. Existing text is not overwritten unless
+        it is empty, so a one-off bad description cannot silently replace a good one."""
+        cfg = self._target_config(store)
+        if not cfg.access.permits(user=user, groups=groups or set()):
+            raise PermissionError("access denied: this store is private")
+        text = " ".join(str(description).split())
+        if not text:
+            raise ValueError("description is empty")
+        with Store.open(cfg.paths.db_path) as store_db:
+            row = store_db.get_image(sha256)
+            if row is None:
+                return {"error": "NOT_FOUND", "sha256": sha256}
+            # sqlite3.Row: membership must be tested against keys(), not the Row itself
+            cols = list(row.keys()) if hasattr(row, "keys") else []
+            existing = str(row["vision_text"] or "") if "vision_text" in cols else ""
+            if existing:
+                return {"sha256": sha256, "stored": False, "reason": "already described"}
+            store_db.set_image_vision(sha256, text, model)
+        return {"sha256": sha256, "stored": True, "chars": len(text)}
 
 
 # `search_docs` replies are read by a model through a tool-output cap, so the shape is optimised
@@ -1828,6 +1883,42 @@ def build_mcp(service: Service, config: Config) -> Any:
             )
         except (ValueError, PermissionError) as err:
             return {"error": "FEEDBACK", "message": str(err)}
+
+    @mcp.tool()
+    def get_image(sha256: str, store: str | None = None) -> Any:
+        """LOOK at a figure a search hit carried (`img`). Returns the image itself plus any
+        cached description. If `vision_text` is empty you are the first to see this figure —
+        read it, then call `describe_image` so nobody pays for it again. Do this BEFORE citing
+        or placing a figure: a cited image chunk is embedded into the report, so an undescribed
+        figure would otherwise be placed sight-unseen."""
+        import json as _json
+
+        from mcp.server.fastmcp import Image as _McpImage
+
+        try:
+            meta = service.image_meta(sha256, store=store)
+            found = service.image(sha256, store=store)
+        except (PermissionError, ValueError) as err:
+            return {"error": "ACCESS", "message": str(err)}
+        if meta is None or found is None:
+            return {"error": "NOT_FOUND", "sha256": sha256}
+        path, _media = found
+        if meta.get("vision_text"):
+            return {**meta, "cached": True}
+        return [
+            _McpImage(path=str(path)),
+            _json.dumps({**meta, "cached": False, "next": "call describe_image with what you see"}),
+        ]
+
+    @mcp.tool()
+    def describe_image(sha256: str, description: str, model: str = "") -> dict[str, Any]:
+        """Cache what you saw in a figure so the next search can read it as text. Describe the
+        CONTENT — the states, values, channel/bit assignments, axes and labels a reader needs —
+        not that it is a diagram. Only fills an empty description; it never overwrites one."""
+        try:
+            return service.describe_image(sha256, description, model=model)
+        except (PermissionError, ValueError) as err:
+            return {"error": "DESCRIBE", "message": str(err)}
 
     @mcp.tool()
     def report_format(fmt: str = "") -> dict[str, Any]:

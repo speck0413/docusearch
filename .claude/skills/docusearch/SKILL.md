@@ -29,6 +29,28 @@ The user picks an effort level (default **medium**):
 | **low** | One `search_docs` call (3–4 phrasings); a short, direct, cited answer. |
 | **medium** *(default)* | 6–8 phrasings in one `search_docs` call; read the hits; one follow-up batch to fill gaps; a structured multi-card report. |
 | **high** | Many phrasings over several batched rounds; `get_document` for full chunk text and `related_documents` to follow leads; keep going until new searches surface nothing new. **Only dismiss a lead after a search confirms it's a dead end.** |
+| **xhigh** | As high, plus: open every figure the hits carry (see *Figures*), and reconcile contradictions between documents rather than picking one. |
+| **max** | As xhigh, with no stopping rule but exhaustion — pursue every lead to a confirmed dead end and state what you could not resolve. |
+
+Levels use the **same words as the model harness's own effort setting** (`low`, `medium`,
+`high`, `xhigh`, `max`) so one word means one thing everywhere. Put the level you ran at in
+the report spec as `effort`, and the harness level (if you know it) as `model_effort` —
+they render as separate chips in the banner.
+
+## Figures — look before you cite
+
+Search hits carry an `img` list. **A cited image chunk is embedded into the report**, so
+citing a figure you have not seen means placing it blind.
+
+1. `get_image(sha256)` → returns the figure itself, plus any cached description.
+2. If it comes back with `cached: false`, you are the first to see it: read the image, then
+   `describe_image(sha256, description)` with the CONTENT — states, values, channel/bit
+   assignments, axes, labels — not "a diagram of X".
+3. Use what you saw in your answer, and cite the image chunk normally.
+
+The description is cached for everyone after you, so this cost is paid once per figure. Much
+of this catalog's real detail lives in figures, not prose — if a question looks unanswerable
+from text, open the figures before concluding the documentation does not cover it.
 
 ## Tools (docusearch MCP)
 
@@ -48,6 +70,8 @@ The user picks an effort level (default **medium**):
   a card with real code / a full procedure, not just a snippet).
 - `related_documents(doc_id, direction="both")` → cross-referenced docs (follow leads).
 - `catalog_stats()` → sanity-check the catalog is populated.
+- `get_image(sha256)` → **look at** a figure from a hit's `img` list (+ cached description).
+- `describe_image(sha256, description)` → cache what you saw, once, for everyone after you.
 - `report_format(fmt="")` → the target format's authoring rules + the configured default.
 
 ## Workflow
