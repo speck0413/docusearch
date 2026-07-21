@@ -156,6 +156,7 @@ class Service:
         stores: list[str] | None = None,
         user: str | None = None,
         groups: set[str] | None = None,
+        instrument: str = "",
     ) -> tuple[list[list[SearchHit]], str, str]:
         """Return (per-query results, embed_model_used, search_mode). Text queries only;
         pre-computed vectors + the 409 mismatch path arrive with the client (Phase 3b).
@@ -215,9 +216,36 @@ class Service:
             )
             # feedback-aware re-rank (Phase 8): boost by source tier + this user's feedback
             result_lists = self._rerank_with_feedback(store, results, user)  # type: ignore[arg-type]
+            if instrument:
+                result_lists = [
+                    self._filter_instrument(store, lst, instrument) for lst in result_lists
+                ]
         model_used = provider.model_id if provider is not None else "none"
         mode = "hybrid" if (provider is not None and vector_index is not None) else "bm25"
         return result_lists, model_used, mode
+
+    def _filter_instrument(
+        self, store: Store, hits: list[SearchHit], instrument: str
+    ) -> list[SearchHit]:
+        """Drop hits from pages that govern a DIFFERENT instrument.
+
+        Tagging alone does not prevent the error this exists for: an UltraPin2200-only rule
+        returned for an UltraPin1600 question gets read as universal, which is how a scoped
+        statement became a flat claim about SCAN. A page with no instrument is general and is
+        always kept — absence of scope is not evidence of a mismatch."""
+        if not hits:
+            return hits
+        ids = {h.doc_id for h in hits}
+        marks = ",".join("?" * len(ids))
+        rows = store._conn.execute(  # noqa: SLF001 - same package, read-only lookup
+            f"SELECT id, instrument FROM documents WHERE id IN ({marks})", tuple(ids)
+        ).fetchall()
+        scope = {int(r[0]): str(r[1] or "") for r in rows}
+        want = instrument.strip().lower()
+        return [
+            h for h in hits
+            if not scope.get(h.doc_id) or want in scope.get(h.doc_id, "").lower()
+        ]
 
     def _rerank_federated(
         self, cfg: Config, hits: list[SearchHit], user: str | None
@@ -1253,6 +1281,7 @@ class SearchRequest(BaseModel):
     bm25_only: bool | None = None
     roles: list[str] | None = None
     stores: list[str] | None = None  # federation: scope to named member stores
+    instrument: str = ""  # hardware scope: drop pages governing a different instrument
 
 
 class IngestRequest(BaseModel):
@@ -1523,11 +1552,17 @@ def build_mcp(service: Service, config: Config) -> Any:
         roles: list[str] | None = None,
         user: str | None = None,
         groups: list[str] | None = None,
+        instrument: str = "",
     ) -> dict[str, Any]:
         """Search the catalog (batch: pass a LIST). Hits carry `doc_id`/`chunk_id`/`citation`/
         `locator`/`snippet`; title+path live once per doc in `documents`. `stores` scopes to
         federation members; `user`/`groups` gate access to private stores (forward the
-        authenticated user)."""
+        authenticated user).
+
+        `instrument` scopes to hardware (e.g. "UltraPin1600"): a page governing a DIFFERENT
+        instrument is dropped; a page naming none is general and is kept. Pass it whenever the
+        question names hardware — an instrument-specific rule read as universal is a wrong
+        answer stated confidently."""
         if len(queries) > _MCP_BATCH_QUERIES:  # wide batch -> less depth, so the reply still fits
             top_k = min(top_k, _MCP_BATCH_TOP_K)
         try:
@@ -1535,6 +1570,7 @@ def build_mcp(service: Service, config: Config) -> Any:
                 queries, top_k=top_k, prefix=prefix, bm25_only=bm25_only,
                 roles=set(roles) if roles else None, stores=stores,
                 user=user, groups=set(groups) if groups else None,
+                instrument=instrument,
             )
         except (ValueError, PermissionError) as err:
             return {"error": "ACCESS", "message": str(err), "results": []}
@@ -2032,6 +2068,7 @@ def create_app(config: Config) -> FastAPI:
                     stores=req.stores,
                     user=user,
                     groups=groups,
+                    instrument=req.instrument,
                 )
             except ValueError as err:  # unknown federation store name -> clean 400
                 raise HTTPException(status_code=400, detail=str(err)) from err

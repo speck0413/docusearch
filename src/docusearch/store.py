@@ -542,16 +542,30 @@ class Store:
         self._maybe_commit()
         return int(cur.lastrowid or 0)
 
-    def add_chunks(self, document_id: int, chunks: Sequence[tuple[int, str, str, str]]) -> None:
+    def add_chunks(
+        self,
+        document_id: int,
+        chunks: Sequence[tuple[int, str, str, str]],
+        restricts: Sequence[int] = (),
+    ) -> None:
         """Bulk-insert a document's chunks in one ``executemany`` (ord, text, kind, locator).
+
+        ``restricts`` is the set of ``ord`` values a profile flagged as stating a limit
+        ("cannot", "not supported"). It is per-chunk because a restriction belongs to the one
+        passage that states it, unlike instrument/applies_from which govern the whole page.
 
         The FTS index stays in sync via trigger. This is the ingest hot path — one call per
         document instead of one per chunk cuts the Python↔SQLite round-trips substantially."""
         if not chunks:
             return
+        flagged = set(restricts)
         self._conn.executemany(
-            "INSERT INTO chunks(document_id, ord, kind, locator, text) VALUES (?, ?, ?, ?, ?)",
-            [(document_id, ordv, kind, locator, text) for ordv, text, kind, locator in chunks],
+            "INSERT INTO chunks(document_id, ord, kind, locator, text, restricts) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (document_id, ordv, kind, locator, text, 1 if ordv in flagged else None)
+                for ordv, text, kind, locator in chunks
+            ],
         )
         self._maybe_commit()
 

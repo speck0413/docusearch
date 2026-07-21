@@ -1502,7 +1502,7 @@ def _write_parsed(
     )
     result.documents += 1
     tagged, matched = _tag_gotchas(res.chunks, gotcha_patterns)
-    store.add_chunks(doc_id, tagged)
+    store.add_chunks(doc_id, tagged, restricts=facts.restricts if facts else ())
     if matched:  # dual-tag: text prefix (done above) + a filterable flags row (R-ING-8)
         by_ord = {int(r["ord"]): int(r["id"]) for r in store.chunks_for_document(doc_id)}
         for ordv, label in matched:
