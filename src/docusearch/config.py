@@ -139,7 +139,9 @@ SCHEMA: tuple[_Node, ...] = (
                     "Enrichment profile layered on top of the parser chosen by file\n"
                     "extension. Additive only: it annotates scope a generic parser cannot\n"
                     "know is meaningful, and never changes how the file is parsed.\n"
-                    "  igxl : Instrument, applies-from release, per-chunk restrictions\n"
+                    "  A profile name adds fields it recognises (e.g. instrument, release,\n"
+                    "  per-chunk restrictions). Deployment-specific profiles are dropped into\n"
+                    "  src/docusearch/profiles/ and are gitignored by default.\n"
                     "Blank or unknown = generic parsing."
                 ),
             ),
