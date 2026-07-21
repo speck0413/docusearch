@@ -474,7 +474,7 @@ class Service:
     ) -> dict[str, Any]:
         """Render a report, write it under ``tmp_dir/reports/``, and return a clickable URL.
 
-        All six formats come back the same way, so an agent's terminal step never depends on the
+        All seven formats come back the same way, so an agent's terminal step never depends on the
         format it was configured with. ``md``/``html`` also carry the text inline (small, and the
         agent may want to quote it); the binary formats do not — a base64'd pptx through the
         model's context is exactly the cost the compact search payload exists to avoid.

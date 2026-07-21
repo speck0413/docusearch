@@ -9,7 +9,8 @@ Every command resolves the config, does one job, and logs one event.
     docusearch models
     docusearch inspect [<source>] [--sample N] [--config PATH]
     docusearch search <query> [--top-k N] [--prefix] [--json] [--batch-file F --out O] [--config PATH]
-    docusearch report --spec SPEC.yaml [--format md|html] [--out FILE] [--config PATH]
+    docusearch report --spec SPEC.yaml [--format md|html|html-slide|pdf|docx|pptx|xlsx]
+                      [--out FILE] [--config PATH]
     docusearch show <doc_id> [--config PATH]
     docusearch serve [--host H] [--port P] [--config PATH]
     docusearch gate <n> [--name NAME] [--config PATH]

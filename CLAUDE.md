@@ -1,5 +1,10 @@
 # docusearch — instructions for AI coding agents
 
+> Using docusearch to answer questions? This file is for you — read on.
+> **Working ON the docusearch codebase?** Read [`DEVELOPERS.md`](DEVELOPERS.md) first; it
+> covers the extension seams, the invariants, and the traps. This file is the end-user
+> agent contract and ships to every install.
+
 You have a **docusearch** MCP server: a local catalog of the team's technical
 documentation and code. Use it to ground your answers in real sources. It connects over
 **HTTP MCP** (streamable) at `http://localhost:8321/mcp`; the human runs `docusearch serve`

@@ -265,6 +265,10 @@ class AnthropicVisionProvider:
             resp = self._http().messages.create(
                 model=self._model_id,
                 max_tokens=self._max_tokens,
+                # Determinism (R-SRCH-5): a figure's description is INDEXED, so the same image
+                # must not describe differently between runs — that would make search results
+                # depend on when a page happened to be enriched.
+                temperature=0,
                 output_config={"format": {"type": "json_schema", "schema": _RESPONSE_SCHEMA}},
                 messages=[
                     {

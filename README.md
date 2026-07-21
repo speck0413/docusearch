@@ -1,19 +1,28 @@
 # docusearch
 
-An enterprise documentation catalog: ingest technical documentation and code, index
-it for fast **local** search (BM25 + optional vector hybrid), and expose it to AI
-agents (Claude Code, Claude Desktop, Copilot) over an HTTP MCP server and to humans
-over a REST API — with full citations, cross-document relations, and image retention.
+docusearch is an enterprise documentation catalog. It ingests technical documents, source
+code, and test data into a local SQLite index, searches it with BM25 (plus optional vector
+hybrid), and serves the result to humans over a CLI/REST API and to AI agents over MCP —
+with every claim carrying a citation that resolves to the source document.
 
 Target users are electrical engineers who write code, not software engineers. Every
 interface biases toward simple, discoverable, low-ceremony use. Runs on Windows 11
 laptops and on servers; heavy ingestion belongs on the server, clients stay light.
 
-> Ingests HTML, PDF, DOCX, and Markdown; BM25 with optional local **hybrid** (vector +
-> RRF) search, all with citations/relations/image retention; `serve` exposes REST + MCP.
-> See [`GETTING_STARTED.md`](GETTING_STARTED.md) for the full operator and user guide, and
-> [`SERVER-SETUP-GUIDE.md`](SERVER-SETUP-GUIDE.md) to run it as a central team server
-> (PowerShell **and** bash throughout).
+**Ingests** HTML, PDF, DOCX, Markdown, PPTX, XLSX, STDF v4 test data, and source code
+(tree-sitter, 9 languages). **Search** is BM25 by default with optional local hybrid
+(vector + RRF fusion), plus relations, image retention, and federation across stores.
+**Reports** are generated from a spec in seven formats with verified citations. `serve`
+exposes REST + MCP on one process.
+
+### Documentation
+
+| Doc | For |
+|---|---|
+| [`GETTING_STARTED.md`](GETTING_STARTED.md) | **Users and administrators** — install, ingest, search, reports, connecting clients |
+| [`SERVER-SETUP-GUIDE.md`](SERVER-SETUP-GUIDE.md) | **Operators** — running a central team server (PowerShell **and** bash throughout) |
+| [`DEVELOPERS.md`](DEVELOPERS.md) | **Contributors** — module map, extension seams, invariants, working practices |
+| [`BACKLOG.md`](BACKLOG.md) | Known gaps and planned work, each with the defect that motivated it |
 
 ## Run it on your documents (macOS)
 
@@ -41,7 +50,7 @@ sources:
   - name: my-docs
     version: "2024.3"                  # optional: which release of the docs this is
     location: "/path/to/docs"          # <-- your folder
-    include:                           #     HTML only for now (PDF/DOCX/MD are a later phase)
+    include:                           #     glob whitelist; add "**/*.pdf", "**/*.docx", etc.
       - "**/*.html"
     content_selector: ""               #     empty = whole page (tighten later if noisy)
     min_content_chars: 200
@@ -206,6 +215,49 @@ index for a mid-size corpus fits in ~1 GB of RAM; a BM25-only deployment is ligh
 scale (more cores) and horizontal scale (federation, below) both apply. Everything is deterministic
 and offline-capable once the embedding model is cached.
 
+## Reports
+
+A report is generated **by code from a spec**, never written freehand by a model. The
+builder verifies every `[D:<doc_id>#<chunk_id>]` tag against the evidence set and **refuses
+to render** if a citation points outside it — on every format, including the binary ones.
+Claims that are general knowledge rather than catalog-sourced are tagged `[GK]`.
+
+**Seven formats**, requested by name:
+
+| Format | Rendered by | Notes |
+|---|---|---|
+| `md` | `report.py` | Self-contained: figures embedded as data URIs |
+| `html` | `report.py` | Themed section cards, superscript citation links |
+| `html-slide` | `report.py` | Keyboard-navigated deck, one section per slide |
+| `pdf` | `report_export.py` | The HTML report printed in headless chromium, so layout matches the browser and interactive charts render |
+| `docx` | `report_export.py` | |
+| `pptx` | `report_export.py` | |
+| `xlsx` | `report_export.py` | Cells sanitized against formula injection |
+
+**Four themes** for `html` / `html-slide` / `pdf`: `midnight` (deep navy, cyan accents),
+`paper` (light, print-friendly), `slate` (neutral dark grey, no brand colour — the default),
+`contrast` (near-black on white, heavy borders). Set `reports.theme` in the config; a
+requester may ask for another per report.
+
+**Server-side rendering returns a URL.** The MCP `build_report` tool and the REST endpoint
+render the report on the server, write it under `tmp_dir/reports/`, and hand back
+`{fmt, filename, url, path, bytes}` — an MCP client may be nowhere near the machine that
+rendered it, and base64-ing a pptx through the model's context is exactly the cost the
+compact search payload exists to avoid. `md` and `html` additionally carry their text
+inline. Retention follows `reports.retain_days` (`-1` keeps forever; the sweep runs at
+server start and after each write). References resolve to the server's `/v1/documents` URLs;
+the CLI's identical report links to the local `file://` source instead.
+
+From the CLI:
+
+```bash
+docusearch report --spec answer.yaml --format html-slide --out deck.html
+```
+
+Content should be authored for its target — a deck needs short bullets, a spreadsheet one
+fact per row, a document takes prose. The MCP `report_format` tool states the configured
+default format and that guidance so an agent reads it *before* writing.
+
 ## Central MCP server (one server for the whole company)
 
 `docusearch serve` exposes the catalog over **REST + MCP** on one lightweight process (§10). The
@@ -284,7 +336,11 @@ python -m venv .venv
 pip install -e ".[dev]"
 docusearch init                 # writes a fully-commented docusearch.yaml
 docusearch ingest --dry-run     # shows the plan without touching the index
-pytest                          # run the test suite
+ruff check src/ && mypy         # lint + type-check before committing
 ```
 
 Run modes are selected in `docusearch.yaml`: `standalone`, `server`, or `client`.
+
+The test suite, validation harness, corpora, and CI live in the **parent workspace**, not in
+this repo — this repo is the deployable product. See [`DEVELOPERS.md`](DEVELOPERS.md) for the
+module map, the extension seams, and the invariants a change must not break.
