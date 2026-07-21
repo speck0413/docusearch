@@ -36,7 +36,7 @@ from pathlib import Path
 
 from selectolax.parser import HTMLParser, Node
 
-from . import embed, runlog
+from . import embed, profiles, runlog
 from .config import Config, SourceConfig
 from .embed import EmbedProvider
 from .enrich import GotchaPattern, active_gotcha_patterns, gotcha_tag_text, match_gotcha
@@ -1478,6 +1478,13 @@ def _write_parsed(
         return
     if not source.audience:
         result.untagged_audience_docs += 1
+    # Profile enrichment: additive, runs AFTER the extension-chosen parser. Scope it finds
+    # (instrument, applies_from) is stored on the document, so all of this page's chunks
+    # inherit it — a hit on chunk 15 is scoped exactly like a hit on chunk 1.
+    facts = None
+    prof = profiles.get(source.profile)
+    if prof is not None:
+        facts = prof.facts(doc.title, [c.text for c in res.chunks])
     doc_id = store.add_document(
         path=res.path,
         source=source.name,
@@ -1489,6 +1496,9 @@ def _write_parsed(
         audience=source.audience,
         mtime=res.mtime,
         status="active",
+        instrument=facts.instrument if facts else "",
+        applies_from=facts.applies_from if facts else "",
+        profile=source.profile if facts else "",
     )
     result.documents += 1
     tagged, matched = _tag_gotchas(res.chunks, gotcha_patterns)

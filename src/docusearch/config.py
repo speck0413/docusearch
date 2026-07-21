@@ -121,7 +121,28 @@ SCHEMA: tuple[_Node, ...] = (
         (
             _Field("type", "fs", inline="fs = filesystem folder (git/sharepoint later)"),
             _Field("name", "vendor-html", inline="a short label for this source"),
-            _Field("version", "", inline='doc release/version, e.g. "2024.3" (blank = untracked)'),
+            _Field(
+                "version",
+                "",
+                comment=(
+                    'Release of the DOC SET, e.g. "11.00" for an IG-XL 11.00 help set.\n'
+                    "Stored on every document, so a later release can sit alongside this\n"
+                    "one and an answer can say which release it came from.\n"
+                    "This is the doc-set release, NOT the applicability of one rule —\n"
+                    'pages say "V11.00.00 and later", which a profile can extract.'
+                ),
+            ),
+            _Field(
+                "profile",
+                "",
+                comment=(
+                    "Enrichment profile layered on top of the parser chosen by file\n"
+                    "extension. Additive only: it annotates scope a generic parser cannot\n"
+                    "know is meaningful, and never changes how the file is parsed.\n"
+                    "  igxl : Instrument, applies-from release, per-chunk restrictions\n"
+                    "Blank or unknown = generic parsing."
+                ),
+            ),
             _Field("location", "D:/docs/vendor-html", inline="folder to ingest (Windows or POSIX)"),
             _Field("include", ["**/*.html"], inline="glob whitelist"),
             _Field("exclude", ["**/nav/**"], inline="glob blacklist (framework/nav noise)"),
@@ -654,6 +675,10 @@ class SourceConfig:
     min_content_chars: int
     audience: list[str]
     insertion: str = ""
+    # Enrichment profile layered on top of the extension-chosen parser (see profiles.py).
+    # Additive only: it annotates scope (instrument, applies_from) a generic parser cannot
+    # know is meaningful. Blank or unknown = generic parsing, unchanged.
+    profile: str = ""
     tier: str = "vendor"  # authority tier for ranking (Phase 8): internal | vendor. feedback ranks
     #                       above both via the separate feedback signal (feedback > internal > vendor).
     # Delimited/fixed-width data (Phase 10). `delimiter` overrides the by-extension default
@@ -834,6 +859,7 @@ class Config:
                     min_content_chars=int(s["min_content_chars"]),
                     audience=_strs(s["audience"]),
                     insertion=str(s.get("insertion", "")),
+                    profile=str(s.get("profile", "")),
                     tier=str(s.get("tier", "vendor")),
                     csv_delimiter=str(_csv_map(s).get("delimiter", "")),
                     csv_widths=tuple(int(w) for w in _csv_map(s).get("widths", []) or []),

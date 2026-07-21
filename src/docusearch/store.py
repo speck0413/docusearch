@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _MEMORY = ":memory:"
 
@@ -312,6 +312,21 @@ CREATE INDEX idx_stdf_results_doc_test ON stdf_results(doc_id, test_num);
 CREATE INDEX idx_stdf_results_doc_txt ON stdf_results(doc_id, test_txt);
 """
 
+# Migration 10 = profile-extracted scoping fields on the DOCUMENT.
+# A statement like "Instrument: UltraPin1600" or "V11.00.00 and later" governs the whole page,
+# so it belongs on the document: every one of that page's chunks inherits it by membership.
+# Storing it per-chunk would duplicate it N times and let the two drift. `restricts` is the one
+# genuinely per-chunk signal (a single paragraph saying "cannot"/"not supported"), so it stays
+# on chunks. NULL everywhere = not profiled, which is the generic-parser default.
+_SCHEMA_V10 = """
+ALTER TABLE documents ADD COLUMN instrument TEXT;
+ALTER TABLE documents ADD COLUMN applies_from TEXT;
+ALTER TABLE documents ADD COLUMN profile TEXT;
+ALTER TABLE chunks ADD COLUMN restricts INTEGER;
+CREATE INDEX idx_documents_instrument ON documents(instrument);
+CREATE INDEX idx_documents_applies_from ON documents(applies_from);
+"""
+
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
@@ -322,6 +337,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (7, _SCHEMA_V7),
     (8, _SCHEMA_V8),
     (9, _SCHEMA_V9),
+    (10, _SCHEMA_V10),
 )
 
 
@@ -475,13 +491,19 @@ class Store:
         audience: list[str] | None = None,
         mtime: float = 0.0,
         status: str = "active",
+        instrument: str = "",
+        applies_from: str = "",
+        profile: str = "",
     ) -> int:
-        """Insert a document row; returns its new integer id. ``path`` must be unique."""
+        """Insert a document row; returns its new integer id. ``path`` must be unique.
+
+        ``instrument``/``applies_from`` are profile-extracted scope for the WHOLE page, so
+        every chunk of it inherits them by membership (see profiles.py)."""
         cur = self._conn.execute(
             "INSERT INTO documents"
             "(path, source, source_version, title, doc_id, content_hash, content_type, fmt, "
-            " audience, mtime, ingested_at, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " audience, mtime, ingested_at, status, instrument, applies_from, profile) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 source,
@@ -495,6 +517,9 @@ class Store:
                 mtime,
                 _utcnow_iso(),
                 status,
+                instrument or None,
+                applies_from or None,
+                profile or None,
             ),
         )
         self._maybe_commit()
