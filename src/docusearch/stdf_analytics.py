@@ -5,6 +5,7 @@ tools — audit (two-file compare), site-to-site, trend across runs — built on
 
 from __future__ import annotations
 
+import math
 import re
 from collections import defaultdict
 from collections.abc import Sequence
@@ -920,6 +921,9 @@ def audit_report_html(
 _PROBLEM_FLAGS = ("added", "removed", "changed", "shifted", "uncorrelated", "site-shift",
                   "bimodal", "long-tail", "outliers")
 _CPK_MARGINAL = 1.33  # the usual capability floor; below this a test is a yield risk
+_OUTLIER_SIGMA = 6.0  # a reach beyond this many sigma is a tail worth looking at
+_SITE_SIGMA = 1.0  # site means differing by more than one sigma is a hardware question
+_QQ_FLOOR = 0.95  # below this the two revisions no longer track each other
 
 
 def audit_problems(analyses: list[TestAnalysis]) -> list[TestAnalysis]:
@@ -1102,20 +1106,87 @@ def _problem_plot(run: StdfRun, a: TestAnalysis, label: str) -> str:
     return match.group(1) if match else ""
 
 
+def _shape_of(mom: Any, spread: float) -> str:
+    """Distribution shape from its moments: long tail, bimodal, skewed, or normal."""
+    if spread <= 0 or int(mom["n"] or 0) < 30:
+        return "normal"
+    m1 = float(mom["m1"] or 0.0)
+    m2, m3, m4 = float(mom["m2"] or 0.0), float(mom["m3"] or 0.0), float(mom["m4"] or 0.0)
+    var = m2 - m1 * m1
+    if var <= 0:
+        return "discrete"
+    sd_ = math.sqrt(var)
+    skew = (m3 - 3 * m1 * m2 + 2 * m1**3) / sd_**3
+    kurt = (m4 - 4 * m1 * m3 + 6 * m1 * m1 * m2 - 3 * m1**4) / var**2 - 3.0
+    if kurt > 2.0:
+        return "long-tail"
+    if kurt < -1.1:
+        return "bimodal"
+    if abs(skew) > 1.0:
+        return "skewed"
+    return "normal"
+
+
+def _qq_r2(qa: list[float], qb: list[float]) -> float | None:
+    """R² of one revision's quantiles against the other's — 1.0 means the same distribution
+    shape, and a low value means the two runs stopped agreeing."""
+    n = min(len(qa), len(qb))
+    if n < 5:
+        return None
+    xs, ys = qa[:n], qb[:n]
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0 or syy <= 0:
+        return None
+    return (sxy * sxy) / (sxx * syy)
+
+
+# The categories a pre-production review has to account for. Every test that trips any of these
+# is recorded; the report shows the worst of each and states the full count, so nothing is
+# silently dropped.
+_CATEGORIES = (
+    ("changed", "Changed — limits, test number, added or removed"),
+    ("uncorrelated", "Uncorrelated — the distribution stopped tracking the previous run"),
+    ("shifted", "Shifted — the mean moved"),
+    ("cpk", "Poor capability — Cpk below the floor"),
+    ("shape", "Shape — long tails, bimodal, skewed"),
+    ("site", "Site-to-site — one site disagrees with the others"),
+)
+
+
 def audit_spec_from_store(
     store: Any, doc_a: int, doc_b: int, *, label_a: str = "A", label_b: str = "B",
-    max_tests: int = 8,
+    max_tests: int = 8, mode: str = "problems", plot_cap: int = 40,
 ) -> dict[str, Any]:
-    """The problem-only audit, computed with SQL aggregates instead of materialised runs.
+    """A pre-production audit computed with SQL aggregates instead of materialised runs.
 
-    Rebuilding two revisions as objects cost 33s and ~18 GB before any analysis started, which is
-    what made an audit of 2,000 devices x 3,000 tests unusable. Everything here is grouped scans;
-    raw values are pulled only for the handful of tests that get plotted."""
-    import math
+    ``mode="problems"`` (default) reports only what needs investigating, grouped by category with
+    a full count for each so nothing is silently dropped. ``mode="full"`` walks EVERY test in the
+    program with its statistics, plotting the first ``plot_cap`` of them — a book to page through
+    rather than a review to sit in.
 
+    Deliberately not flagged: a test simply failing parts. Failures are a limit doing its job;
+    what needs investigating is a test behaving abnormally.
+    """
     stats_a = {r["test_txt"]: r for r in store.stdf_test_stats(doc_a)}
     stats_b = {r["test_txt"]: r for r in store.stdf_test_stats(doc_b)}
     part_a, part_b = store.stdf_part_summary(doc_a), store.stdf_part_summary(doc_b)
+    moments_b = {r["test_txt"]: r for r in store.stdf_moments(doc_b)}
+    sites_b: dict[str, list[tuple[int, float]]] = {}
+    for row in store.stdf_site_stats(doc_b):  # one grouped scan, not one query per test
+        if row["mean"] is not None:
+            sites_b.setdefault(str(row["test_txt"]), []).append(
+                (int(row["site"]), float(row["mean"]))
+            )
+    quants: dict[int, dict[str, list[float]]] = {}
+    for doc in (doc_a, doc_b):
+        table: dict[str, list[float]] = {}
+        for row in store.stdf_quantiles(doc):
+            if row["mean"] is not None:
+                table.setdefault(str(row["test_txt"]), []).append(float(row["mean"]))
+        quants[doc] = table
 
     def sd(row: Any) -> float:
         var = float(row["mean_sq"] or 0.0) - float(row["mean"] or 0.0) ** 2
@@ -1130,42 +1201,96 @@ def audit_spec_from_store(
         lows = (mean - float(lo)) / (3 * spread) if lo is not None else None
         return min(v for v in (ups, lows) if v is not None)
 
+    names = sorted(set(stats_a) | set(stats_b))
+    tally: dict[str, list[str]] = {key: [] for key, _lbl in _CATEGORIES}
     findings: list[tuple[float, str, dict[str, Any]]] = []
-    for name in sorted(set(stats_a) | set(stats_b)):
+
+    for name in names:
         a, b = stats_a.get(name), stats_b.get(name)
+        row = b if b is not None else a
+        if row is None:
+            continue
         reasons: list[str] = []
+        cats: list[str] = []
         capability = cpk(b) if b is not None else None
+        spread = sd(b) if b is not None else 0.0
+        mean = float(b["mean"] or 0.0) if b is not None else 0.0
+
         if a is None:
             reasons.append("new test in this run")
+            cats.append("changed")
         elif b is None:
             reasons.append("dropped since the last run")
+            cats.append("changed")
+        elif a["lo"] != b["lo"] or a["hi"] != b["hi"]:
+            reasons.append(
+                f"limits changed {a['lo']}…{a['hi']} -> {b['lo']}…{b['hi']}"
+            )
+            cats.append("changed")
+        elif int(a["test_num"] or 0) != int(b["test_num"] or 0):
+            reasons.append(f"test number {a['test_num']} -> {b['test_num']}")
+            cats.append("changed")
+
         if capability is not None and capability < _CPK_MARGINAL:
             reasons.append(f"Cpk {capability:.2f} (below {_CPK_MARGINAL})")
+            cats.append("cpk")
+
         if a is not None and b is not None:
-            ma, mb = float(a["mean"] or 0.0), float(b["mean"] or 0.0)
-            if ma and abs(mb - ma) / abs(ma) > 0.02:
-                reasons.append(f"mean moved {100 * (mb - ma) / ma:+.1f}%")
-            sa, sb = sd(a), sd(b)
-            if sa > 0 and sb > sa * 1.5:
-                reasons.append(f"spread widened {sb / sa:.1f}x")
-            if a["lo"] != b["lo"] or a["hi"] != b["hi"]:
-                reasons.append("limits changed")
-        if not reasons:
-            continue
-        row = b if b is not None else a
-        findings.append((
-            capability if capability is not None else 99.0, name,
-            {"row": row, "reasons": reasons, "doc": doc_b if b is not None else doc_a},
-        ))
-    findings.sort(key=lambda f: f[0])
-    chosen = findings[:max_tests]
+            ma = float(a["mean"] or 0.0)
+            if ma and abs(mean - ma) / abs(ma) > 0.02:
+                reasons.append(f"mean moved {100 * (mean - ma) / ma:+.1f}%")
+                cats.append("shifted")
+            sa = sd(a)
+            if sa > 0 and spread > sa * 1.5:
+                reasons.append(f"spread widened {spread / sa:.1f}x")
+                cats.append("shifted")
+            r2 = _qq_r2(quants[doc_a].get(name, []), quants[doc_b].get(name, []))
+            if r2 is not None and r2 < _QQ_FLOOR:
+                reasons.append(f"Q-Q R² {r2:.2f} — stopped tracking {label_a}")
+                cats.append("uncorrelated")
+
+        if b is not None:
+            mom = moments_b.get(name)
+            shape = _shape_of(mom, spread) if mom is not None else "normal"
+            if shape not in ("normal", "discrete"):
+                reasons.append(f"{shape} distribution")
+                cats.append("shape")
+            lo_seen, hi_seen = b["lo_seen"], b["hi_seen"]
+            if spread > 0 and lo_seen is not None and hi_seen is not None:
+                reach = max(abs(float(hi_seen) - mean), abs(mean - float(lo_seen))) / spread
+                if reach > _OUTLIER_SIGMA and "shape" not in cats:
+                    reasons.append(f"outliers to {reach:.1f}σ")
+                    cats.append("shape")
+            sites = sites_b.get(name, [])
+            if len(sites) > 1 and spread > 0:
+                means = [m for _s, m in sites]
+                if (max(means) - min(means)) / spread > _SITE_SIGMA:
+                    worst = max(sites, key=lambda sm: abs(sm[1] - mean))
+                    reasons.append(
+                        f"site-to-site {(max(means) - min(means)) / spread:.1f}σ "
+                        f"(site {worst[0]} furthest)"
+                    )
+                    cats.append("site")
+
+        for c in set(cats):
+            tally[c].append(name)
+        if reasons or mode == "full":
+            findings.append((
+                capability if capability is not None else 99.0, name,
+                {"row": row, "reasons": reasons, "cats": cats,
+                 "doc": doc_b if b is not None else doc_a},
+            ))
+
+    findings.sort(key=lambda f: (f[0], f[1]))
+    flagged = [f for f in findings if f[2]["reasons"]]
+    shown = findings if mode == "full" else flagged[:max_tests]
 
     def pct(row: Any) -> float:
         return 100.0 * float(row["bin1"] or 0) / float(row["parts"] or 1)
 
     lines = [
-        f"- Yield {pct(part_b):.1f}% ({part_b['bin1']}/{part_b['parts']}), "
-        f"was {pct(part_a):.1f}% ({part_a['bin1']}/{part_a['parts']}) [GK]"
+        f"- Yield {pct(part_b):.1f}% ({part_b['bin1']:,}/{part_b['parts']:,}), "
+        f"was {pct(part_a):.1f}% ({part_a['bin1']:,}/{part_a['parts']:,}) [GK]"
     ]
     for label, key in (("bin 1", "t_bin1"), ("all bins", "t_all")):
         now, before = part_b[key], part_a[key]
@@ -1174,42 +1299,71 @@ def audit_spec_from_store(
                 f"- Test time ({label}) {now / 1000:.2f}s/part, was {before / 1000:.2f}s "
                 f"({100 * (now - before) / before:+.1f}%) [GK]"
             )
-    lines.append(f"- {len(findings)} test(s) need review out of {len(set(stats_a) | set(stats_b))} [GK]")
+    lines.append(f"- {len(flagged):,} of {len(names):,} tests need investigation [GK]")
 
     sections: list[dict[str, Any]] = [
         {"heading": "Where this run stands", "kind": "overview", "body": "\n".join(lines)}
     ]
-    if not chosen:
-        sections.append({"heading": "Nothing flagged", "kind": "overview", "layout": "statement",
-                         "body": f"No test in {label_b} met a review threshold. [GK]"})
-    for capability, name, info in chosen:
+    # Every category is stated with its count, so a reviewer can see what was looked for and
+    # what was found — including the categories that came back clean.
+    sections.append({
+        "heading": "What was checked",
+        "kind": "test-program",
+        "body": "\n".join(
+            f"- {label}: {len(tally[key]):,} [GK]" for key, label in _CATEGORIES
+        ),
+    })
+    if mode != "full" and len(flagged) > len(shown):
+        sections[-1]["body"] += (
+            f"\n- Showing the {len(shown)} lowest-capability of {len(flagged):,}; "
+            f"the rest are listed in the appendix [GK]"
+        )
+
+    for capability, name, info in shown:
         row, reasons = info["row"], info["reasons"]
         images: list[str] = []
-        with suppress(Exception):  # a plot must never cost the finding it illustrates
-            values = store.stdf_test_values(info["doc"], name)
-            if values:
-                limits = [float(v) for v in (row["lo"], row["hi"]) if v is not None]
-                html = analytics.render_plot(
-                    "histogram", y=values, title=f"{name} — {label_b}", xlabel=name,
-                    ylabel="parts", vlines=limits, backend="matplotlib",
-                )
-                match = re.search(r'src="(data:image/[^"]+)"', html)
-                if match:
-                    images = [match.group(1)]
+        if len(images) == 0 and (mode != "full" or len([s for s in sections if s.get("images")]) < plot_cap):
+            with suppress(Exception):  # a plot must never cost the finding it illustrates
+                values = store.stdf_test_values(info["doc"], name)
+                if values:
+                    limits = [float(v) for v in (row["lo"], row["hi"]) if v is not None]
+                    html = analytics.render_plot(
+                        "histogram", y=values, title=f"{name} — {label_b}", xlabel=name,
+                        ylabel="parts", vlines=limits, backend="matplotlib",
+                    )
+                    match = re.search(r'src="(data:image/[^"]+)"', html)
+                    if match:
+                        images = [match.group(1)]
         lo = "—" if row["lo"] is None else f"{float(row['lo']):g}"
         hi = "—" if row["hi"] is None else f"{float(row['hi']):g}"
+        cap_txt = "—" if capability >= 99 else f"{capability:.2f}"
+        body = (
+            (f"- {'; '.join(reasons)} [GK]\n" if reasons else "- Within normal limits [GK]\n")
+            + f"- Cpk {cap_txt}, {row['n']:,} measurements, limits {lo} … {hi} "
+            f"{row['units'] or ''} [GK]"
+        )
         sections.append({
             "heading": name,
             "kind": "warning" if capability < 1.0 else "test-program",
-            "body": (
-                f"- {'; '.join(reasons)} [GK]\n"
-                f"- {row['rec_type'] or 'PTR'}, {row['n']:,} measurements, limits {lo} … {hi} "
-                f"{row['units'] or ''} [GK]"
-            ),
+            "body": body,
             "images": images,
         })
-    return {
-        "title": f"STDF audit — {label_b}",
-        "subtitle": f"{len(findings)} test(s) to review, compared with {label_a}",
-        "audience": ["test-eng"], "evidence": [], "sections": sections,
-    }
+
+    # Nothing is dropped: whatever did not earn a section is still named, with its reason.
+    if mode != "full" and len(flagged) > len(shown):
+        rest = flagged[len(shown):]
+        sections.append({
+            "heading": f"Also flagged ({len(rest):,})",
+            "kind": "reference",
+            "body": "\n".join(
+                f"- {name}: {'; '.join(info['reasons'])} [GK]" for _c, name, info in rest[:400]
+            ),
+        })
+
+    title = f"STDF audit — {label_b}" if mode != "full" else f"STDF full report — {label_b}"
+    subtitle = (
+        f"{len(flagged):,} test(s) to investigate, compared with {label_a}" if mode != "full"
+        else f"every test in the program ({len(names):,}), compared with {label_a}"
+    )
+    return {"title": title, "subtitle": subtitle, "audience": ["test-eng"], "evidence": [],
+            "sections": sections}

@@ -308,6 +308,8 @@ _SCHEMA_V9 = """
 DROP INDEX IF EXISTS idx_stdf_results_doc;
 DROP INDEX IF EXISTS idx_stdf_results_test;
 CREATE INDEX idx_stdf_results_doc_test ON stdf_results(doc_id, test_num);
+-- Analytics group and filter by test NAME, not number, so this is the index they actually use.
+CREATE INDEX idx_stdf_results_doc_txt ON stdf_results(doc_id, test_txt);
 """
 
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -748,13 +750,42 @@ class Store:
             (doc_id,),
         ).fetchall()
 
-    def stdf_site_stats(self, doc_id: int, test_txt: str) -> list[sqlite3.Row]:
-        """Per-site mean/spread for one test — the site-to-site check, again without materialising."""
+    def stdf_site_stats(self, doc_id: int) -> list[sqlite3.Row]:
+        """Per-site mean for EVERY test in one grouped scan.
+
+        One query per test is N+1 at the worst possible scale: three thousand tests against
+        seven million rows meant three thousand full scans, and the audit never returned."""
         return self._conn.execute(
-            "SELECT site, COUNT(result) AS n, AVG(result) AS mean, AVG(result*result) AS mean_sq "
-            "FROM stdf_results WHERE doc_id=? AND test_txt=? AND result IS NOT NULL "
-            "GROUP BY site ORDER BY site",
-            (doc_id, test_txt),
+            "SELECT test_txt, site, COUNT(result) AS n, AVG(result) AS mean "
+            "FROM stdf_results WHERE doc_id=? AND result IS NOT NULL "
+            "GROUP BY test_txt, site ORDER BY test_txt, site",
+            (doc_id,),
+        ).fetchall()
+
+    def stdf_quantiles(self, doc_id: int, buckets: int = 20) -> list[sqlite3.Row]:
+        """A quantile profile per test, in ONE windowed scan.
+
+        Shape and run-to-run correlation need the distribution, not just its mean — but pulling
+        raw values for three thousand tests is what made this intractable. Twenty bucket means
+        per test is ~68k rows for a whole program and enough to compare two revisions Q-Q and to
+        see a tail or a split population."""
+        return self._conn.execute(
+            "SELECT test_txt, bucket, AVG(result) AS mean FROM ("
+            "  SELECT test_txt, result, NTILE(?) OVER ("
+            "    PARTITION BY test_txt ORDER BY result) AS bucket"
+            "  FROM stdf_results WHERE doc_id=? AND result IS NOT NULL"
+            ") GROUP BY test_txt, bucket ORDER BY test_txt, bucket",
+            (buckets, doc_id),
+        ).fetchall()
+
+    def stdf_moments(self, doc_id: int) -> list[sqlite3.Row]:
+        """Third and fourth moments per test — skew and kurtosis, for spotting shape problems."""
+        return self._conn.execute(
+            "SELECT test_txt, COUNT(result) AS n, AVG(result) AS m1, "
+            "AVG(result*result) AS m2, AVG(result*result*result) AS m3, "
+            "AVG(result*result*result*result) AS m4 "
+            "FROM stdf_results WHERE doc_id=? AND result IS NOT NULL GROUP BY test_txt",
+            (doc_id,),
         ).fetchall()
 
     def stdf_test_values(self, doc_id: int, test_txt: str, limit: int = 20000) -> list[float]:

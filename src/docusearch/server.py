@@ -781,6 +781,7 @@ class Service:
     def stdf_audit_report(
         self, doc_a: int, doc_b: int, *, fmt: str = "pptx", base_url: str = "",
         label_a: str = "", label_b: str = "", max_tests: int = 8,
+        mode: str = "problems", plot_cap: int = 40,
         store: str | None = None, user: str | None = None, groups: set[str] | None = None,
     ) -> dict[str, Any]:
         """An STDF audit as a saved report file, built ENTIRELY IN CODE.
@@ -801,7 +802,7 @@ class Service:
             spec = stdf_analytics.audit_spec_from_store(
                 db, doc_a, doc_b,
                 label_a=label_a or f"document {doc_a}", label_b=label_b or f"document {doc_b}",
-                max_tests=max_tests,
+                max_tests=max_tests, mode=mode, plot_cap=plot_cap,
             )
         spec["theme"] = self.config.reports.theme
         spec["model"] = "computed by docusearch (no model)"
@@ -1700,17 +1701,23 @@ def build_mcp(service: Service, config: Config) -> Any:
     @mcp.tool()
     def stdf_audit_report(
         doc_a: int, doc_b: int, fmt: str = "pptx", label_a: str = "", label_b: str = "",
-        max_tests: int = 8, store: str | None = None,
+        max_tests: int = 8, mode: str = "problems", plot_cap: int = 40,
+        store: str | None = None,
         user: str | None = None, groups: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Compare two STDF documents and SAVE an audit report showing only what needs review —
-        yield, test time (bin 1 and all bins), then one section per problem test with its
-        distribution plotted. Written entirely by code, so it is reproducible: hand the user the
-        returned `url`. fmt: pptx | docx | html | html-slide | pdf | md | xlsx."""
+        """Compare two STDF documents and SAVE an audit report. Written entirely by code, so it
+        is reproducible: hand the user the returned `url`.
+
+        mode="problems" (default) is the pre-production check — yield, test time (bin 1 and all
+        bins), a count for every category looked at (changed / uncorrelated / shifted / poor Cpk /
+        shape / site), then the worst offenders with their distributions plotted and the rest
+        named in an appendix so nothing is dropped. mode="full" walks EVERY test with its stats,
+        plotting the first `plot_cap`. fmt: pptx | docx | html | html-slide | pdf | md | xlsx."""
         try:
             return service.stdf_audit_report(
                 doc_a, doc_b, fmt=fmt, base_url=base, label_a=label_a, label_b=label_b,
-                max_tests=max_tests, store=store, user=user, groups=_grp(groups),
+                max_tests=max_tests, mode=mode, plot_cap=plot_cap,
+                store=store, user=user, groups=_grp(groups),
             )
         except (PermissionError, ValueError) as err:
             return {"error": "STDF", "message": str(err)}
