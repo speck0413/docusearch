@@ -24,10 +24,39 @@ first. Claude Code reads the connection from `.mcp.json`; VS Code / Copilot from
 Every factual sentence you write from the catalog **must end with a citation tag**:
 
 - `[D:<doc_id>#<chunk_id>]` — the fact came from that catalog chunk (copy the `citation`
-  field from a search hit). The tag resolves to a clickable source URL.
+  field from a search hit).
 - `[GK]` — general knowledge you did **not** find in the catalog. Any sentence you can't
   back with a `[D:...]` chunk must be marked `[GK]`. Do not invent `[D:...]` tags — a
   report will be **refused** if it cites a chunk that wasn't in your search results.
+
+**A citation must always resolve to the original source document — never a bare id.**
+`D:<doc_id>#<chunk_id>` is an internal key, **not** a source, and the reader must never be
+shown one. In the report body, render each citation as a numbered footnote link to the
+References entry (e.g. `<sup><a href="#ref3">[3]</a></sup>`) — not as `[D:...]` text.
+Always end with a **References** section where every entry names the real document:
+*title — locator — path* (link the `url` when useful). A report that shows raw `D:` ids,
+or whose references are ids instead of documents, is **not acceptable**.
+
+## Report output format
+
+<!-- docusearch:output-format:start -->
+**Reports are files, and the server writes them — you deliver the link.**
+
+1. Call `report_format()` **before you draft.** It returns the operator's configured
+   default (`reports.default_format` in `docusearch.yaml`) and how to author for that
+   target — a deck needs short bullets, a spreadsheet one fact per row, a document prose.
+   The renderer cannot invent structure you did not write.
+2. **If the requester names a format, that wins** ("make me a PowerPoint" → `pptx`); the
+   configured default applies only when they did not say.
+3. Call `build_report(spec, fmt=...)`. It verifies every citation, saves the file under
+   `tmp_dir/reports/`, and returns `{fmt, filename, url, bytes}` — **give the user the
+   `url`.** Do not re-write the file yourself and never hand-format a report.
+
+One report, one file. All formats (`md`, `html`, `html-slide`, `pdf`, `docx`, `pptx`,
+`xlsx`) come back the same way, so this step never changes with the format.
+<!-- docusearch:output-format:end -->
+
+(`install.sh` rewrites the block above to whatever output format the operator chose.)
 
 ## Workflow
 
