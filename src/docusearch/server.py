@@ -2473,7 +2473,8 @@ def build_mcp(service: Service, config: Config) -> Any:
         a doc conflict, or an exemption that was applied). Every finding names the rule and its
         source document, so you can cite WHY a map is wrong."""
         try:
-            findings = igxl_rules.validate(igxl_rules.channel_map_from_spec(spec))
+            cmap = igxl_rules.channel_map_from_spec(spec)
+            findings = igxl_rules.validate(cmap)
         except (TypeError, ValueError, KeyError) as err:
             return {"error": "SPEC", "message": str(err)}
         out = [
@@ -2485,6 +2486,16 @@ def build_mcp(service: Service, config: Config) -> Any:
             }
             for f in findings
         ]
+        # Operator guidance (user feedback): legal per the docs, but flagged by a user as
+        # wrong in practice. Surfaced as advisories keyed to what the map actually does.
+        triggers = igxl_rules.map_triggers(cmap)
+        if triggers:
+            with Store.open(config.paths.db_path) as gdb:
+                for trig, text in gdb.guidance_for("igxl", sorted(triggers), cmap.instrument):
+                    out.append({
+                        "rule": trig, "severity": "advisory",
+                        "detail": text, "source": "operator feedback",
+                    })
         violations = [f for f in out if f["severity"] == "violation"]
         return {
             "ok": not violations,

@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 _MEMORY = ":memory:"
 
@@ -354,6 +354,27 @@ _SCHEMA_V12 = """
 ALTER TABLE documents ADD COLUMN excludes TEXT;
 """
 
+# Migration 13 = operator guidance (user feedback that must reach the AI).
+# Feedback text today only re-ranks; it never reaches an agent, and annotations has no read
+# path. This is the store for clauses a USER authors — legal-but-wrong practice the vendor
+# docs do not state — surfaced by check_channel_map when a map trips the clause's trigger.
+# origin is 'user' by construction: AI-authored guidance is refused (a model already flattened
+# a scoped rule once; letting it write its own grounding would make such an error permanent).
+# Its own table, so a re-ingest (which owns documents/chunks/images) never touches it.
+_SCHEMA_V13 = """
+CREATE TABLE guidance (
+  id         INTEGER PRIMARY KEY,
+  profile    TEXT NOT NULL,
+  instrument TEXT,
+  trigger    TEXT NOT NULL,
+  text       TEXT NOT NULL,
+  author     TEXT,
+  origin     TEXT,
+  created_at TEXT
+);
+CREATE INDEX idx_guidance_lookup ON guidance(profile, trigger);
+"""
+
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
@@ -367,6 +388,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (10, _SCHEMA_V10),
     (11, _SCHEMA_V11),
     (12, _SCHEMA_V12),
+    (13, _SCHEMA_V13),
 )
 
 
@@ -1309,6 +1331,39 @@ class Store:
                 (text, model, sha256),
             )
         self._maybe_commit()
+
+    def add_guidance(
+        self, *, profile: str, trigger: str, text: str, instrument: str = "", author: str = ""
+    ) -> int:
+        """Record a user-authored guidance clause. origin is always 'user' (policy)."""
+        cur = self._conn.execute(
+            "INSERT INTO guidance(profile, instrument, trigger, text, author, origin, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'user', ?)",
+            (profile, instrument or None, trigger, " ".join(text.split()), author or None,
+             _utcnow_iso()),
+        )
+        self._maybe_commit()
+        return int(cur.lastrowid or 0)
+
+    def guidance_for(
+        self, profile: str, triggers: Sequence[str], instrument: str = ""
+    ) -> list[tuple[str, str]]:
+        """(trigger, text) clauses matching a profile + any of the raised triggers. An
+        instrument-scoped clause matches only its instrument; a blank-instrument clause is
+        general to the profile."""
+        if not triggers:
+            return []
+        marks = ",".join("?" * len(triggers))
+        rows = self._conn.execute(
+            f"SELECT trigger, text, instrument FROM guidance "
+            f"WHERE profile=? AND trigger IN ({marks})",
+            (profile, *triggers),
+        ).fetchall()
+        want = instrument.strip().lower()
+        return [
+            (str(r[0]), str(r[1])) for r in rows
+            if not r[2] or not want or want in str(r[2]).lower()
+        ]
 
     def count_relations(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0])
