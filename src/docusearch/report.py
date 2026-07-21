@@ -464,13 +464,51 @@ def _blocks_html(body: str, numbering: dict[tuple[int, int], int]) -> str:
     return "".join(html_parts)
 
 
+_TABLE_SEP_RE = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?$")
+
+
+def _split_row(line: str) -> list[str]:
+    """Cells of a pipe-table row, tolerating optional leading/trailing pipes."""
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _table_html(lines: list[str], numbering: dict[tuple[int, int], int]) -> str:
+    """A GitHub-style pipe table -> a real ``<table>``.
+
+    Agents write pipe tables constantly; without this they rendered as literal
+    ``| a | b |`` text in HTML reports (the docx/pptx path already got tables via
+    markdown-it, so only the hand-rolled HTML renderer was missing them).
+    """
+    header = _split_row(lines[0])
+    aligns = []
+    for spec in _split_row(lines[1]):
+        left, right = spec.startswith(":"), spec.endswith(":")
+        aligns.append("center" if left and right else "right" if right else "left")
+
+    def cell(tag: str, text: str, i: int) -> str:
+        align = aligns[i] if i < len(aligns) else "left"
+        style = f' style="text-align:{align}"' if align != "left" else ""
+        return f"<{tag}{style}>{_inline(text, numbering)}</{tag}>"
+
+    head = "".join(cell("th", c, i) for i, c in enumerate(header))
+    body = []
+    for ln in lines[2:]:
+        # pad/truncate to the header width so a ragged row cannot break the table
+        cells = (_split_row(ln) + [""] * len(header))[: len(header)]
+        body.append("<tr>" + "".join(cell("td", c, i) for i, c in enumerate(cells)) + "</tr>")
+    rows = "".join(body)
+    return f'<table class="grid"><thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table>'
+
+
 def _prose_html(text: str, numbering: dict[tuple[int, int], int]) -> str:
     out: list[str] = []
     for block in re.split(r"\n\s*\n", text.strip()):
         lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
         if not lines:
             continue
-        if all(re.match(r"[-*]\s+", ln) for ln in lines):
+        if len(lines) >= 2 and "|" in lines[0] and _TABLE_SEP_RE.match(lines[1]):
+            out.append(_table_html(lines, numbering))
+        elif all(re.match(r"[-*]\s+", ln) for ln in lines):
             items = "".join(f"<li>{_inline(ln[2:].strip(), numbering)}</li>" for ln in lines)
             out.append(f"<ul>{items}</ul>")
         elif all(re.match(r"\d+[.)]\s+", ln) for ln in lines):
@@ -719,6 +757,13 @@ border-bottom:1px solid var(--border);background:rgba(127,219,255,.045);}
 .card-body ul,.card-body ol{margin:.3em 0 .9em 1.25em;padding:0;}
 .card-body li{margin:.3em 0;}
 .card-body strong{color:#eaf4ff;}
+table.grid{width:100%;border-collapse:collapse;margin:.4em 0 1em;font-size:14px;
+display:block;overflow-x:auto;}
+table.grid th,table.grid td{border:1px solid var(--border);padding:7px 11px;
+text-align:left;vertical-align:top;}
+table.grid thead th{background:rgba(127,219,255,.06);color:var(--accent);
+font-weight:600;white-space:nowrap;}
+table.grid tbody tr:nth-child(even){background:rgba(255,255,255,.022);}
 pre.code{background:var(--code);border:1px solid var(--border);border-radius:10px;
 padding:14px 16px;overflow-x:auto;margin:.4em 0 1em;
 font:13.5px/1.55 "SF Mono",SFMono-Regular,Menlo,Consolas,monospace;color:#cfe8ff;}
