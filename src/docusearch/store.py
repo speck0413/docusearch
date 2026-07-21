@@ -747,6 +747,7 @@ class Store:
         the sum of squares (AVG(result*result) - mean^2), which SQLite can do in one pass."""
         return self._conn.execute(
             "SELECT test_txt, MIN(test_num) AS test_num, MAX(units) AS units, "
+            "MIN(id) AS first_seen, "
             "MAX(rec_type) AS rec_type, MAX(lo) AS lo, MAX(hi) AS hi, "
             "COUNT(result) AS n, AVG(result) AS mean, "
             "AVG(result * result) AS mean_sq, MIN(result) AS lo_seen, MAX(result) AS hi_seen, "

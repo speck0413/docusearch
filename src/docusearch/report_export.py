@@ -712,8 +712,11 @@ def _to_pptx(
                 holder._element.getparent().remove(holder._element)
             _place_picture(prs, slide, path)
             placed.add(sha)
-            with suppress(AttributeError, KeyError):
-                slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
+            if bdy.strip():
+                # `slide.notes_slide` CREATES the notes part on access, so an empty body must
+                # not reach it — 3,400 empty notes parts were costing 2.2 MB of pure overhead.
+                with suppress(AttributeError, KeyError):
+                    slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
             for extra_sha, (extra_path, extra_cap) in figs[1:]:
                 _figure_slide(prs, pic_layout, extra_path, extra_cap)
                 placed.add(extra_sha)

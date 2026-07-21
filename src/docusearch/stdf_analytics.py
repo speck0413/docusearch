@@ -1220,6 +1220,7 @@ def _relevant_plot(
             html = analytics.render_plot(
                 "whisker", series=[(label_a, va), (label_b, vb)],
                 title=f"{name} — {label_a} vs {label_b}", ylabel=name, backend="matplotlib",
+                compact=True,
             )
             return _data_uri(html)
 
@@ -1228,7 +1229,7 @@ def _relevant_plot(
         return ""
     html = analytics.render_plot(
         "histogram", y=values, title=f"{name} — {label_b}", xlabel=name, ylabel="parts",
-        vlines=limits, backend="matplotlib",
+        vlines=limits, backend="matplotlib", compact=True,
     )
     return _data_uri(html)
 
@@ -1241,13 +1242,18 @@ def _data_uri(html: str) -> str:
 def audit_spec_from_store(
     store: Any, doc_a: int, doc_b: int, *, label_a: str = "A", label_b: str = "B",
     max_tests: int = 8, mode: str = "problems", plot_cap: int = 40,
+    sort: str = "severity",
 ) -> dict[str, Any]:
     """A pre-production audit computed with SQL aggregates instead of materialised runs.
 
     ``mode="problems"`` (default) reports only what needs investigating, grouped by category with
     a full count for each so nothing is silently dropped. ``mode="full"`` walks EVERY test in the
-    program with its statistics, plotting the first ``plot_cap`` of them — a book to page through
-    rather than a review to sit in.
+    program with its statistics and its plot — a book to page through rather than a review to sit
+    in.
+
+    ``sort="severity"`` (default) puts the worst capability first, which is the order a reviewer
+    wants. ``sort="stdf"`` keeps the order the tests appear in the log, which is the order the
+    program runs them — the right one when reading alongside the test program itself.
 
     Deliberately not flagged: a test simply failing parts. Failures are a limit doing its job;
     what needs investigating is a test behaving abnormally.
@@ -1363,7 +1369,11 @@ def audit_spec_from_store(
                  "doc": doc_b if b is not None else doc_a},
             ))
 
-    findings.sort(key=lambda f: (f[0], f[1]))
+    if sort == "stdf":  # the order the program runs them, not the order they worry you
+        order = {n: int(r["first_seen"] or 0) for n, r in {**stats_a, **stats_b}.items()}
+        findings.sort(key=lambda f: order.get(f[1], 0))
+    else:
+        findings.sort(key=lambda f: (f[0], f[1]))
     flagged = [f for f in findings if f[2]["reasons"]]
     shown = findings if mode == "full" else flagged[:max_tests]
 
@@ -1414,14 +1424,15 @@ def audit_spec_from_store(
         lo = "—" if row["lo"] is None else f"{float(row['lo']):g}"
         hi = "—" if row["hi"] is None else f"{float(row['hi']):g}"
         cap_txt = "—" if capability >= 99 else f"{capability:.2f}"
-        body = (
-            (f"- {'; '.join(reasons)} [GK]\n" if reasons else "- Within normal limits [GK]\n")
-            + f"- Cpk {cap_txt}, {row['n']:,} measurements, limits {lo} … {hi} "
-            f"{row['units'] or ''} [GK]"
-        )
+        stats = (f"Cpk {cap_txt}, {row['n']:,} measurements, limits {lo} … {hi} "
+                 f"{row['units'] or ''}").strip()
+        # Every page states its disposition — what is wrong with this test, or that nothing is.
+        disposition = "; ".join(reasons) if reasons else "within normal limits"
+        head = f"{name} — {disposition}"
+        body = f"- {disposition.capitalize()} [GK]\n- {stats} [GK]"
         sections.append({
             # A findings slide is fixed: the test, why it is flagged, and the plot that shows it.
-            "heading": f"{name} — {reasons[0]}" if reasons else name,
+            "heading": head,
             "kind": "figure" if images else ("warning" if capability < 1.0 else "test-program"),
             "layout": "figure" if images else "",
             "body": body,
