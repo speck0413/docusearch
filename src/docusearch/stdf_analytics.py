@@ -1100,3 +1100,116 @@ def _problem_plot(run: StdfRun, a: TestAnalysis, label: str) -> str:
     )
     match = re.search(r'src="(data:image/[^"]+)"', html)
     return match.group(1) if match else ""
+
+
+def audit_spec_from_store(
+    store: Any, doc_a: int, doc_b: int, *, label_a: str = "A", label_b: str = "B",
+    max_tests: int = 8,
+) -> dict[str, Any]:
+    """The problem-only audit, computed with SQL aggregates instead of materialised runs.
+
+    Rebuilding two revisions as objects cost 33s and ~18 GB before any analysis started, which is
+    what made an audit of 2,000 devices x 3,000 tests unusable. Everything here is grouped scans;
+    raw values are pulled only for the handful of tests that get plotted."""
+    import math
+
+    stats_a = {r["test_txt"]: r for r in store.stdf_test_stats(doc_a)}
+    stats_b = {r["test_txt"]: r for r in store.stdf_test_stats(doc_b)}
+    part_a, part_b = store.stdf_part_summary(doc_a), store.stdf_part_summary(doc_b)
+
+    def sd(row: Any) -> float:
+        var = float(row["mean_sq"] or 0.0) - float(row["mean"] or 0.0) ** 2
+        return math.sqrt(var) if var > 0 else 0.0
+
+    def cpk(row: Any) -> float | None:
+        spread, mean = sd(row), float(row["mean"] or 0.0)
+        lo, hi = row["lo"], row["hi"]
+        if spread <= 0 or (lo is None and hi is None):
+            return None
+        ups = (float(hi) - mean) / (3 * spread) if hi is not None else None
+        lows = (mean - float(lo)) / (3 * spread) if lo is not None else None
+        return min(v for v in (ups, lows) if v is not None)
+
+    findings: list[tuple[float, str, dict[str, Any]]] = []
+    for name in sorted(set(stats_a) | set(stats_b)):
+        a, b = stats_a.get(name), stats_b.get(name)
+        reasons: list[str] = []
+        capability = cpk(b) if b is not None else None
+        if a is None:
+            reasons.append("new test in this run")
+        elif b is None:
+            reasons.append("dropped since the last run")
+        if capability is not None and capability < _CPK_MARGINAL:
+            reasons.append(f"Cpk {capability:.2f} (below {_CPK_MARGINAL})")
+        if a is not None and b is not None:
+            ma, mb = float(a["mean"] or 0.0), float(b["mean"] or 0.0)
+            if ma and abs(mb - ma) / abs(ma) > 0.02:
+                reasons.append(f"mean moved {100 * (mb - ma) / ma:+.1f}%")
+            sa, sb = sd(a), sd(b)
+            if sa > 0 and sb > sa * 1.5:
+                reasons.append(f"spread widened {sb / sa:.1f}x")
+            if a["lo"] != b["lo"] or a["hi"] != b["hi"]:
+                reasons.append("limits changed")
+        if not reasons:
+            continue
+        row = b if b is not None else a
+        findings.append((
+            capability if capability is not None else 99.0, name,
+            {"row": row, "reasons": reasons, "doc": doc_b if b is not None else doc_a},
+        ))
+    findings.sort(key=lambda f: f[0])
+    chosen = findings[:max_tests]
+
+    def pct(row: Any) -> float:
+        return 100.0 * float(row["bin1"] or 0) / float(row["parts"] or 1)
+
+    lines = [
+        f"- Yield {pct(part_b):.1f}% ({part_b['bin1']}/{part_b['parts']}), "
+        f"was {pct(part_a):.1f}% ({part_a['bin1']}/{part_a['parts']}) [GK]"
+    ]
+    for label, key in (("bin 1", "t_bin1"), ("all bins", "t_all")):
+        now, before = part_b[key], part_a[key]
+        if now and before:
+            lines.append(
+                f"- Test time ({label}) {now / 1000:.2f}s/part, was {before / 1000:.2f}s "
+                f"({100 * (now - before) / before:+.1f}%) [GK]"
+            )
+    lines.append(f"- {len(findings)} test(s) need review out of {len(set(stats_a) | set(stats_b))} [GK]")
+
+    sections: list[dict[str, Any]] = [
+        {"heading": "Where this run stands", "kind": "overview", "body": "\n".join(lines)}
+    ]
+    if not chosen:
+        sections.append({"heading": "Nothing flagged", "kind": "overview", "layout": "statement",
+                         "body": f"No test in {label_b} met a review threshold. [GK]"})
+    for capability, name, info in chosen:
+        row, reasons = info["row"], info["reasons"]
+        images: list[str] = []
+        with suppress(Exception):  # a plot must never cost the finding it illustrates
+            values = store.stdf_test_values(info["doc"], name)
+            if values:
+                limits = [float(v) for v in (row["lo"], row["hi"]) if v is not None]
+                html = analytics.render_plot(
+                    "histogram", y=values, title=f"{name} — {label_b}", xlabel=name,
+                    ylabel="parts", vlines=limits, backend="matplotlib",
+                )
+                match = re.search(r'src="(data:image/[^"]+)"', html)
+                if match:
+                    images = [match.group(1)]
+        lo = "—" if row["lo"] is None else f"{float(row['lo']):g}"
+        hi = "—" if row["hi"] is None else f"{float(row['hi']):g}"
+        sections.append({
+            "heading": name,
+            "kind": "warning" if capability < 1.0 else "test-program",
+            "body": (
+                f"- {'; '.join(reasons)} [GK]\n"
+                f"- {row['rec_type'] or 'PTR'}, {row['n']:,} measurements, limits {lo} … {hi} "
+                f"{row['units'] or ''} [GK]"
+            ),
+            "images": images,
+        })
+    return {
+        "title": f"STDF audit — {label_b}",
+        "subtitle": f"{len(findings)} test(s) to review, compared with {label_a}",
+        "audience": ["test-eng"], "evidence": [], "sections": sections,
+    }

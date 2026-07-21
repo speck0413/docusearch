@@ -731,6 +731,50 @@ class Store:
             "SELECT * FROM stdf_parts WHERE doc_id=? ORDER BY id", (doc_id,)
         ).fetchall()
 
+    def stdf_test_stats(self, doc_id: int) -> list[sqlite3.Row]:
+        """Per-test summary computed BY SQL: n, mean, spread, range, limits, pass count.
+
+        An audit needs statistics, not seven million Python objects — materialising a run cost
+        21s and 8.9 GB per revision, while this is a single grouped scan. Variance comes from
+        the sum of squares (AVG(result*result) - mean^2), which SQLite can do in one pass."""
+        return self._conn.execute(
+            "SELECT test_txt, MIN(test_num) AS test_num, MAX(units) AS units, "
+            "MAX(rec_type) AS rec_type, MAX(lo) AS lo, MAX(hi) AS hi, "
+            "COUNT(result) AS n, AVG(result) AS mean, "
+            "AVG(result * result) AS mean_sq, MIN(result) AS lo_seen, MAX(result) AS hi_seen, "
+            "SUM(passed) AS n_pass "
+            "FROM stdf_results WHERE doc_id=? AND result IS NOT NULL "
+            "GROUP BY test_txt ORDER BY test_txt",
+            (doc_id,),
+        ).fetchall()
+
+    def stdf_site_stats(self, doc_id: int, test_txt: str) -> list[sqlite3.Row]:
+        """Per-site mean/spread for one test — the site-to-site check, again without materialising."""
+        return self._conn.execute(
+            "SELECT site, COUNT(result) AS n, AVG(result) AS mean, AVG(result*result) AS mean_sq "
+            "FROM stdf_results WHERE doc_id=? AND test_txt=? AND result IS NOT NULL "
+            "GROUP BY site ORDER BY site",
+            (doc_id, test_txt),
+        ).fetchall()
+
+    def stdf_test_values(self, doc_id: int, test_txt: str, limit: int = 20000) -> list[float]:
+        """Raw values for ONE test — only the handful being plotted are ever pulled."""
+        rows = self._conn.execute(
+            "SELECT result FROM stdf_results WHERE doc_id=? AND test_txt=? AND result IS NOT NULL "
+            "LIMIT ?", (doc_id, test_txt, limit),
+        ).fetchall()
+        return [float(r[0]) for r in rows]
+
+    def stdf_part_summary(self, doc_id: int) -> sqlite3.Row:
+        """Yield and mean test time (bin 1 and all bins) for one document, in one query."""
+        row: sqlite3.Row = self._conn.execute(
+            "SELECT COUNT(*) AS parts, SUM(CASE WHEN hard_bin=1 THEN 1 ELSE 0 END) AS bin1, "
+            "AVG(CASE WHEN test_time_ms>0 THEN test_time_ms END) AS t_all, "
+            "AVG(CASE WHEN hard_bin=1 AND test_time_ms>0 THEN test_time_ms END) AS t_bin1 "
+            "FROM stdf_parts WHERE doc_id=?", (doc_id,),
+        ).fetchone()
+        return row
+
     def compact(self) -> None:
         """Reclaim free pages after a bulk load (VACUUM). Cheap to call, no-op when tidy."""
         with contextlib.suppress(sqlite3.Error):  # a locked db must not fail the ingest

@@ -791,13 +791,18 @@ class Service:
         rather than claims from the catalog — there is nothing to cite and nothing to invent."""
         from . import stdf_analytics
 
-        run_a = self._stdf_run(doc_a, store=store, user=user, groups=groups)
-        run_b = self._stdf_run(doc_b, store=store, user=user, groups=groups)
-        spec = stdf_analytics.audit_report_spec(
-            run_a, run_b,
-            label_a=label_a or f"document {doc_a}", label_b=label_b or f"document {doc_b}",
-            max_tests=max_tests,
-        )
+        # Access is gated the same way as any read, then the audit is computed with SQL
+        # aggregates — materialising both revisions as objects cost 33s and ~18 GB first.
+        for doc in (doc_a, doc_b):
+            if self.document_path(doc, store=store, user=user, groups=groups) is None:
+                raise ValueError(f"no readable STDF document with id {doc}")
+        cfg = self._target_config(store)
+        with Store.open(cfg.paths.db_path) as db:
+            spec = stdf_analytics.audit_spec_from_store(
+                db, doc_a, doc_b,
+                label_a=label_a or f"document {doc_a}", label_b=label_b or f"document {doc_b}",
+                max_tests=max_tests,
+            )
         spec["theme"] = self.config.reports.theme
         spec["model"] = "computed by docusearch (no model)"
         spec["request"] = f"STDF audit: document {doc_b} against document {doc_a}"
