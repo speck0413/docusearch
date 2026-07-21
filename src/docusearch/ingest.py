@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
+import json
 import os
 import re
 import time
@@ -1292,13 +1293,22 @@ def _write_stdf(
                     rule_id=key, note=value,
                 )
         result_rows.append((
-            doc_id, chunk_id, test.test_num, test.test_txt, test.result, "",
+            doc_id, chunk_id, test.test_num, test.test_txt, test.result, test.units,
             test.head, test.site, test.part_id, run.insertion, int(test.passed),
+            test.lo_limit, test.hi_limit, test.rec_type, test.pin,
+            json.dumps(test.conditions) if test.conditions else None,
         ))
     store.add_stdf_results(result_rows)
+    store.add_stdf_run(doc_id, (run.lot_id, run.sublot_id, run.part_typ, run.job_nam,
+                                run.insertion))
+    # Every record the log carried, so nothing in it is unrepresented in the database.
+    store.add_stdf_records([
+        (doc_id, ordv, name, json.dumps(fields))
+        for ordv, (name, fields) in enumerate(run.records)
+    ])
     store.add_stdf_parts([
         (doc_id, p.part_id, p.insertion, p.lot_id, p.sublot_id, p.wafer_id, p.x, p.y,
-         p.head, p.site, p.hard_bin, p.soft_bin, int(p.passed))
+         p.head, p.site, p.hard_bin, p.soft_bin, int(p.passed), p.test_time_ms)
         for p in run.parts
     ])
     result.chunks += len(run.tests) if per_test_chunks else 0

@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _MEMORY = ":memory:"
 
@@ -266,6 +266,39 @@ CREATE INDEX idx_code_symbols_kind ON code_symbols(language, kind);
 CREATE INDEX idx_code_symbols_name ON code_symbols(name);
 """
 
+# Migration 8 = the analytics inputs the DATA path was missing. Limits live on the test result and
+# elapsed time on the part, so an audit can be computed with SQL instead of re-parsing a 262 MB
+# log — which is what forced every analysis to read the original file.
+_SCHEMA_V8 = """
+ALTER TABLE stdf_results ADD COLUMN lo REAL;
+ALTER TABLE stdf_results ADD COLUMN hi REAL;
+ALTER TABLE stdf_results ADD COLUMN rec_type TEXT;
+ALTER TABLE stdf_results ADD COLUMN pin TEXT;
+ALTER TABLE stdf_results ADD COLUMN conditions TEXT;   -- JSON: the DTR conditions in force
+ALTER TABLE stdf_parts ADD COLUMN test_time_ms INTEGER;
+-- EVERY record the log contained, in file order, with its fields as JSON. The typed tables are
+-- the fast paths for analytics; this is the lossless copy, so a question about a MIR, WIR, WRR,
+-- HBR/SBR or PCR is answerable from the database rather than the original file.
+CREATE TABLE stdf_records (
+    id       INTEGER PRIMARY KEY,
+    doc_id   INTEGER REFERENCES documents(id),
+    ord      INTEGER,            -- position in the file, so order is preserved
+    rec_type TEXT,               -- Mir | Wir | Wrr | Hbr | Sbr | Pcr | Prr | Ptr | ...
+    fields   TEXT                -- JSON object of that record's fields
+);
+CREATE INDEX idx_stdf_records_doc  ON stdf_records(doc_id);
+CREATE INDEX idx_stdf_records_type ON stdf_records(rec_type);
+-- Run/MIR header, so a log's identity survives without the file.
+CREATE TABLE stdf_runs (
+    doc_id    INTEGER PRIMARY KEY REFERENCES documents(id),
+    lot_id    TEXT,
+    sublot_id TEXT,
+    part_typ  TEXT,
+    job_nam   TEXT,
+    insertion TEXT
+);
+"""
+
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
@@ -274,6 +307,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (5, _SCHEMA_V5),
     (6, _SCHEMA_V6),
     (7, _SCHEMA_V7),
+    (8, _SCHEMA_V8),
 )
 
 
@@ -565,25 +599,92 @@ class Store:
 
     def add_stdf_results(self, rows: Sequence[tuple]) -> None:  # type: ignore[type-arg]
         """Bulk-insert numeric test results (doc_id, chunk_id, test_num, test_txt, result, units,
-        head, site, part_id, insertion, passed) — the columns a non-AI tool / web UI queries."""
+        head, site, part_id, insertion, passed, lo, hi) — the columns a non-AI tool / web UI
+        queries, and everything the analytics need so an audit never re-reads the log."""
         if rows:
             self._conn.executemany(
                 "INSERT INTO stdf_results(doc_id, chunk_id, test_num, test_txt, result, units, "
-                "head, site, part_id, insertion, passed) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "head, site, part_id, insertion, passed, lo, hi, rec_type, pin, conditions) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rows,
             )
             self._maybe_commit()
 
     def add_stdf_parts(self, rows: Sequence[tuple]) -> None:  # type: ignore[type-arg]
         """Bulk-insert part touchdowns (doc_id, part_id, insertion, lot, sublot, wafer, x, y, head,
-        site, hard_bin, soft_bin, passed)."""
+        site, hard_bin, soft_bin, passed, test_time_ms)."""
         if rows:
             self._conn.executemany(
                 "INSERT INTO stdf_parts(doc_id, part_id, insertion, lot, sublot, wafer, x, y, "
-                "head, site, hard_bin, soft_bin, passed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "head, site, hard_bin, soft_bin, passed, test_time_ms) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rows,
             )
             self._maybe_commit()
+
+    def add_stdf_run(self, doc_id: int, row: tuple) -> None:  # type: ignore[type-arg]
+        """The run's MIR header (lot, sublot, part type, job, insertion)."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO stdf_runs(doc_id, lot_id, sublot_id, part_typ, job_nam, "
+            "insertion) VALUES (?,?,?,?,?,?)", (doc_id, *row),
+        )
+        self._maybe_commit()
+
+    def add_stdf_records(self, rows: Sequence[tuple]) -> None:  # type: ignore[type-arg]
+        """Bulk-insert raw records (doc_id, ord, rec_type, fields-json)."""
+        if rows:
+            self._conn.executemany(
+                "INSERT INTO stdf_records(doc_id, ord, rec_type, fields) VALUES (?,?,?,?)", rows
+            )
+            self._maybe_commit()
+
+    def stdf_records(
+        self, *, doc_id: int | None = None, rec_type: str = "", limit: int = 200
+    ) -> list[sqlite3.Row]:
+        """Raw records, optionally for one document and/or one record type."""
+        where: list[str] = []
+        args: list[object] = []
+        if doc_id is not None:
+            where.append("doc_id=?")
+            args.append(doc_id)
+        if rec_type:
+            where.append("rec_type=?")
+            args.append(rec_type.title())
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        return self._conn.execute(
+            f"SELECT doc_id, ord, rec_type, fields FROM stdf_records {clause} "
+            "ORDER BY doc_id, ord LIMIT ?", (*args, limit),
+        ).fetchall()
+
+    def stdf_record_types(self, doc_id: int | None = None) -> list[sqlite3.Row]:
+        """Which record types this log contained, and how many of each."""
+        clause = "WHERE doc_id=?" if doc_id is not None else ""
+        args = (doc_id,) if doc_id is not None else ()
+        return self._conn.execute(
+            f"SELECT rec_type, COUNT(*) AS n FROM stdf_records {clause} "
+            "GROUP BY rec_type ORDER BY n DESC", args,
+        ).fetchall()
+
+    def stdf_run_header(self, doc_id: int) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM stdf_runs WHERE doc_id=?", (doc_id,)
+        ).fetchone()
+        return row
+
+    def stdf_run_rows(self, doc_id: int) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+        """Every result and part for one document, for rebuilding a run WITHOUT re-reading the log.
+
+        This is the point of keeping STDF in the data path: a 262 MB file parses once at ingest,
+        and every audit afterwards is two indexed queries."""
+        results = self._conn.execute(
+            "SELECT test_num, test_txt, result, units, head, site, part_id, passed, lo, hi, "
+            "rec_type, pin, conditions FROM stdf_results WHERE doc_id=? ORDER BY id", (doc_id,)
+        ).fetchall()
+        parts = self._conn.execute(
+            "SELECT part_id, insertion, lot, sublot, wafer, x, y, head, site, hard_bin, "
+            "soft_bin, passed, test_time_ms FROM stdf_parts WHERE doc_id=? ORDER BY id", (doc_id,)
+        ).fetchall()
+        return results, parts
 
     def stdf_test_list(self) -> list[sqlite3.Row]:
         """Distinct (test_num, test_txt, n) across the store — a web UI's test picker."""

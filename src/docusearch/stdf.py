@@ -17,9 +17,11 @@ It is driven by YAML ``stdf.datalog_rules`` (``match`` regex → ``action`` set/
 from __future__ import annotations
 
 import io
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,10 @@ class StdfRun:
     insertion: str = ""
     tests: list[StdfTest] = field(default_factory=list)
     parts: list[StdfPart] = field(default_factory=list)
+    # Every record the parser saw, in file order, as (type, fields). The typed tables above are
+    # the fast paths for analytics; this is the lossless copy, so a question about a MIR, WIR,
+    # WRR, HBR/SBR or PCR can be answered without the original file.
+    records: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
 
 def _as_int(v: object, default: int = 0) -> int:
@@ -310,6 +316,10 @@ def parse_stdf_tests(
     pending: list[StdfTest] = []
     defaults: dict[int, _StaticFields] = {}  # first-record static fields per test number (run-scoped)
     for name, f in collected:
+        # TSR is skipped by request: those counters are routinely corrupt in real logs, so
+        # storing them would mean storing something known to be wrong.
+        if name != "Tsr":
+            run.records.append((name, {str(k): _plain(v) for k, v in dict(f).items()}))
         if name == "Mir":
             run.lot_id = str(f.get("LOT_ID") or "")
             run.sublot_id = str(f.get("SBLOT_ID") or "")
@@ -359,3 +369,64 @@ def stdf_test_text(t: StdfTest) -> str:
     if t.conditions:
         parts.append("COND " + " ".join(f"{k}={v}" for k, v in sorted(t.conditions.items())))
     return " ".join(parts)
+
+
+def _plain(value: Any) -> Any:
+    """A record field reduced to something JSON can hold, without losing what it said."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return value.hex()
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return str(value)
+
+
+def run_from_store(store: Any, doc_id: int, *, insertion: str = "") -> StdfRun:
+    """Rebuild a run from the DATA path instead of re-reading the log.
+
+    STDF is parsed once, at ingest, into ``stdf_results``/``stdf_parts``; every analysis after
+    that is two indexed queries. Re-parsing a 262 MB log for each audit is what made the report
+    unusable at real volume, and the tables already hold everything the analytics read.
+
+    Everything the parser produces round-trips: results with their limits, units, record type
+    and per-pin identity, the DTR conditions in force, every part touchdown with its bins and
+    elapsed time, and the run's MIR header.
+    """
+    results, parts = store.stdf_run_rows(doc_id)
+    header = store.stdf_run_header(doc_id)
+    run = StdfRun(insertion=insertion)
+    if header is not None:
+        run.lot_id = str(header["lot_id"] or "")
+        run.sublot_id = str(header["sublot_id"] or "")
+        run.part_typ = str(header["part_typ"] or "")
+        run.job_nam = str(header["job_nam"] or "")
+        run.insertion = insertion or str(header["insertion"] or "")
+    for r in results:
+        run.tests.append(
+            StdfTest(
+                test_num=int(r["test_num"] or 0), test_txt=str(r["test_txt"] or ""),
+                result=r["result"], head=int(r["head"] or 1), site=int(r["site"] or 1),
+                passed=bool(r["passed"]), part_id=str(r["part_id"] or ""),
+                lo_limit=r["lo"], hi_limit=r["hi"], units=str(r["units"] or ""),
+                rec_type=str(r["rec_type"] or "PTR"),
+                pin=int(r["pin"]) if r["pin"] is not None else None,
+                conditions=json.loads(r["conditions"]) if r["conditions"] else {},
+            )
+        )
+    for p in parts:
+        run.parts.append(
+            StdfPart(
+                lot_id=str(p["lot"] or ""), sublot_id=str(p["sublot"] or ""),
+                wafer_id=str(p["wafer"] or ""), x=p["x"], y=p["y"],
+                part_id=str(p["part_id"] or ""), head=int(p["head"] or 1),
+                site=int(p["site"] or 1), hard_bin=int(p["hard_bin"] or 0),
+                soft_bin=int(p["soft_bin"] or 0), passed=bool(p["passed"]),
+                insertion=str(p["insertion"] or insertion),
+                test_time_ms=int(p["test_time_ms"] or 0),
+            )
+        )
+    if run.parts:
+        run.lot_id = run.parts[0].lot_id
+        run.insertion = insertion or run.parts[0].insertion
+    return run
