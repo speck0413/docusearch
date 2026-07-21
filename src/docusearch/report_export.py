@@ -808,6 +808,14 @@ def _to_pptx(
                 placed.add(sha)
             for extra in holders[2:]:  # unused placeholders would show prompt text
                 extra._element.getparent().remove(extra._element)
+            # A table in a section WITHOUT a figure still has to render: _strip_table keeps it
+            # out of the bullets, so without this the numbers would simply vanish.
+            table = _markdown_table(bdy) if (n == 0 and pair is None) else None
+            if table:
+                sw, sh = int(prs.slide_width or 0), int(prs.slide_height or 0)
+                rows_h = min(int(sh * 0.42), len(table) * int(sh * 0.055))
+                _add_table(slide, table, int(sw * 0.08), int(sh - rows_h - sh * 0.10),
+                           int(sw * 0.84), rows_h)
             if n == 0 and bdy.strip():
                 # The full section text — INCLUDING any listing kept off the slide — belongs
                 # here, so nothing is lost by keeping the slide readable.
