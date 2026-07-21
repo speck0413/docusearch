@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _MEMORY = ":memory:"
 
@@ -327,6 +327,25 @@ CREATE INDEX idx_documents_instrument ON documents(instrument);
 CREATE INDEX idx_documents_applies_from ON documents(applies_from);
 """
 
+# Migration 11 = image descriptions survive a re-ingest.
+# `images` rows are owned by ingest: replacing a document DELETEs its image rows and re-adds
+# them, which silently discarded every description an agent had produced by actually looking
+# at the figure. A description is a property of the image CONTENT, not of the document row
+# that happens to reference it — and sha256 IS that content identity — so it lives in its own
+# table that ingest never writes. Expensive to produce, cheap to keep.
+_SCHEMA_V11 = """
+CREATE TABLE image_vision (
+  sha256      TEXT PRIMARY KEY,
+  vision_text TEXT NOT NULL,
+  vision_model TEXT,
+  origin      TEXT,
+  updated_at  TEXT
+);
+INSERT OR IGNORE INTO image_vision(sha256, vision_text, vision_model, origin, updated_at)
+  SELECT sha256, vision_text, vision_model, 'ingest', ''
+  FROM images WHERE vision_text IS NOT NULL AND vision_text != '';
+"""
+
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
@@ -338,6 +357,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (8, _SCHEMA_V8),
     (9, _SCHEMA_V9),
     (10, _SCHEMA_V10),
+    (11, _SCHEMA_V11),
 )
 
 
@@ -1219,12 +1239,21 @@ class Store:
         caption: str,
         num_bytes: int,
     ) -> None:
-        """Record an image (dedup by content sha; originals live under staging)."""
+        """Record an image (dedup by content sha; originals live under staging).
+
+        Any description previously produced for this CONTENT is restored onto the new row:
+        re-ingesting a page must not discard what an agent learned by looking at its figures."""
         self._conn.execute(
             "INSERT OR IGNORE INTO images(sha256, ext, doc_id, locator, alt, caption, bytes) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (sha256, ext, doc_id, locator, alt, caption, num_bytes),
         )
+        text, model = self.image_vision(sha256)
+        if text:
+            self._conn.execute(
+                "UPDATE images SET vision_text=?, vision_model=? WHERE sha256=?",
+                (text, model, sha256),
+            )
         self._maybe_commit()
 
     def count_relations(self) -> int:
@@ -1299,13 +1328,32 @@ class Store:
             return self._conn.execute(sql + " LIMIT ?", (limit,)).fetchall()
         return self._conn.execute(sql).fetchall()
 
-    def set_image_vision(self, sha256: str, text: str, model: str) -> None:
-        """Persist an image's vision OCR text + producing model (provenance, R-SRCH-5)."""
+    def set_image_vision(
+        self, sha256: str, text: str, model: str, origin: str = "ingest"
+    ) -> None:
+        """Persist an image's description keyed by CONTENT sha, so a re-ingest cannot drop it.
+
+        Also mirrored onto the current `images` row so existing readers/exports keep working;
+        `image_vision` is the durable copy (provenance, R-SRCH-5)."""
+        self._conn.execute(
+            "INSERT INTO image_vision(sha256, vision_text, vision_model, origin, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(sha256) DO UPDATE SET "
+            "vision_text=excluded.vision_text, vision_model=excluded.vision_model, "
+            "origin=excluded.origin, updated_at=excluded.updated_at",
+            (sha256, text, model, origin, _utcnow_iso()),
+        )
         self._conn.execute(
             "UPDATE images SET vision_text=?, vision_model=? WHERE sha256=?",
             (text, model, sha256),
         )
         self._maybe_commit()
+
+    def image_vision(self, sha256: str) -> tuple[str, str]:
+        """(description, model) for an image's content, or ("", "") if never described."""
+        row = self._conn.execute(
+            "SELECT vision_text, vision_model FROM image_vision WHERE sha256=?", (sha256,)
+        ).fetchone()
+        return (str(row[0] or ""), str(row[1] or "")) if row else ("", "")
 
     def documents_needing_summary(self, limit: int = 0) -> list[tuple[int, str]]:
         """``(doc_id, title)`` for ACTIVE documents that have no AI summary yet — the summary

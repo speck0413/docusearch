@@ -1141,6 +1141,35 @@ class Service:
             return None
         return path, _MEDIA_TYPES.get(ext, "application/octet-stream")
 
+    @staticmethod
+    def _vision_sidecar_path(cfg: Config, sha256: str) -> Path:
+        return Path(cfg.paths.staging_dir) / "images" / f"{sha256}.vision.json"
+
+    def _write_vision_sidecar(self, cfg: Config, sha256: str, text: str, model: str) -> None:
+        """Persist a description beside the image bytes it describes."""
+        import json as _json
+
+        path = self._vision_sidecar_path(cfg, sha256)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                _json.dumps({"sha256": sha256, "vision_text": text, "vision_model": model,
+                             "origin": "agent"}),
+                encoding="utf-8",
+            )
+        except OSError as err:  # never fail the caller over a cache write
+            runlog.log("vision.sidecar.failed", sha256=sha256, error=str(err))
+
+    def _read_vision_sidecar(self, cfg: Config, sha256: str) -> tuple[str, str]:
+        import json as _json
+
+        path = self._vision_sidecar_path(cfg, sha256)
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "", ""
+        return str(data.get("vision_text") or ""), str(data.get("vision_model") or "")
+
     def image_meta(
         self, sha256: str, *, store: str | None = None, user: str | None = None,
         groups: set[str] | None = None,
@@ -1157,14 +1186,21 @@ class Service:
         if row is None:
             return None
         keys = row.keys() if hasattr(row, "keys") else []
+        with Store.open(cfg.paths.db_path) as sdb:
+            vtext, vmodel = sdb.image_vision(sha256)  # survives a re-ingest
+            if not vtext:
+                # DB was rebuilt/deleted; the sidecar beside the bytes is the survivor.
+                vtext, vmodel = self._read_vision_sidecar(cfg, sha256)
+                if vtext:
+                    sdb.set_image_vision(sha256, vtext, vmodel, origin="agent")
         return {
             "sha256": sha256,
             "caption": str(row["caption"] or "") if "caption" in keys else "",
             "alt": str(row["alt"] or "") if "alt" in keys else "",
             "locator": str(row["locator"] or "") if "locator" in keys else "",
             "doc_id": row["doc_id"] if "doc_id" in keys else None,
-            "vision_text": str(row["vision_text"] or "") if "vision_text" in keys else "",
-            "vision_model": str(row["vision_model"] or "") if "vision_model" in keys else "",
+            "vision_text": vtext,
+            "vision_model": vmodel,
         }
 
     def describe_image(
@@ -1187,11 +1223,14 @@ class Service:
             if row is None:
                 return {"error": "NOT_FOUND", "sha256": sha256}
             # sqlite3.Row: membership must be tested against keys(), not the Row itself
-            cols = list(row.keys()) if hasattr(row, "keys") else []
-            existing = str(row["vision_text"] or "") if "vision_text" in cols else ""
+            existing, _ = store_db.image_vision(sha256)
             if existing:
                 return {"sha256": sha256, "stored": False, "reason": "already described"}
-            store_db.set_image_vision(sha256, text, model)
+            store_db.set_image_vision(sha256, text, model, origin="agent")
+        # Sidecar beside the image bytes. The DB table survives a re-ingest; only this
+        # survives the DB being deleted or rebuilt, because it travels with the content
+        # it describes. Expensive to produce (a vision pass per figure), trivial to keep.
+        self._write_vision_sidecar(cfg, sha256, text, model)
         return {"sha256": sha256, "stored": True, "chars": len(text)}
 
 
