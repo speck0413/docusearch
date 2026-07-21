@@ -99,3 +99,12 @@ AI-initiated feedback is **not** accepted. Entries come from a user, or from a u
 an answer — then scope returns to the original. A model already flattened a scoped statement
 once; letting models write their own grounding would make such an error permanent.
 `annotations.origin` carries the distinction.
+
+## 7. build_report evidence-array friction
+
+**Why.** Three separate headless runs lost time discovering that `build_report` refuses
+inline `[D:...]` tags and requires an explicit `evidence: [[doc_id, chunk_id], ...]` array.
+The requirement is real (it is the hallucinated-citation guard) but undocumented in the tool.
+
+Fix: accept the inline `[D:...]` tags the renderer already parses as the evidence set, or
+state the `evidence` requirement in the `build_report` docstring. Small, and it recurs.
