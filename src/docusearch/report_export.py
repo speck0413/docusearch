@@ -466,7 +466,9 @@ def _body_placeholder(slide: Any) -> Any:
     return holders[0] if holders else None
 
 
-def _split_columns(points: list[tuple[int, str]]) -> tuple[list, list]:
+def _split_columns(
+    points: list[tuple[int, str]]
+) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
     """Split points into two columns, breaking at the second top-level item when there is one."""
     tops = [i for i, (level, _t) in enumerate(points) if level == 0]
     cut = tops[1] if len(tops) > 1 else (len(points) + 1) // 2
