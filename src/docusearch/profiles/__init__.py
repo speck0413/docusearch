@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+
+#: (mcp, service, base_url, config) -> None. Typed loosely so the seam does not import server.
+MCPRegistrar = Callable[[object, object, str, object], None]
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,23 @@ def register(profile: Profile) -> None:
 def get(name: str) -> Profile | None:
     """The profile for a source, or None for generic parsing (an unknown name is ignored)."""
     return PROFILES.get((name or "").strip().lower()) or None
+
+
+#: MCP tool registrars contributed by profiles. A profile that adds an MCP tool (e.g. a
+#: domain verifier) appends one here at import; ``build_mcp`` calls each so the generic server
+#: carries no profile-specific tool of its own. Empty in a product with no profile installed.
+MCP_REGISTRARS: list[MCPRegistrar] = []
+
+
+def register_mcp(fn: MCPRegistrar) -> None:
+    """A profile module calls this to contribute MCP tools (given mcp, service, base_url, config)."""
+    MCP_REGISTRARS.append(fn)
+
+
+def apply_mcp(mcp: object, service: object, base_url: str, config: object) -> None:
+    """Let every installed profile register its MCP tools on ``mcp``."""
+    for fn in MCP_REGISTRARS:
+        fn(mcp, service, base_url, config)
 
 
 def _discover() -> None:

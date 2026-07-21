@@ -29,19 +29,13 @@ from pydantic import BaseModel
 from . import (
     citations,
     embed,
+    profiles,
     report,
     report_export,
     report_store,
     runlog,
     search,
 )
-
-# Deployment-specific channel-map verifier. Ships as a gitignored profile module, so the
-# generic product may not have it — its MCP tool is registered only when it is present.
-try:
-    from .profiles import igxl_rules
-except ImportError:
-    igxl_rules = None  # type: ignore[assignment]
 from ._version import __version__
 from .catalog import Catalog, open_federation
 from .config import Config, SourceConfig, load
@@ -2457,61 +2451,10 @@ def build_mcp(service: Service, config: Config) -> Any:
         except (PermissionError, ValueError) as err:
             return {"error": "DESCRIBE", "message": str(err)}
 
-    # Registered below only when the igxl profile is installed (deployment-specific).
-    def check_channel_map(spec: dict[str, Any]) -> dict[str, Any]:
-        """Check a proposed IG-XL channel map against the documented rules BEFORE you report it.
-
-        A citation is verified; a channel map you invent is not — so a map that breaks every
-        documented rule will otherwise render happily. Call this on any map, pin map or scan
-        configuration you propose, fix what it returns, and call it again until it is clean.
-
-        `spec` keys (all optional — a rule whose inputs are absent simply does not run):
-          instrument      "UltraPin1600" | "UltraPin2200" | "HexVS" | "UltraVS256" |
-                          "UltraVS64" | "UltraVI80"   ("UltraVS" alone is ambiguous)
-          scan_type       "X2"|"X4"|"X8"|"Extended"|"X3"|"X6"|"X12"|"X24"
-          scan            {"site0": {"scan_in": [ch...], "scan_out": [ch...]}, ...}
-          pa_ports        [{"name": "spi", "channels": [ch...], "site": "site0"}]
-          rows            [{"pin": "...", "channel_type": "...", "cells": ["16.ch0", ...]}]
-          groups, pin_types, fpga_load, timing_mode, site_copy, expected_sites
-
-        Returns findings with a severity each: `violation` (illegal per an explicit documented
-        rule), `warning` (derived or a documented "should"), `advisory` (an instrument caveat,
-        a doc conflict, or an exemption that was applied). Every finding names the rule and its
-        source document, so you can cite WHY a map is wrong."""
-        try:
-            cmap = igxl_rules.channel_map_from_spec(spec)
-            findings = igxl_rules.validate(cmap)
-        except (TypeError, ValueError, KeyError) as err:
-            return {"error": "SPEC", "message": str(err)}
-        out = [
-            {
-                "rule": f.rule,
-                "severity": f.severity.value,
-                "detail": f.detail,
-                "source": f"{f.source} ({f.doc_title})" if f.doc_title else f.source,
-            }
-            for f in findings
-        ]
-        # Operator guidance (user feedback): legal per the docs, but flagged by a user as
-        # wrong in practice. Surfaced as advisories keyed to what the map actually does.
-        triggers = igxl_rules.map_triggers(cmap)
-        if triggers:
-            with Store.open(config.paths.db_path) as gdb:
-                for trig, text in gdb.guidance_for("igxl", sorted(triggers), cmap.instrument):
-                    out.append({
-                        "rule": trig, "severity": "advisory",
-                        "detail": text, "source": "operator feedback",
-                    })
-        violations = [f for f in out if f["severity"] == "violation"]
-        return {
-            "ok": not violations,
-            "violations": len(violations),
-            "findings": out,
-            "checked": len(igxl_rules.RULES),
-        }
-
-    if igxl_rules is not None:
-        mcp.tool()(check_channel_map)
+    # Deployment-specific profiles (gitignored) add their own MCP tools here — e.g. an IG-XL
+    # channel-map verifier. A product with no profile installed registers nothing extra, so
+    # the generic server carries no domain tool of its own.
+    profiles.apply_mcp(mcp, service, base, config)
 
     @mcp.tool()
     def report_format(fmt: str = "") -> dict[str, Any]:
