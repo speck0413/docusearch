@@ -81,7 +81,12 @@ FORMAT_GUIDANCE: dict[str, str] = {
         "the speaker notes, so a short slide loses nothing. Write the slide for the eye and the "
         "notes for the presenter.\n"
         "  * Code: only the lines that matter, in its own section. A full listing does not fit a "
-        "slide and never reads well on one."
+        "slide and never reads well on one.\n"
+        "  * CHOOSE THE SLIDE. A section may set `layout`: \"statement\" gives one large centred "
+        "line for a claim that should land on its own, and \"compare\" puts two lists side by "
+        "side for a this-versus-that. Nothing in the words reveals that intent, so say it. Used "
+        "once or twice in a deck these are what stop it looking generated; used everywhere they "
+        "lose their effect."
     ),
     "xlsx": (
         "A GRID, one row per point. Each list item should be one self-contained fact; nested "
@@ -143,6 +148,65 @@ def _sections(
     return [("", body, [])] if body else []
 
 
+def slide_layouts(sections: Sequence[Mapping[str, Any]] | None) -> list[str]:
+    """Each section's requested slide treatment, defaulting to "" (choose from the content).
+
+    A deck stops looking generated when the AUTHOR decides that this claim deserves a full-slide
+    statement and those two things belong side by side. Nothing in the content reveals that
+    intent, so it is declared."""
+    if not sections:
+        return []
+    return [str(sec.get("layout", "") or "").lower() for sec in sections]
+
+
+def _blocks(body: str) -> list[tuple[str, str]]:
+    """Split a body into ``("code"|"text", content)`` blocks.
+
+    ``_paragraphs`` flattened everything to lines, which left literal ``` fence markers in the
+    output and rendered code in the body font — unreadable, and the reason code stopped looking
+    like code."""
+    out: list[tuple[str, str]] = []
+    buf: list[str] = []
+    in_code = False
+    for raw in body.splitlines():
+        if raw.strip().startswith("```"):
+            if in_code and buf:
+                out.append(("code", "\n".join(buf)))
+            elif buf:
+                out.extend(("text", ln) for ln in buf)
+            buf, in_code = [], not in_code
+            continue
+        if in_code:
+            buf.append(xml_safe(raw.rstrip()))
+        elif raw.strip():
+            buf.append(xml_safe(raw.strip()))
+    if buf:
+        out.append(("code", "\n".join(buf))) if in_code else out.extend(
+            ("text", ln) for ln in buf
+        )
+    return out
+
+
+def _code_paragraph(doc: Any, text: str) -> None:
+    """A code block: monospace, shaded, kept together on the page.
+
+    Word has no reliable built-in code style, so this sets the font on the run — the one place a
+    literal font is correct, because prose type makes code unreadable no matter the theme."""
+    from docx.enum.text import WD_LINE_SPACING
+    from docx.shared import Pt, RGBColor
+
+    para = doc.add_paragraph()
+    _styled(para, "HTML Preformatted", "No Spacing", "Body Text")
+    para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    para.paragraph_format.space_after = Pt(8)
+    para.paragraph_format.keep_together = True
+    para.paragraph_format.left_indent = Pt(14)
+    run = para.add_run(text)
+    run.font.name = "Consolas"
+    run.font.size = Pt(9.5)
+    run.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A)
+
+
 def _paragraphs(body: str) -> list[str]:
     return [xml_safe(ln.strip()) for ln in body.splitlines() if ln.strip()]
 
@@ -187,7 +251,7 @@ def export_report(
         return _to_docx(title, subtitle, secs, meta, refs, figure_map=figure_map)
     if fmt == "pptx":
         return _to_pptx(title, subtitle, secs, meta, refs, template=pptx_template,
-                        figure_map=figure_map)
+                        figure_map=figure_map, layouts=slide_layouts(sections))
     if fmt == "xlsx":
         return _to_xlsx(title, secs, meta, refs)
     # PDF is a DOCUMENT. It is built from the MARKDOWN rendering — a plain document flow —
@@ -337,8 +401,11 @@ def _to_docx(
     for heading, bdy, sec_imgs in secs:
         if heading:
             doc.add_heading(xml_safe(heading), level=1)
-        for para in _paragraphs(bdy):
-            _styled(doc.add_paragraph(para), "Body Text")
+        for block, text in _blocks(bdy):
+            if block == "code":
+                _code_paragraph(doc, text)
+            else:
+                _styled(doc.add_paragraph(text), "Body Text")
         for sha in sec_imgs:  # this section's figures, beside the text they explain
             if sha in figure_map:
                 path, caption = figure_map[sha]
@@ -397,6 +464,35 @@ def _body_placeholder(slide: Any) -> Any:
             if holder.placeholder_format.type == kind:
                 return holder
     return holders[0] if holders else None
+
+
+def _split_columns(points: list[tuple[int, str]]) -> tuple[list, list]:
+    """Split points into two columns, breaking at the second top-level item when there is one."""
+    tops = [i for i, (level, _t) in enumerate(points) if level == 0]
+    cut = tops[1] if len(tops) > 1 else (len(points) + 1) // 2
+    return points[:cut], points[cut:]
+
+
+def _statement(prs: Any, slide: Any, text: str) -> None:
+    """One large centred line — the slide you use when a claim should land on its own."""
+    from pptx.enum.text import PP_ALIGN
+    from pptx.util import Pt
+
+    for holder in _content_holders(slide):
+        holder._element.getparent().remove(holder._element)
+    left = int(prs.slide_width * 0.1)
+    top = int(prs.slide_height * 0.34)
+    box = slide.shapes.add_textbox(left, top, prs.slide_width - 2 * left,
+                                   int(prs.slide_height * 0.4))
+    frame = box.text_frame
+    frame.word_wrap = True
+    para = frame.paragraphs[0]
+    para.text = xml_safe(text)
+    para.alignment = PP_ALIGN.CENTER
+    para.line_spacing = 1.2
+    for run in para.runs:
+        run.font.size = Pt(30 if len(text) < 120 else 24)
+        run.font.bold = True
 
 
 def _figure_slide(prs: Any, layout: Any, path: str, caption: str) -> None:
@@ -503,6 +599,7 @@ def _to_pptx(
     title: str, subtitle: str, secs: list[tuple[str, str, list[str]]], meta: list[str],
     refs: list[str],
     *, template: str = "", figure_map: Mapping[str, tuple[str, str]] | None = None,
+    layouts: Sequence[str] = (),
 ) -> bytes:
     """Build the deck from the template's LAYOUTS and PLACEHOLDERS.
 
@@ -544,8 +641,34 @@ def _to_pptx(
                 extra._element.getparent().remove(extra._element)
         points = _points(bdy)
         figs = [(sha, figure_map[sha]) for sha in sec_imgs if sha in figure_map]
-        chunks = _slide_chunks(points)
         head = xml_safe(heading) or xml_safe(title)
+        want = layouts[idx] if idx < len(layouts) else ""
+
+        if want == "statement" and points:
+            # one claim, full slide, nothing competing with it
+            slide = prs.slides.add_slide(_layout(prs, "Title Only", "Section Header", fallback=5))
+            if slide.shapes.title is not None:
+                slide.shapes.title.text = head
+            _statement(prs, slide, " ".join(t for _l, t in points))
+            with suppress(AttributeError, KeyError):
+                slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
+            continue
+        if want == "compare" and points:
+            left, right = _split_columns(points)
+            slide = prs.slides.add_slide(_layout(prs, "Comparison", "Two Content", fallback=3))
+            if slide.shapes.title is not None:
+                slide.shapes.title.text = head
+            holders = _content_holders(slide)
+            for holder, column in zip(holders, (left, right), strict=False):
+                _fill(holder, column)
+                _fit(holder.text_frame, column)
+            for extra in holders[2:]:
+                extra._element.getparent().remove(extra._element)
+            with suppress(AttributeError, KeyError):
+                slide.notes_slide.notes_text_frame.text = xml_safe(bdy.strip())
+            continue
+
+        chunks = _slide_chunks(points)
         for n, chunk in enumerate(chunks):
             pair = figs[0] if (n == 0 and figs and len(chunk) <= _SLIDE_BULLETS) else None
             layout = two_layout if pair is not None else body_layout

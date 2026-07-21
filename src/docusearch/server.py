@@ -454,10 +454,9 @@ class Service:
         the body against the evidence set first, so a hallucinated citation is refused in a pptx
         exactly as in HTML (R-CIT-1)."""
         fmt = (fmt or "md").lower()
-        assets = str(report_store.reports_dir(self.config.paths.tmp_dir) / "assets")
-        rendered = self.build_report(
-            spec, base_url=base_url, fmt=fmt, asset_dir=assets if fmt == "md" else ""
-        )
+        # Markdown embeds its figures: one self-contained file is what makes a .md easy to
+        # share. asset_dir stays available for a caller who wants files on disk instead.
+        rendered = self.build_report(spec, base_url=base_url, fmt=fmt)
         name = report_store.filename(str(spec.get("title", "report")), runlog.RUN_ID, fmt)
         path = report_store.write(self.config.paths.tmp_dir, name, rendered)
         report_store.sweep(self.config.paths.tmp_dir, self.config.reports.retain_days)

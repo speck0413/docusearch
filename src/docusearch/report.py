@@ -258,16 +258,17 @@ def render_report(
     refs = _references(ordered, base_url, ref_targets)
 
     figures = dict(figure_srcs or {})
-    if fmt == "md" and asset_dir:
-        # Markdown has no way to carry binary, so a data: URI is useless in a .md a human will
-        # open in an editor. Write every figure beside the file and link to it relatively —
-        # including the evidence-derived ones, which used to slip through as raw base64.
-        figures = _write_assets(figures, asset_dir)
-        embedded_images = [
-            (_write_asset(src, asset_dir, hashlib.sha256(src.encode()).hexdigest()[:16]),
-             clean_caption(cap))
-            for src, cap in embedded_images
-        ]
+    if fmt == "md":
+        embedded_images = [(src, clean_caption(cap)) for src, cap in embedded_images]
+        if asset_dir:
+            # Opt-in: write the figures beside the file instead of embedding them. Off by
+            # default because a single self-contained .md is far easier to share than a file
+            # plus a folder — markdown renderers do handle data: URIs.
+            figures = _write_assets(figures, asset_dir)
+            embedded_images = [
+                (_write_asset(src, asset_dir, hashlib.sha256(src.encode()).hexdigest()[:16]), cap)
+                for src, cap in embedded_images
+            ]
     fig_no = number_figures(secs, list(images))
     # bake the report-order label into each source so every renderer agrees on the numbering
     figures = {
@@ -955,6 +956,8 @@ _SLIDE_CSS = """
    gestures, and overscroll-behavior kills the rubber-band that made the deck feel broken. */
 html,body{height:100%;overflow:hidden;overscroll-behavior:none;}
 .deck{height:100vh;height:100dvh;width:100vw;position:relative;touch-action:pan-y;}
+/* The cover carries `on` in the markup, so a deck still shows something if the script fails
+   or is blocked — a blank page is the worst possible failure for a shared file. */
 .slide{position:absolute;inset:0;display:none;flex-direction:column;
 justify-content:center;padding:5vh 7vw 12vh;overflow-y:auto;-webkit-overflow-scrolling:touch;}
 .slide.on{display:flex;animation:slide-in .18s ease-out;}
@@ -967,6 +970,7 @@ color:var(--accent);display:flex;align-items:center;gap:.4em;}
 .slide.cover{justify-content:center;text-align:left;}
 .slide.cover .subtitle{font-size:clamp(16px,2vw,26px);color:var(--muted);margin:0 0 1.2em;}
 .deck-meta{color:var(--muted);font-size:14px;display:flex;flex-wrap:wrap;gap:.4em 1.4em;}
+.deck-count{color:var(--muted);font-size:13px;margin:1.4em 0 0;opacity:.8;}
 .refs-slide ol{font-size:clamp(13px,1.25vw,18px);}
 /* a figure shares its slide with the point it illustrates */
 .slide .figures.inline{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;margin:.6em 0 0;}
@@ -1008,7 +1012,9 @@ _SLIDE_JS = """
   s.forEach(function(el,k){el.classList.toggle('on',k===i);});
   if(bar)bar.style.width=((i+1)/s.length*100)+'%';
   if(now)now.textContent=(i+1)+' / '+s.length;
-  if(history.replaceState)history.replaceState(null,'','#'+(i+1));
+  // file:// + replaceState throws SecurityError on some mobile browsers, and an
+  // exception here would leave every slide display:none — a blank page.
+  try{if(history.replaceState)history.replaceState(null,'','#'+(i+1));}catch(e){}
  }
  var NEXT=['ArrowRight','ArrowDown','PageDown','Enter',' ','n','N'];
  var PREV=['ArrowLeft','ArrowUp','PageUp','Backspace','p','P'];
@@ -1081,12 +1087,13 @@ def _render_slides(
     meta_html = "".join(f"<span><b>{esc(k)}</b> {esc(v)}</span>" for k, v in meta)
     request_html = f'<div class="request"><span>Request</span> “{esc(request)}”</div>' if request else ""
     slides.append(
-        '<section class="slide cover"><p class="eyebrow">' + esc(classification) + "</p>"
+        '<section class="slide cover on"><p class="eyebrow">' + esc(classification) + "</p>"
         f"<h1>{esc(title)}</h1>"
         + (f'<p class="subtitle">{esc(subtitle)}</p>' if subtitle else "")
         + request_html
         + f'<div class="deck-meta">{meta_html}</div>'
         + f'<div class="ai-warning"><span class="wic">⚠️</span>{esc(_AI_WARNING)}</div>'
+        + f'<p class="deck-count">{len(secs)} sections · {len(refs)} sources</p>'
         + "</section>"
     )
     for heading, kind, body, sec_imgs in secs:

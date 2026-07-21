@@ -90,6 +90,11 @@ The user picks an effort level (default **medium**):
    `kind` for how it should read (`overview`, `procedure`, `code`, `hardware`, `config`,
    `test-program`, `warning`, `reference`) — it sets the icon and accent.
 
+   **For a deck, choose the slide.** A section may set `layout: statement` (one large centred
+   claim, alone on the slide) or `layout: compare` (two lists side by side). A section with
+   `images` is automatically laid out with the figure beside its points. Used once or twice
+   these are what stop a deck looking generated; used on every slide they lose their effect.
+
    Aim for something a person is glad to be handed, not a filled-in template.
 
    **Deliverables go IN the report, never to a local file.** Asked to produce a script, a
