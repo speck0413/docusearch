@@ -838,9 +838,26 @@ background:var(--bg);padding:14px 16px;
 display:flex;flex-direction:column;overflow:hidden;box-shadow:0 0 0 100vmax var(--bg);}
 body.panel-full .tabbar{position:fixed;top:0;left:0;right:0;z-index:1001;margin:0;
 background:var(--bg);padding:8px 16px 0;box-shadow:0 6px 18px -12px #000;}
+/* Whole-dashboard full screen: the tab bar travels WITH the data, so the view can be changed
+   without leaving it. The active panel takes the remaining height and scrolls inside. */
+.dash-full{background:var(--card2);border:1px solid var(--accent2);color:var(--accent);
+border-radius:8px;padding:7px 13px;font:inherit;font-weight:600;cursor:pointer;float:right;
+margin:14px 0 0;}
+.dash-full:hover{filter:brightness(1.12);}
+.dashwrap.dashfull{position:fixed;inset:0;z-index:1200;background:var(--bg);
+padding:10px 16px 14px;display:flex;flex-direction:column;overflow:hidden;}
+.dashwrap.dashfull .tabbar{margin-top:6px;flex:0 0 auto;}
+.dashwrap.dashfull .panel:not(.hidden){flex:1;display:flex;flex-direction:column;min-height:0;}
+.dashwrap.dashfull .tablepanel{flex:1;display:flex;flex-direction:column;min-height:0;}
+.dashwrap.dashfull .tablewrap{max-height:none;flex:1;}
+.dashwrap.dashfull .plotgrid{overflow:auto;flex:1;}
+body.dash-open{overflow:hidden;}
 .tablewrap{overflow:auto;max-height:60vh;border:1px solid var(--border);border-radius:10px;
 -webkit-overflow-scrolling:touch;}
 .tablepanel.full .tablewrap{max-height:none;flex:1;}
+/* a maximized plot tab scrolls its cards and grows them to use the room */
+.tablepanel.full .plotgrid{overflow:auto;flex:1;}
+.tablepanel.full .plotgrid img{max-width:100%;}
 .tablewrap table.grid thead th{position:sticky;top:0;z-index:3;}
 .expand-btn{background:var(--card2);border:1px solid var(--accent2);color:var(--accent);
 border-radius:8px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer;}

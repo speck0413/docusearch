@@ -390,7 +390,9 @@ def _plain(value: Any) -> Any:
     return str(value)
 
 
-def run_from_store(store: Any, doc_id: int, *, insertion: str = "") -> StdfRun:
+def run_from_store(
+    store: Any, doc_id: int, *, insertion: str = "", with_tests: bool = True
+) -> StdfRun:
     """Rebuild a run from the DATA path instead of re-reading the log.
 
     STDF is parsed once, at ingest, into ``stdf_results``/``stdf_parts``; every analysis after
@@ -401,7 +403,7 @@ def run_from_store(store: Any, doc_id: int, *, insertion: str = "") -> StdfRun:
     and per-pin identity, the DTR conditions in force, every part touchdown with its bins and
     elapsed time, and the run's MIR header.
     """
-    results, parts = store.stdf_run_rows(doc_id)
+    results, parts = store.stdf_run_rows(doc_id, with_results=with_tests)
     header = store.stdf_run_header(doc_id)
     run = StdfRun(insertion=insertion)
     if header is not None:

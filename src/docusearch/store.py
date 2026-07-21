@@ -685,14 +685,20 @@ class Store:
         ).fetchone()
         return row
 
-    def stdf_run_rows(self, doc_id: int) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+    def stdf_run_rows(
+        self, doc_id: int, *, with_results: bool = True
+    ) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
         """Every result and part for one document, for rebuilding a run WITHOUT re-reading the log.
 
         This is the point of keeping STDF in the data path: a 262 MB file parses once at ingest,
         and every audit afterwards is two indexed queries."""
+        # A caller that only needs the run's identity, definitions and parts (the dashboard
+        # streams its values separately) skips seven million rows entirely.
         results = self._conn.execute(
             "SELECT test_num, test_txt, result, units, head, site, part_id, passed, lo, hi, "
-            "rec_type, pin, conditions FROM stdf_results WHERE doc_id=? ORDER BY id", (doc_id,)
+            "rec_type, pin, conditions FROM stdf_results WHERE doc_id=? "
+            + ("" if with_results else "GROUP BY test_txt ")
+            + "ORDER BY id", (doc_id,)
         ).fetchall()
         parts = self._conn.execute(
             "SELECT part_id, insertion, lot, sublot, wafer, x, y, head, site, hard_bin, "
@@ -805,6 +811,40 @@ class Store:
             "AND result IS NOT NULL LIMIT ?", (doc_id, test_txt, limit),
         ).fetchall()
         return [(float(r[0]), int(r[1])) for r in rows]
+
+    def stdf_values_by_test(self, doc_id: int) -> dict[str, list[float]]:
+        """test name -> its values, straight from SQL.
+
+        The dashboard used to reach these by materialising every result as a Python object first
+        — fourteen million of them across two revisions, which cost minutes and ten gigabytes to
+        produce a dictionary the database can stream directly."""
+        out: dict[str, list[float]] = {}
+        for name, value in self._conn.execute(
+            "SELECT test_txt, result FROM stdf_results "
+            "WHERE doc_id=? AND result IS NOT NULL ORDER BY test_txt", (doc_id,)
+        ):
+            out.setdefault(str(name), []).append(float(value))
+        return out
+
+    def stdf_rec_types(self, doc_id: int) -> dict[str, str]:
+        """test name -> record type (PTR/MPR/FTR)."""
+        return {
+            str(r[0]): str(r[1] or "PTR")
+            for r in self._conn.execute(
+                "SELECT test_txt, MAX(rec_type) FROM stdf_results WHERE doc_id=? "
+                "GROUP BY test_txt", (doc_id,)
+            )
+        }
+
+    def stdf_site_values_by_test(self, doc_id: int) -> dict[str, dict[int, list[float]]]:
+        """test name -> {site -> values}, for the site tab and the site-shift flag."""
+        out: dict[str, dict[int, list[float]]] = {}
+        for name, site, value in self._conn.execute(
+            "SELECT test_txt, site, result FROM stdf_results "
+            "WHERE doc_id=? AND result IS NOT NULL ORDER BY test_txt, site", (doc_id,)
+        ):
+            out.setdefault(str(name), {}).setdefault(int(site), []).append(float(value))
+        return out
 
     def stdf_part_summary(self, doc_id: int) -> sqlite3.Row:
         """Yield and mean test time (bin 1 and all bins) for one document, in one query."""

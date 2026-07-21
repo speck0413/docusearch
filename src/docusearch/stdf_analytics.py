@@ -520,6 +520,26 @@ _DASHBOARD_JS = """
   var tp=btn.closest('.tablepanel');if(tp)setFull(tp,!tp.classList.contains('full'));});});
  document.addEventListener('keydown',function(e){if(e.key==='Escape')
   document.querySelectorAll('.tablepanel.full').forEach(function(tp){setFull(tp,false);});});
+ // whole-dashboard full screen: tabs travel WITH the data, so you can change view without
+ // leaving it. Uses the real Fullscreen API when the browser allows, and falls back to a fixed
+ // overlay so it still works from a file:// page.
+ var wrap=document.querySelector('.dashwrap');
+ var dfb=document.querySelector('.dash-full');
+ function dashFull(on){
+  if(!wrap)return;
+  wrap.classList.toggle('dashfull',on);
+  document.body.classList.toggle('dash-open',on);
+  if(dfb)dfb.textContent=on?'\\u2715 Close full screen':'\\u26f6 Full screen';
+  if(on&&wrap.requestFullscreen){try{wrap.requestFullscreen();}catch(e){}}
+  else if(!on&&document.fullscreenElement&&document.exitFullscreen){
+   try{document.exitFullscreen();}catch(e){}}
+ }
+ if(dfb)dfb.addEventListener('click',function(){
+  dashFull(!wrap.classList.contains('dashfull'));});
+ document.addEventListener('fullscreenchange',function(){
+  if(!document.fullscreenElement&&wrap&&wrap.classList.contains('dashfull'))dashFull(false);});
+ document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&wrap&&wrap.classList.contains('dashfull'))dashFull(false);});
  // switching tabs while maximized keeps the new view maximized too
  document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click',function(){
   if(!document.body.classList.contains('panel-full'))return;
@@ -550,6 +570,9 @@ _DASHBOARD_JS = """
 
 # a shared "expand this table to full window" button (wired in _DASHBOARD_JS)
 _EXPAND_BTN = '<button class="expand-btn">⛶ Full screen</button>'
+# The dashboard-level control: takes the tabs AND the active view full screen together, so the
+# view can be changed without dropping out of full screen.
+_FULL_BTN = '<button class="dash-full">⛶ Full screen</button>'
 
 # distribution shape → the coarse flag/chip it contributes (normal/skewed/sparse contribute none)
 _SHAPE_FLAG = {
@@ -782,6 +805,9 @@ def _pick_plotted(analyses: list[TestAnalysis], cap: int) -> list[TestAnalysis]:
 def audit_report_html(
     run_a: StdfRun, run_b: StdfRun, *, backend: str = "plotly",
     label_a: str = "A", label_b: str = "B", max_plots: int = 48,
+    values: tuple[dict[str, list[float]], dict[str, list[float]]] | None = None,
+    rec_types: dict[str, str] | None = None,
+    site_values: dict[str, dict[int, list[float]]] | None = None,
 ) -> str:
     """A themed, **tabbed, interactive** STDF audit dashboard (R-STDF-2), built for **thousands** of
     PTR/MPR/FTR tests. Six tabs on one page: **Explore** (every test classified on the CPU —
@@ -893,18 +919,25 @@ def audit_report_html(
         note = (f'<p class="stats">showing the {len(plotted)} most interesting tests '
                 "(largest shift · uncorrelated · shape anomalies · added/removed) — chips filter, the "
                 "sort button ranks by goodness.</p>") if view and cards else ""
+        # The plot tabs had no full-screen control at all — only the two table tabs did, so the
+        # views most worth filling the screen with were the ones you could not expand.
         return (f'<div class="panel hidden" data-p="{pid}">{bar}{sortbar}{note}'
-                f'<div class="plotgrid">{"".join(cards) or empty}</div></div>')
+                f'<div class="tablepanel">'
+                f'<div class="plotgrid">{"".join(cards) or empty}</div></div></div>')
 
     plotly_prefix = (
         analytics.plotly_js_tag() if backend == "plotly" and any((qq, hist, trend, site)) else ""
     )
     body = (
-        plotly_prefix + summary + tabbar + explore_panel + diff_panel
+        plotly_prefix + summary
+        # Tabs and panels live in ONE container so full screen takes both: you can change view
+        # without dropping out of it, which is the whole point of expanding.
+        + '<div class="dashwrap">' + _FULL_BTN + tabbar + explore_panel + diff_panel
         + panel("qq", qq, '<p class="stats">no tests to compare</p>', view="qq")
         + panel("hist", hist, '<p class="stats">no tests</p>', view="hist")
         + panel("trend", trend, '<p class="stats">no trend data</p>', view="trend")
         + panel("site", site, '<p class="stats">single-site data</p>', view="site")
+        + "</div>"
         + f"<script>{_DASHBOARD_JS}</script>"
     )
     return _page(
