@@ -423,7 +423,8 @@ _DASHBOARD_JS = """
   document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.dataset.t===name);});
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('hidden',x.dataset.p!==name);});
  }
- document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click',function(){tab(t.dataset.t);});});
+ // tab switching, full screen and expand are wired by _EARLY_JS, which runs before the plotly
+ // runtime so the controls respond while the rest of the page is still parsing.
  // sortable tables
  document.querySelectorAll('table.grid th.sortable').forEach(function(th){
   th.addEventListener('click',function(){
@@ -516,15 +517,14 @@ _DASHBOARD_JS = """
   if(bar)document.documentElement.style.setProperty('--tabbar-h',bar.offsetHeight+'px');
   document.body.classList.toggle('panel-full',!!document.querySelector('.tablepanel.full'));
  }
- document.querySelectorAll('.expand-btn').forEach(function(btn){btn.addEventListener('click',function(){
-  var tp=btn.closest('.tablepanel');if(tp)setFull(tp,!tp.classList.contains('full'));});});
+
  document.addEventListener('keydown',function(e){if(e.key==='Escape')
   document.querySelectorAll('.tablepanel.full').forEach(function(tp){setFull(tp,false);});});
  // whole-dashboard full screen: tabs travel WITH the data, so you can change view without
  // leaving it. Uses the real Fullscreen API when the browser allows, and falls back to a fixed
  // overlay so it still works from a file:// page.
  var wrap=document.querySelector('.dashwrap');
- var dfb=document.querySelector('.dash-full');
+ var dfb=null;
  function dashFull(on){
   if(!wrap)return;
   wrap.classList.toggle('dashfull',on);
@@ -565,6 +565,51 @@ _DASHBOARD_JS = """
    });
   });
  })();
+})();
+"""
+
+# Wired FIRST, before the plotly runtime, and by DELEGATION so it does not depend on the markup
+# existing yet. The handlers used to attach in a script at the very end of an 8 MB page, behind
+# ~5 MB of blocking JS — on a phone that is many seconds during which every button is dead.
+_EARLY_JS = """
+(function(){
+ function panel(name){
+  document.querySelectorAll('.tab').forEach(function(x){
+   x.classList.toggle('active', x.dataset.t===name);});
+  document.querySelectorAll('.panel').forEach(function(p){
+   p.classList.toggle('hidden', p.dataset.p!==name);});
+ }
+ function dashFull(on){
+  var w=document.querySelector('.dashwrap'); if(!w) return;
+  w.classList.toggle('dashfull', on);
+  document.body.classList.toggle('dash-open', on);
+  var b=document.querySelector('.dash-full');
+  if(b)b.textContent = on ? '\\u2715 Close full screen' : '\\u26f6 Full screen';
+  if(on && w.requestFullscreen){try{w.requestFullscreen();}catch(e){}}
+  else if(!on && document.fullscreenElement && document.exitFullscreen){
+   try{document.exitFullscreen();}catch(e){}}
+ }
+ // One delegated listener: works for markup that has not been parsed yet, and keeps working
+ // when a panel is re-rendered.
+ document.addEventListener('click', function(e){
+  var tab=e.target.closest('.tab');
+  if(tab){panel(tab.dataset.t); return;}
+  if(e.target.closest('.dash-full')){
+   var w=document.querySelector('.dashwrap');
+   dashFull(!(w && w.classList.contains('dashfull'))); return;}
+  var ex=e.target.closest('.expand-btn');
+  if(ex){var tp=ex.closest('.tablepanel');
+   if(tp){tp.classList.toggle('full');
+    ex.textContent = tp.classList.contains('full') ? '\\u2715 Close' : '\\u26f6 Full screen';
+    document.body.classList.toggle('panel-full', !!document.querySelector('.tablepanel.full'));}}
+ });
+ document.addEventListener('keydown', function(e){
+  if(e.key!=='Escape') return;
+  document.querySelectorAll('.tablepanel.full').forEach(function(tp){tp.classList.remove('full');});
+  document.body.classList.remove('panel-full');
+  var w=document.querySelector('.dashwrap');
+  if(w && w.classList.contains('dashfull')) dashFull(false);
+ });
 })();
 """
 
@@ -929,7 +974,7 @@ def audit_report_html(
         analytics.plotly_js_tag() if backend == "plotly" and any((qq, hist, trend, site)) else ""
     )
     body = (
-        plotly_prefix + summary
+        f"<script>{_EARLY_JS}</script>" + plotly_prefix + summary
         # Tabs and panels live in ONE container so full screen takes both: you can change view
         # without dropping out of it, which is the whole point of expanding.
         + '<div class="dashwrap">' + _FULL_BTN + tabbar + explore_panel + diff_panel
@@ -1137,6 +1182,48 @@ def _problem_plot(run: StdfRun, a: TestAnalysis, label: str) -> str:
     )
     match = re.search(r'src="(data:image/[^"]+)"', html)
     return match.group(1) if match else ""
+
+
+def _median_mode(quants: list[float]) -> tuple[float | None, float | None]:
+    """Median and modal value from a quantile profile.
+
+    The buckets are equal-COUNT, so the narrowest one is where the data is densest — that is the
+    mode. Both come free from the quantile scan already run for shape and correlation, with no
+    second pass over seven million rows."""
+    if not quants:
+        return None, None
+    n = len(quants)
+    mid = quants[n // 2] if n % 2 else (quants[n // 2 - 1] + quants[n // 2]) / 2
+    if n < 3:
+        return mid, mid
+    widths = [(quants[i + 1] - quants[i], i) for i in range(n - 1)]
+    _w, densest = min(widths, key=lambda w: (w[0], w[1]))
+    return mid, (quants[densest] + quants[densest + 1]) / 2
+
+
+def _stats_table(row: Any, spread: float, quants: list[float]) -> str:
+    """A markdown table of the numbers a reviewer checks: spread, centre and capability.
+
+    Markdown because every text format renders it as a real table, and the pptx writer turns it
+    into a PowerPoint table — one source, no per-format duplication."""
+    mean = float(row["mean"] or 0.0)
+    lo, hi = row["lo"], row["hi"]
+    median, mode = _median_mode(quants)
+    cpu = (float(hi) - mean) / (3 * spread) if (hi is not None and spread > 0) else None
+    cpl = (mean - float(lo)) / (3 * spread) if (lo is not None and spread > 0) else None
+    cpk = min([v for v in (cpu, cpl) if v is not None], default=None)
+
+    def num(value: float | None, digits: int = 4) -> str:
+        return "—" if value is None else f"{value:.{digits}g}"
+
+    return (
+        "| stat | value | stat | value |\n|---|---|---|---|\n"
+        f"| min | {num(row['lo_seen'])} | Cpk | {num(cpk, 3)} |\n"
+        f"| max | {num(row['hi_seen'])} | Cpu | {num(cpu, 3)} |\n"
+        f"| median | {num(median)} | Cpl | {num(cpl, 3)} |\n"
+        f"| mode | {num(mode)} | mean | {num(mean)} |\n"
+        f"| std dev | {num(spread)} | n | {int(row['n'] or 0):,} |\n"
+    )
 
 
 def _shape_of(mom: Any, spread: float) -> str:
@@ -1429,7 +1516,10 @@ def audit_spec_from_store(
         # Every page states its disposition — what is wrong with this test, or that nothing is.
         disposition = "; ".join(reasons) if reasons else "within normal limits"
         head = f"{name} — {disposition}"
-        body = f"- {disposition.capitalize()} [GK]\n- {stats} [GK]"
+        body = (
+            f"- {disposition.capitalize()} [GK]\n- {stats} [GK]\n\n"
+            + _stats_table(row, sd(row), quants[info["doc"]].get(name, []))
+        )
         sections.append({
             # A findings slide is fixed: the test, why it is flagged, and the plot that shows it.
             "heading": head,

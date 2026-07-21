@@ -306,6 +306,44 @@ _SLIDE_CODE_LINES = 6
 _DIVIDER_MIN_SECTIONS = 8  # below this a deck is short enough that dividers just pad it
 
 
+def _markdown_table(body: str) -> list[list[str]] | None:
+    """The first markdown table in a body, as rows of cells (None when there is none)."""
+    rows: list[list[str]] = []
+    for line in body.splitlines():
+        text = line.strip()
+        if not text.startswith("|"):
+            if rows:
+                break
+            continue
+        cells = [c.strip() for c in text.strip("|").split("|")]
+        if all(set(c) <= set("-: ") for c in cells):  # the |---|---| separator
+            continue
+        rows.append([xml_safe(c) for c in cells])
+    return rows or None
+
+
+def _strip_table(body: str) -> str:
+    """The body with its markdown table removed — the table is rendered separately."""
+    return "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("|"))
+
+
+def _add_table(slide: Any, rows: list[list[str]], left: int, top: int,
+               width: int, height: int) -> None:
+    """A real PowerPoint table, so the numbers are selectable rather than a picture of numbers."""
+    from pptx.util import Pt
+
+    shape = slide.shapes.add_table(len(rows), len(rows[0]), left, top, width, height)
+    table = shape.table
+    for r, cells in enumerate(rows):
+        for c, text in enumerate(cells):
+            cell = table.cell(r, c)
+            cell.text = text
+            for para in cell.text_frame.paragraphs:
+                for run in para.runs:
+                    run.font.size = Pt(10)
+                    run.font.bold = r == 0
+
+
 def _points(body: str, *, code_limit: int | None = None) -> list[tuple[int, str]]:
     """A body as ``(indent level, text)`` bullet points.
 
@@ -546,7 +584,9 @@ def _figure_slide(prs: Any, layout: Any, path: str, caption: str) -> None:
         _place_picture(prs, slide, path)
 
 
-def _place_picture(prs: Any, slide: Any, path: str) -> None:
+def _place_picture(prs: Any, slide: Any, path: str, *, left: int | None = None,
+                   top: int | None = None, max_w: int | None = None,
+                   max_h: int | None = None) -> None:
     """Centre a picture in the slide's usable area, scaled to fit.
 
     Geometry comes from the template's own slide size, so a 16:9 corporate deck and the default
@@ -554,9 +594,10 @@ def _place_picture(prs: Any, slide: Any, path: str) -> None:
     derived, never hardcoded."""
     from PIL import Image  # pillow ships with the vision extras; guarded by the caller
 
-    top_margin = int(prs.slide_height * 0.22)  # below the title
-    max_w = int(prs.slide_width * 0.86)
-    max_h = int(prs.slide_height - top_margin - prs.slide_height * 0.08)
+    top_margin = top if top is not None else int(prs.slide_height * 0.22)  # below the title
+    max_w = max_w if max_w is not None else int(prs.slide_width * 0.86)
+    max_h = (max_h if max_h is not None
+             else int(prs.slide_height - top_margin - prs.slide_height * 0.08))
     try:
         with Image.open(path) as img:
             ratio = img.height / img.width if img.width else 0.75
@@ -567,7 +608,7 @@ def _place_picture(prs: Any, slide: Any, path: str) -> None:
     if height > max_h:
         height = max_h
         width = int(height / ratio) if ratio else max_w
-    left = int((prs.slide_width - width) / 2)
+    left = left if left is not None else int((prs.slide_width - width) / 2)
     # A corrupt or unreadable image must cost its slide, never the whole report.
     with suppress(Exception):
         slide.shapes.add_picture(path, left, top_margin, width=width, height=height)
@@ -671,7 +712,7 @@ def _to_pptx(
                 divider.shapes.title.text = xml_safe(heading)
             for extra in _content_holders(divider):
                 extra._element.getparent().remove(extra._element)
-        points = _points(bdy, code_limit=_SLIDE_CODE_LINES)
+        points = _points(_strip_table(bdy), code_limit=_SLIDE_CODE_LINES)
         figs = [(sha, figure_map[sha]) for sha in sec_imgs if sha in figure_map]
         head = xml_safe(heading) or xml_safe(title)
         want = layouts[idx] if idx < len(layouts) else ""
@@ -710,7 +751,18 @@ def _to_pptx(
                 slide.shapes.title.text = head
             for holder in _content_holders(slide):
                 holder._element.getparent().remove(holder._element)
-            _place_picture(prs, slide, path)
+            table = _markdown_table(bdy)
+            if table:
+                # plot on the left, the numbers beside it — both derived from the same geometry
+                # so a 16:9 template and a 4:3 one each lay out correctly
+                sw, sh = int(prs.slide_width or 0), int(prs.slide_height or 0)
+                top = int(sh * 0.24)
+                usable_h = int(sh * 0.66)
+                _place_picture(prs, slide, path, left=int(sw * 0.04), top=top,
+                               max_w=int(sw * 0.56), max_h=usable_h)
+                _add_table(slide, table, int(sw * 0.62), top, int(sw * 0.34), usable_h)
+            else:
+                _place_picture(prs, slide, path)
             placed.add(sha)
             if bdy.strip():
                 # `slide.notes_slide` CREATES the notes part on access, so an empty body must
