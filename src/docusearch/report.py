@@ -955,7 +955,8 @@ _SLIDE_CSS = """
    for browsers without it. touch-action stops the tap-to-advance handler being eaten by scroll
    gestures, and overscroll-behavior kills the rubber-band that made the deck feel broken. */
 html,body{height:100%;overflow:hidden;overscroll-behavior:none;}
-.deck{height:100vh;height:100dvh;width:100vw;position:relative;touch-action:pan-y;}
+.deck{height:100vh;height:100dvh;width:100vw;position:relative;touch-action:pan-y;
+cursor:pointer;-webkit-tap-highlight-color:transparent;}
 /* The cover carries `on` in the markup, so a deck still shows something if the script fails
    or is blocked — a blank page is the worst possible failure for a shared file. */
 .slide{position:absolute;inset:0;display:none;flex-direction:column;
@@ -1030,18 +1031,27 @@ _SLIDE_JS = """
  var fb=document.querySelector('.fs');if(fb)fb.addEventListener('click',full);
  var nb=document.querySelector('.nx');if(nb)nb.addEventListener('click',function(){go(i+1);});
  var pb=document.querySelector('.pv');if(pb)pb.addEventListener('click',function(){go(i-1);});
- // advance on click, except on a link or a control
- document.addEventListener('click',function(e){
-  if(e.target.closest('a,button'))return;go(i+1);});
- // swipe on touch devices; the keyboard is not available on a phone
- var x0=null,y0=null;
+ // Touch first, and do NOT rely on `click`: iOS Safari does not fire click for taps on
+ // non-interactive elements, which is why tapping did nothing on a phone. touchend gives us
+ // both gestures — a horizontal drag is a swipe, a stationary tap is next/back by screen half.
+ var x0=null,y0=null,touched=0;
  document.addEventListener('touchstart',function(e){
-  if(e.touches.length!==1)return; x0=e.touches[0].clientX; y0=e.touches[0].clientY;},{passive:true});
+  if(e.touches.length!==1){x0=null;return;}
+  x0=e.touches[0].clientX; y0=e.touches[0].clientY;},{passive:true});
  document.addEventListener('touchend',function(e){
+  touched=Date.now();
   if(x0===null)return;
   var t=e.changedTouches[0],dx=t.clientX-x0,dy=t.clientY-y0;
-  if(Math.abs(dx)>40&&Math.abs(dx)>Math.abs(dy)){go(dx<0?i+1:i-1);}
+  var far=Math.abs(dx)>40&&Math.abs(dx)>Math.abs(dy);
+  var still=Math.abs(dx)<12&&Math.abs(dy)<12;
+  if(e.target&&e.target.closest&&e.target.closest('a,button')){x0=y0=null;return;}
+  if(far){go(dx<0?i+1:i-1);}
+  else if(still){go(t.clientX<window.innerWidth*0.25?i-1:i+1);}
   x0=y0=null;},{passive:true});
+ // desktop click-to-advance; skipped right after a touch so a tap never counts twice
+ document.addEventListener('click',function(e){
+  if(Date.now()-touched<700)return;
+  if(e.target&&e.target.closest&&e.target.closest('a,button'))return;go(i+1);});
  var start=parseInt((location.hash||'').replace('#',''),10);
  go(isNaN(start)?0:start-1);
 })();

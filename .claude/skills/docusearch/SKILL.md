@@ -90,10 +90,12 @@ The user picks an effort level (default **medium**):
    `kind` for how it should read (`overview`, `procedure`, `code`, `hardware`, `config`,
    `test-program`, `warning`, `reference`) — it sets the icon and accent.
 
-   **For a deck, choose the slide.** A section may set `layout: statement` (one large centred
-   claim, alone on the slide) or `layout: compare` (two lists side by side). A section with
-   `images` is automatically laid out with the figure beside its points. Used once or twice
-   these are what stop a deck looking generated; used on every slide they lose their effect.
+   **For a deck, the builder picks the slide** — a section with `images` is automatically laid
+   out with the figure beside its points, which is usually the right answer. A section *may*
+   override with `layout: statement` (one large centred claim) or `layout: compare` (two lists
+   side by side), but these are **rare**: at most one or two in a whole deck, and only when the
+   content genuinely is a single claim or a real this-versus-that. Their effect comes from
+   contrast with ordinary slides, so if in doubt leave `layout` unset.
 
    Aim for something a person is glad to be handed, not a filled-in template.
 

@@ -82,11 +82,11 @@ FORMAT_GUIDANCE: dict[str, str] = {
         "notes for the presenter.\n"
         "  * Code: only the lines that matter, in its own section. A full listing does not fit a "
         "slide and never reads well on one.\n"
-        "  * CHOOSE THE SLIDE. A section may set `layout`: \"statement\" gives one large centred "
-        "line for a claim that should land on its own, and \"compare\" puts two lists side by "
-        "side for a this-versus-that. Nothing in the words reveals that intent, so say it. Used "
-        "once or twice in a deck these are what stop it looking generated; used everywhere they "
-        "lose their effect."
+        "  * A section MAY set `layout`: \"statement\" for one large centred line, \"compare\" "
+        "for two lists side by side. These are RARE — at most one or two in a whole deck, and "
+        "only when the content genuinely is a single claim or a real this-versus-that. Reaching "
+        "for them repeatedly is worse than never using them: the effect comes from contrast with "
+        "ordinary slides, so if in doubt leave `layout` unset and let the builder choose."
     ),
     "xlsx": (
         "A GRID, one row per point. Each list item should be one self-contained fact; nested "
