@@ -634,9 +634,14 @@ class Service:
             embed_model=self.embed_info()["model"],
             sources=sources,
             images=list(spec.get("images", [])),
+            # Figures are placed with INTENT — a section lists the shas that belong in it, and
+            # they render inline in that section (figure_srcs below). We do NOT auto-embed every
+            # cited image: dumping all of them at the end adds no value, and every source is
+            # already reachable from the References. `embedded_images` stays available for a
+            # caller that deliberately wants a trailing figure set; the default is empty.
             embedded_images=report.evidence_images(
                 cfg.paths.db_path, cfg.paths.staging_dir, evidence
-            ),
+            ) if spec.get("embed_all_figures") else (),
             request=str(spec.get("request", "")),
             requested_by=str(spec.get("requested_by", "")),
             model=str(spec.get("model", "")),
@@ -2496,7 +2501,12 @@ def build_mcp(service: Service, config: Config) -> Any:
           title, subtitle                the heading
           body                           Markdown; every catalog fact ends in [D:doc#chunk],
                                          general knowledge in [GK]
-          sections                       optional [{heading, kind, body}] instead of one body
+          sections                       optional [{heading, kind, body, images}] instead of one
+                                         body. To SHOW a figure, add its sha to the `images` of
+                                         the section that discusses it — it renders inline,
+                                         renumbered in report order. Add a figure only where it
+                                         earns its place; do not list every image you saw. Every
+                                         cited source is already reachable from the References.
           evidence  **REQUIRED if you cite**  the (doc_id, chunk_id) pairs you retrieved, as
                                          [[doc_id, chunk_id], ...]. EVERY [D:doc#chunk] in the
                                          body must have its pair here — this is the

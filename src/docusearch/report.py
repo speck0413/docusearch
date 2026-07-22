@@ -271,23 +271,27 @@ def render_report(
     refs = _references(ordered, base_url, ref_targets)
 
     figures = dict(figure_srcs or {})
-    if fmt == "md":
-        embedded_images = [(src, clean_caption(cap)) for src, cap in embedded_images]
-        if asset_dir:
-            # Opt-in: write the figures beside the file instead of embedding them. Off by
-            # default because a single self-contained .md is far easier to share than a file
-            # plus a folder — markdown renderers do handle data: URIs.
-            figures = _write_assets(figures, asset_dir)
-            embedded_images = [
-                (_write_asset(src, asset_dir, hashlib.sha256(src.encode()).hexdigest()[:16]), cap)
-                for src, cap in embedded_images
-            ]
     fig_no = number_figures(secs, list(images))
     # bake the report-order label into each source so every renderer agrees on the numbering
     figures = {
         sha: (src, figure_label(fig_no.get(sha, i + 1), cap))
         for i, (sha, (src, cap)) in enumerate(figures.items())
     }
+    # Any trailing (opt-in) embedded figures CONTINUE the report-order numbering — they must not
+    # keep the source document's own "Figure 2" caption, which is what made the end-of-report
+    # figures look mis-numbered.
+    base_n = len(fig_no)
+    embedded_images = [
+        (src, figure_label(base_n + i + 1, cap)) for i, (src, cap) in enumerate(embedded_images)
+    ]
+    if fmt == "md" and asset_dir:
+        # Opt-in: write figures beside the file instead of embedding them. Off by default —
+        # a single self-contained .md is easier to share, and markdown renders data: URIs.
+        figures = _write_assets(figures, asset_dir)
+        embedded_images = [
+            (_write_asset(src, asset_dir, hashlib.sha256(src.encode()).hexdigest()[:16]), cap)
+            for src, cap in embedded_images
+        ]
     if fmt == "html-slide":
         return _render_slides(
             title, subtitle, header, meta, secs, numbering, refs, image_urls, embedded_images,

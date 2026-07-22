@@ -37,20 +37,26 @@ Levels use the **same words as the model harness's own effort setting** (`low`, 
 the report spec as `effort`, and the harness level (if you know it) as `model_effort` —
 they render as separate chips in the banner.
 
-## Figures — look before you cite
+## Figures — look before you cite, place with intent
 
-Search hits carry an `img` list. **A cited image chunk is embedded into the report**, so
-citing a figure you have not seen means placing it blind.
+Search hits carry an `img` list of figure shas.
 
 1. `get_image(sha256)` → returns the figure itself, plus any cached description.
 2. If it comes back with `cached: false`, you are the first to see it: read the image, then
    `describe_image(sha256, description)` with the CONTENT — states, values, channel/bit
-   assignments, axes, labels — not "a diagram of X".
+   assignments, axes, labels — not "a diagram of X". The description is cached for everyone
+   after you, so this cost is paid once per figure.
 3. Use what you saw in your answer, and cite the image chunk normally.
 
-The description is cached for everyone after you, so this cost is paid once per figure. Much
-of this catalog's real detail lives in figures, not prose — if a question looks unanswerable
-from text, open the figures before concluding the documentation does not cover it.
+Much of this catalog's real detail lives in figures, not prose — if a question looks
+unanswerable from text, open the figures before concluding the documentation does not cover it.
+
+**Showing a figure in the report is a deliberate choice, not automatic.** The report does NOT
+dump every image you cited. To display one, add its `sha` to the `images` of the *section that
+discusses it* — it renders inline, right after that section's text, renumbered in report order.
+Include a figure only where it earns its place (a diagram the reader needs to follow the
+point); a wall of figures at the end adds no value, and every source you cite is already
+reachable from the References.
 
 ## Tools (docusearch MCP)
 
