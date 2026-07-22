@@ -2490,12 +2490,33 @@ def build_mcp(service: Service, config: Config) -> Any:
     def build_report(spec: dict[str, Any], fmt: str = "md") -> dict[str, Any]:
         """Render a cited report and SAVE it on the server; returns {fmt, filename, url, bytes}
         — give the user the `url`, it is a direct link to the file. fmt: md | html | pdf | docx |
-        pptx | xlsx (all six write a file). md/html also return the text as `report`. Verifies
-        every citation and refuses hallucinated ones."""
+        pptx | xlsx (all six write a file). md/html also return the text as `report`.
+
+        `spec` keys:
+          title, subtitle                the heading
+          body                           Markdown; every catalog fact ends in [D:doc#chunk],
+                                         general knowledge in [GK]
+          sections                       optional [{heading, kind, body}] instead of one body
+          evidence  **REQUIRED if you cite**  the (doc_id, chunk_id) pairs you retrieved, as
+                                         [[doc_id, chunk_id], ...]. EVERY [D:doc#chunk] in the
+                                         body must have its pair here — this is the
+                                         anti-hallucination guard, so list a pair for each tag
+                                         BEFORE the first call (a missing pair is refused, not
+                                         inferred). e.g. body "…WDT_EN [D:812#2]" needs
+                                         evidence [[812, 2]].
+          audience, sources, model, effort, model_effort, classification, requested_by, request
+
+        Refuses (HALLUCINATED_CITATION) any [D:...] whose pair is not in `evidence`."""
         try:
             out = service.build_report_file(spec, base_url=base, fmt=fmt)
         except citations.CitationError as err:
-            return {"error": "HALLUCINATED_CITATION", "message": str(err)}
+            hint = ""
+            if not spec.get("evidence"):
+                hint = (
+                    " — you passed no `evidence`. Add evidence=[[doc_id, chunk_id], ...] with a "
+                    "pair for every [D:doc#chunk] cited in the body, then call again."
+                )
+            return {"error": "HALLUCINATED_CITATION", "message": f"{err}{hint}"}
         except (report_export.ExportDependencyError, ValueError) as err:
             return {"error": "EXPORT", "message": str(err)}
         out["authored_for"] = report_export.guidance(fmt)
