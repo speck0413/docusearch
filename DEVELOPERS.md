@@ -312,9 +312,16 @@ the pipeline. The red team greps for this.
 
 ```bash
 ruff check src/
-ruff format src/
+ruff format src/docusearch/<the_file_you_changed>.py   # NOT `ruff format src/` — see trap
 mypy            # config in pyproject: strict, packages = ["docusearch"], python_version 3.12
 ```
+
+> **Trap: `ruff format src/` reformats the whole tree, not your diff.** Parts of this codebase
+> are hand-aligned in ways ruff would rewrite, so a blanket format produces a 1,000-line diff
+> of unrelated churn — and it silently moved two `# type: ignore` comments off the lines they
+> covered, breaking `mypy` in files nobody touched. Format only the file you changed, and if a
+> `type: ignore` sits on a line reflow can move, prefer a `cast(...)` or a properly-typed
+> signature so the suppression can't drift.
 
 `ruff` is pinned at `0.14.0` and `mypy` at `1.20.0` in the `[dev]` extra. Lint selects
 `E,F,I,UP,B,SIM,PTH,W`; `PTH` is on deliberately — Windows 11 is a first-class target, so
