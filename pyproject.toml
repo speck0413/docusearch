@@ -186,6 +186,7 @@ no_implicit_reexport = false  # __init__.py re-exports the public API (R-ARCH-2)
 module = ["yaml", "sentence_transformers", "hnswlib", "anthropic", "fitz", "reportlab.*",
           "playwright", "playwright.*",
           "docx", "docx.*", "markdown_it", "markdown_it.*", "pptx", "pptx.*", "openpyxl",
+          "pygments", "pygments.*",
           "openpyxl.*", "pystdf", "pystdf.*", "matplotlib", "matplotlib.*", "plotly", "plotly.*",
           "tree_sitter_python", "tree_sitter_javascript", "tree_sitter_typescript",
           "tree_sitter_go", "tree_sitter_rust", "tree_sitter_java",

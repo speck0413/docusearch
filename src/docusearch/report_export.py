@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import citations
 
@@ -80,11 +80,11 @@ FORMAT_GUIDANCE: dict[str, str] = {
         "  * PUT THE DEPTH IN THE PROSE, not on the slide: the full section text is preserved in "
         "the speaker notes, so a short slide loses nothing. Write the slide for the eye and the "
         "notes for the presenter.\n"
-        "  * CODE ON A SLIDE ONLY IF IT IS SHORT — a handful of lines that can be read from the "
-        "back of a room. A full listing is unreadable at any font size, so a long one is kept "
-        "OFF the slide automatically and preserved in the speaker notes; the audience gets the "
-        "shape and the presenter has the text. If the listing IS the deliverable, say so and "
-        "point at the document version rather than trying to fit it on slides.\n"
+        "  * CODE RENDERS IN A SYNTAX-HIGHLIGHTED BOX beside the text — put a fenced ```code``` "
+        "block in the section (name the language on the fence, e.g. ```csharp, so it highlights). "
+        "A listing up to ~26 lines shows in the box; a longer one is kept off the slide and "
+        "preserved in the speaker notes. Keep the on-slide listing to the excerpt that makes the "
+        "point; if the whole listing IS the deliverable, point at the document version.\n"
         "  * A section MAY set `layout`: \"statement\" for one large centred line, \"compare\" "
         "for two lists side by side. These are RARE — at most one or two in a whole deck, and "
         "only when the content genuinely is a single claim or a real this-versus-that. Reaching "
@@ -214,6 +214,114 @@ def _paragraphs(body: str) -> list[str]:
     return [xml_safe(ln.strip()) for ln in body.splitlines() if ln.strip()]
 
 
+# --- code listings on a slide: a syntax-highlighted, small, monospace box off to the side ----
+# A listing reads as code only in monospace with highlighting — as body-font bullets it is just
+# noise. pygments does the tokenising so every language the docs use (VBA, C#, C, ATP-ish) colours
+# without a per-language table here; colours are chosen to read on a light slide.
+_CODE_FONT = "Consolas"
+_CODE_PT = 10.5
+_CODE_BOX_LINES = 26  # a listing longer than this overflows even a small box -> speaker notes
+
+
+def _code_blocks(bdy: str) -> list[tuple[str, str]]:
+    """``(language, code)`` for each fenced block; language is the fence info string or ''."""
+    out: list[tuple[str, str]] = []
+    buf: list[str] = []
+    lang, in_code = "", False
+    for raw in bdy.splitlines():
+        if raw.strip().startswith("```"):
+            if in_code:
+                out.append((lang, "\n".join(buf)))
+                buf, lang = [], ""
+            else:
+                lang = raw.strip()[3:].strip()
+            in_code = not in_code
+            continue
+        if in_code:
+            buf.append(raw.rstrip("\n"))
+    if in_code and buf:
+        out.append((lang, "\n".join(buf)))
+    return out
+
+
+def _strip_code_fences(bdy: str) -> str:
+    """The body with fenced code removed — the prose that becomes bullets, code handled apart."""
+    out, in_code = [], False
+    for raw in bdy.splitlines():
+        if raw.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if not in_code:
+            out.append(raw)
+    return "\n".join(out)
+
+
+def _code_color(ttype: Any) -> Any:
+    from pptx.dml.color import RGBColor
+    from pygments.token import Comment, Keyword, Name, Number, Operator, String, Token
+
+    rgb = cast("Any", RGBColor)  # python-pptx ships an untyped __init__
+    palette = {
+        Keyword: rgb(0x00, 0x5C, 0xC5),
+        Name.Function: rgb(0x6F, 0x42, 0xC1),
+        Name.Class: rgb(0x6F, 0x42, 0xC1),
+        Name.Builtin: rgb(0x00, 0x5C, 0xC5),
+        String: rgb(0x0A, 0x7D, 0x3B),
+        Number: rgb(0x0B, 0x76, 0x8D),
+        Comment: rgb(0x6A, 0x73, 0x7D),
+        Operator: rgb(0x40, 0x40, 0x40),
+    }
+    t = ttype
+    while t is not Token:
+        if t in palette:
+            return palette[t]
+        t = t.parent
+    return rgb(0x1A, 0x1A, 0x1A)
+
+
+def _fill_code_frame(tf: Any, code: str, lang: str) -> None:
+    """Fill a text frame with syntax-highlighted, monospace code — one paragraph per line, one
+    coloured run per token. A frame the caller has sized; pygments does the lexing."""
+    from pptx.dml.color import RGBColor
+    from pptx.util import Pt
+    from pygments import lex
+    from pygments.lexers import get_lexer_by_name, guess_lexer
+    from pygments.util import ClassNotFound
+
+    lexer = None
+    with suppress(ClassNotFound):
+        lexer = get_lexer_by_name(lang) if lang else guess_lexer(code)
+    if lexer is None:
+        with suppress(ClassNotFound):
+            lexer = guess_lexer(code)
+
+    tf.word_wrap = True
+    tf.clear()
+    para = tf.paragraphs[0]
+    started = False
+
+    def new_para() -> Any:
+        nonlocal started
+        p = para if not started else tf.add_paragraph()
+        started = True
+        return p
+
+    p = new_para()
+    tokens = lex(code, lexer) if lexer is not None else [(None, code)]
+    for ttype, value in tokens:
+        color = _code_color(ttype) if ttype is not None else cast("Any", RGBColor)(0x1A, 0x1A, 0x1A)
+        parts = value.split("\n")
+        for i, seg in enumerate(parts):
+            if i:  # the token spanned a newline -> start the next line
+                p = new_para()
+            if seg:
+                r = p.add_run()
+                r.text = seg
+                r.font.name = _CODE_FONT
+                r.font.size = Pt(_CODE_PT)
+                r.font.color.rgb = color
+
+
 def export_report(
     *,
     title: str,
@@ -245,7 +353,8 @@ def export_report(
             f"report cites {len(violations)} chunk(s) outside its evidence set: "
             + ", ".join(f"D:{c.doc_id}#{c.chunk_id}" for c in violations[:10])
         )
-    secs, refs = _numbered(title, subtitle, secs, ref_targets, evidence)
+    # Slides carry their sources on a References slide, not stamped on every bullet.
+    secs, refs = _numbered(title, subtitle, secs, ref_targets, evidence, cite=(fmt != "pptx"))
     meta = [x for x in (f"Request: {request}" if request else "",
                         f"For: {requested_by}" if requested_by else "",
                         f"Model: {model}" if model else "",
@@ -273,6 +382,7 @@ def _numbered(
     ref_targets: Mapping[tuple[int, int], tuple[str, str]] | None,
     evidence: set[tuple[int, int]],
     base_url: str = "",
+    cite: bool = True,
 ) -> tuple[list[tuple[str, str, list[str]]], list[str]]:
     """Bodies with inline citations turned into ``[1]`` markers, plus the numbered reference list.
 
@@ -284,7 +394,10 @@ def _numbered(
     from . import report
 
     numbering, ordered = report._collect_numbering([title, subtitle, *(b for _h, b, _i in secs)])
-    bodies = [(head, report._cite_md(body, numbering), imgs) for head, body, imgs in secs]
+    # `cite=False` strips the inline markers (slides carry attribution on a References slide, not
+    # on every bullet); otherwise citations become numbered [1] markers keyed to the References.
+    render = report._cite_md if cite else (lambda b, _n: report.strip_citations(b))
+    bodies = [(head, render(body, numbering), imgs) for head, body, imgs in secs]
     refs = [label for _href, label in report._references(ordered, base_url, ref_targets)]
     # evidence that was supplied but never cited still belongs in the list, after the cited ones
     cited = {(c.doc_id, c.chunk_id) for c in ordered}
@@ -712,7 +825,15 @@ def _to_pptx(
                 divider.shapes.title.text = xml_safe(heading)
             for extra in _content_holders(divider):
                 extra._element.getparent().remove(extra._element)
-        points = _points(_strip_table(bdy), code_limit=_SLIDE_CODE_LINES)
+        # Code goes in its own highlighted side box, not into the bullets — so strip fenced
+        # code out of the prose the points are built from. A listing that fits the box is shown;
+        # a longer one still falls through to the speaker notes (the full body below).
+        code_here = next(
+            ((lang, c) for lang, c in _code_blocks(bdy)
+             if 0 < len(c.strip().splitlines()) <= _CODE_BOX_LINES),
+            None,
+        )
+        points = _points(_strip_code_fences(_strip_table(bdy)), code_limit=_SLIDE_CODE_LINES)
         figs = [(sha, figure_map[sha]) for sha in sec_imgs if sha in figure_map]
         head = xml_safe(heading) or xml_safe(title)
         want = layouts[idx] if idx < len(layouts) else ""
@@ -791,7 +912,9 @@ def _to_pptx(
         chunks = _slide_chunks(points)
         for n, chunk in enumerate(chunks):
             pair = figs[0] if (n == 0 and figs and len(chunk) <= _SLIDE_BULLETS) else None
-            layout = two_layout if pair is not None else body_layout
+            # code shares the second holder with figures; a figure wins it, code takes it otherwise
+            code_slot = code_here if (n == 0 and pair is None and code_here) else None
+            layout = two_layout if (pair is not None or code_slot is not None) else body_layout
             slide = prs.slides.add_slide(layout)
             if slide.shapes.title is not None:
                 slide.shapes.title.text = head if n == 0 else f"{head} (cont.)"
@@ -806,6 +929,8 @@ def _to_pptx(
                 else:
                     _place_picture(prs, slide, path)
                 placed.add(sha)
+            elif code_slot is not None and len(holders) > 1:
+                _fill_code_frame(holders[1].text_frame, code_slot[1], code_slot[0])  # code beside
             for extra in holders[2:]:  # unused placeholders would show prompt text
                 extra._element.getparent().remove(extra._element)
             # A table in a section WITHOUT a figure still has to render: _strip_table keeps it

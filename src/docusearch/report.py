@@ -446,6 +446,16 @@ def _cite_md(text: str, numbering: dict[tuple[int, int], int]) -> str:
     return _CITE_RE.sub(repl, text)
 
 
+def strip_citations(text: str) -> str:
+    """Remove inline citation tags entirely, for a format that carries attribution in a
+    References section instead of on every line. A slide bullet stamped ``[1]`` (or worse,
+    ``[D:12#5]``) on every point reads badly; the References slide is the provenance."""
+    out = _CITE_RE.sub("", text)
+    out = re.sub(r"[ \t]{2,}", " ", out)  # close the gap the tag left
+    out = re.sub(r"\s+([.,;:)])", r"\1", out)  # no space before punctuation
+    return out
+
+
 def _cite_html(escaped: str, numbering: dict[tuple[int, int], int]) -> str:
     """Replace citation tags (which survive HTML-escaping intact) with superscript links."""
 
