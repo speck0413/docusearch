@@ -220,7 +220,12 @@ def _paragraphs(body: str) -> list[str]:
 # without a per-language table here; colours are chosen to read on a light slide.
 _CODE_FONT = "Consolas"
 _CODE_PT = 10.5
-_CODE_BOX_LINES = 26  # a listing longer than this overflows even a small box -> speaker notes
+_CODE_BOX_LINES = 36  # a listing longer than this overflows even a small box -> speaker notes
+
+# A hand-written footnote marker on a slide bullet — " [1]", "[12]" after a clause. Removed for
+# slides (attribution is the References slide) but only when it trails text or punctuation, so a
+# genuine "[1]" list label at the very start of a line is left alone.
+_SLIDE_FOOTNOTE_RE = re.compile(r"(?<=\S)\s*\[\d{1,3}\](?=[\s.,;:)\]]|$)")
 
 
 def _code_blocks(bdy: str) -> list[tuple[str, str]]:
@@ -394,9 +399,13 @@ def _numbered(
     from . import report
 
     numbering, ordered = report._collect_numbering([title, subtitle, *(b for _h, b, _i in secs)])
-    # `cite=False` strips the inline markers (slides carry attribution on a References slide, not
-    # on every bullet); otherwise citations become numbered [1] markers keyed to the References.
-    render = report._cite_md if cite else (lambda b, _n: report.strip_citations(b))
+    # `cite=False` (slides) strips the inline markers — attribution goes on the References slide,
+    # not on every bullet. Strip BOTH docusearch's [D:..]/[GK] tags AND any hand-written [1]/[2]
+    # footnote markers a model added, which is what still made bullets look cited.
+    def _clean(body: str, _n: dict[tuple[int, int], int]) -> str:
+        return _SLIDE_FOOTNOTE_RE.sub("", report.strip_citations(body)).strip()
+
+    render = report._cite_md if cite else _clean
     bodies = [(head, render(body, numbering), imgs) for head, body, imgs in secs]
     refs = [label for _href, label in report._references(ordered, base_url, ref_targets)]
     # evidence that was supplied but never cited still belongs in the list, after the cited ones
