@@ -1,0 +1,16 @@
+{
+  "enabledMcpjsonServers": [
+    "docusearch"
+  ],
+  "permissions": {
+    "allow": [
+      "mcp__docusearch__search_docs",
+      "mcp__docusearch__get_document",
+      "mcp__docusearch__related_documents",
+      "mcp__docusearch__catalog_stats",
+      "mcp__docusearch__build_report",
+      "mcp__docusearch__report_format",
+      "mcp__docusearch__get_image"
+    ]
+  }
+}

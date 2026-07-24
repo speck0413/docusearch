@@ -258,6 +258,41 @@ Content should be authored for its target — a deck needs short bullets, a spre
 fact per row, a document takes prose. The MCP `report_format` tool states the configured
 default format and that guidance so an agent reads it *before* writing.
 
+### Choosing your report tooling: `build_report` vs. harness-native
+
+`build_report` is one of two ways an agent can turn grounded research into a deliverable.
+Every major harness can also render documents itself — Claude Code via document skills,
+Codex via its plugin suite, Copilot CLI by writing python-pptx/openpyxl/ReportLab scripts.
+What only `build_report` provides: **machine-verified citations that refuse to render when
+fabricated**, a **hosted URL** with a config-driven retention policy, corporate `.pptx`
+template inheritance, and zero client-side rendering dependencies. What harness-native
+tooling wins on: **design freedom** for bespoke material (executive decks, dashboards,
+one-off visuals).
+
+The policy:
+
+- **`html` / `html-slide` reports always use `build_report`.** The server's citation-verified
+  renderer is the only HTML path (this may be revisited later).
+- **`pptx` / `docx` / `xlsx` / `pdf` are operator-selectable** at install time: `build_report`
+  (default) or the harness's native tooling.
+- **The Copilot CLI harness always uses `build_report`** regardless of the format choice — it
+  ships no renderer, no HTML→PDF path, and no hosting of its own.
+- **A harness-native deliverable must pass `verify_citations` before it ships.** The MCP tool
+  (and `POST /v1/citations/verify`) applies the same two guards `build_report` enforces —
+  every cited pair must exist in the catalog, and when the caller declares the evidence pairs
+  it retrieved, every citation must be among them — and returns resolved href+label pairs for
+  the document's reference section. This closes the gap where an agent rendering its own
+  pptx/docx got no citation enforcement at all.
+
+The install-time choice is recorded in the agent contract (the same block `install.sh`
+already rewrites for the output format); either path can be requested per-report.
+
+`install.sh` also asks for a **response/report verbosity** (concise / standard / detailed)
+and writes it into the same agent-contract block — conversation style is personal, so the
+contract additionally tells agents: when a user asks about style or formatting options,
+present the menu (themes, verbosity, output formats) and apply their choice per-report or
+persistently.
+
 ## Central MCP server (one server for the whole company)
 
 `docusearch serve` exposes the catalog over **REST + MCP** on one lightweight process (§10). The

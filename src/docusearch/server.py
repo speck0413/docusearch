@@ -549,6 +549,48 @@ class Service:
             out["report"] = rendered
         return out
 
+    def verify_citations(
+        self, text: str, evidence: list[list[int]] | None = None, *, base_url: str = ""
+    ) -> dict[str, Any]:
+        """Standalone citation check for a deliverable rendered OUTSIDE ``build_report``
+        (a harness-native pptx/docx/html), applying the same two guards the report builder
+        enforces: every ``[D:doc#chunk]`` pair must exist in the catalog (``unknown``
+        otherwise), and — when the caller declares the ``evidence`` pairs it actually
+        retrieved — every cited pair must be among them (``outside_evidence`` otherwise,
+        the R-CIT-1 anti-hallucination guard). ``resolved`` carries each verified pair's
+        href + label so the caller can embed working references in its own document."""
+        cfg = self.config
+        parsed = citations.parse(text)
+        pairs = {
+            (c.doc_id, c.chunk_id)
+            for c in parsed
+            if c.kind == "doc" and c.doc_id is not None and c.chunk_id is not None
+        }
+        targets = report.reference_targets(cfg.paths.db_path, pairs, base_url=base_url)
+        unknown = sorted(p for p in pairs if p not in targets)
+        outside: list[str] = []
+        if evidence:
+            allowed = {(int(d), int(c)) for d, c in evidence}
+            outside = [c.raw for c in citations.verify(text, allowed)]
+        resolved = [
+            {
+                "cite": f"[D:{d}#{c}]",
+                "doc_id": d,
+                "chunk_id": c,
+                "href": targets[(d, c)][0],
+                "label": targets[(d, c)][1],
+            }
+            for d, c in sorted(targets)
+        ]
+        return {
+            "ok": not unknown and not outside,
+            "citations": len(pairs),
+            "gk": sum(1 for c in parsed if c.kind == "GK"),
+            "unknown": [f"[D:{d}#{c}]" for d, c in unknown],
+            "outside_evidence": outside,
+            "resolved": resolved,
+        }
+
     def build_report(
         self, spec: dict[str, Any], *, base_url: str, fmt: str = "md", asset_dir: str = ""
     ) -> str | bytes:
@@ -1649,6 +1691,11 @@ class ReportRequest(BaseModel):
     trace: dict[str, Any] | None = None  # generation log (not citation-verified)
 
 
+class VerifyCitationsRequest(BaseModel):
+    text: str  # the deliverable's body, with [D:doc#chunk] / [GK] tags
+    evidence: list[list[int]] | None = None  # pairs actually retrieved, when the caller has them
+
+
 def _mismatch_409(err: ModelMismatchError) -> HTTPException:
     return HTTPException(
         status_code=409,
@@ -2532,6 +2579,18 @@ def build_mcp(service: Service, config: Config) -> Any:
         out["authored_for"] = report_export.guidance(fmt)
         return out
 
+    @mcp.tool()
+    def verify_citations(text: str, evidence: list[list[int]] | None = None) -> dict[str, Any]:
+        """Check the citations in a deliverable you are rendering YOURSELF (a pptx/docx/html
+        built with your own tooling instead of build_report) — the same guards build_report
+        enforces, without producing a file. Pass the full body text containing [D:doc#chunk]
+        and [GK] tags; pass `evidence` as the [[doc_id, chunk_id], ...] pairs you actually
+        retrieved so hallucinated-but-plausible citations are caught, not just nonexistent
+        ones. Returns {ok, citations, gk, unknown, outside_evidence, resolved} — `resolved`
+        carries each verified citation's href + label to embed as references. Do not ship a
+        deliverable while `ok` is false."""
+        return service.verify_citations(text, evidence, base_url=base)
+
     return mcp
 
 
@@ -2792,6 +2851,12 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(status_code=403, detail=str(err)) from err
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
+
+    @app.post("/v1/citations/verify")
+    def verify_citations_route(req: VerifyCitationsRequest, request: Request) -> dict[str, Any]:
+        """Verify citations in an externally-rendered deliverable (no report is built)."""
+        base = str(request.base_url).rstrip("/")
+        return service.verify_citations(req.text, req.evidence, base_url=base)
 
     @app.post("/v1/reports")
     def reports_route(req: ReportRequest, request: Request) -> dict[str, Any]:

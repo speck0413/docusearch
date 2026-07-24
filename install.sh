@@ -75,8 +75,22 @@ case "${mode:-1}" in
     ;;
 esac
 
-# --- 5. Write the two MCP client configs ----------------------------------------------
-cat > .mcp.json <<JSON
+# --- 4b. Which harness(es) will this workspace use? -------------------------------------
+echo
+echo "Which AI harness(es) will use docusearch in this workspace? (space-separated for several)"
+echo "  1) Claude Code"
+echo "  2) Codex CLI"
+echo "  3) Copilot CLI / VS Code Copilot"
+printf "Select [1 2 3]: "; read -r harnesses
+harnesses="${harnesses:-1 2 3}"
+H_CLAUDE=0; H_CODEX=0; H_COPILOT=0
+case " $harnesses " in *" 1 "*) H_CLAUDE=1 ;; esac
+case " $harnesses " in *" 2 "*) H_CODEX=1 ;; esac
+case " $harnesses " in *" 3 "*) H_COPILOT=1 ;; esac
+
+# --- 5. Write the per-harness client configs --------------------------------------------
+if [ "$H_CLAUDE" -eq 1 ]; then
+  cat > .mcp.json <<JSON
 {
   "mcpServers": {
     "docusearch": {
@@ -86,9 +100,43 @@ cat > .mcp.json <<JSON
   }
 }
 JSON
+  # Pre-approve the docusearch tools so headless (-p) runs never stall on a prompt.
+  # NOTE: these entries only take effect once the workspace itself is trusted — run
+  # `claude` here interactively once and accept the trust dialog.
+  mkdir -p .claude
+  if [ ! -f .claude/settings.json ]; then
+    cat > .claude/settings.json <<'JSON'
+{
+  "enabledMcpjsonServers": ["docusearch"],
+  "permissions": {
+    "allow": [
+      "mcp__docusearch__search_docs",
+      "mcp__docusearch__get_document",
+      "mcp__docusearch__related_documents",
+      "mcp__docusearch__catalog_stats",
+      "mcp__docusearch__report_format",
+      "mcp__docusearch__build_report",
+      "mcp__docusearch__verify_citations",
+      "mcp__docusearch__get_image",
+      "mcp__docusearch__describe_image",
+      "mcp__docusearch__help",
+      "mcp__docusearch__list_stores"
+    ]
+  }
+}
+JSON
+    echo "✓ Claude Code: wrote .mcp.json + .claude/settings.json (tool pre-approval)"
+    echo "  ! One-time step: run 'claude' here interactively and accept the trust dialog,"
+    echo "    or the permissions.allow entries are ignored in headless mode."
+  else
+    echo "✓ Claude Code: wrote .mcp.json  (.claude/settings.json exists — merge the docusearch"
+    echo "  enabledMcpjsonServers + permissions.allow entries yourself; see README)"
+  fi
+fi
 
-mkdir -p .vscode
-cat > .vscode/mcp.json <<JSON
+if [ "$H_COPILOT" -eq 1 ]; then
+  mkdir -p .vscode
+  cat > .vscode/mcp.json <<JSON
 {
   "servers": {
     "docusearch": {
@@ -98,8 +146,42 @@ cat > .vscode/mcp.json <<JSON
   }
 }
 JSON
+  echo "✓ Copilot: wrote .vscode/mcp.json (VS Code picks it up on reload)"
+  echo "  CLI invocation: copilot --additional-mcp-config '{\"mcpServers\":{\"docusearch\":{\"type\":\"http\",\"url\":\"${URL}\"}}}' --allow-tool 'docusearch(*)'"
+fi
 
-echo "✓ Wrote .mcp.json and .vscode/mcp.json  ->  ${URL}"
+if [ "$H_CODEX" -eq 1 ]; then
+  CODEX_BLOCK="
+# --- added by docusearch install.sh ($(date +%Y-%m-%d)) ---
+# workspace-write + network_access are REQUIRED: codex's sandbox otherwise blocks
+# even localhost connections, and headless exec auto-cancels gated MCP calls.
+sandbox_mode = \"workspace-write\"
+approval_policy = \"never\"
+
+[sandbox_workspace_write]
+network_access = true
+
+[mcp_servers.docusearch]
+url = \"${URL%/mcp}/mcp\"
+enabled = true
+"
+  if [ -f "$HOME/.codex/config.toml" ] && ! grep -q 'mcp_servers.docusearch' "$HOME/.codex/config.toml"; then
+    echo
+    echo "Codex CLI needs these lines in ~/.codex/config.toml (global, affects all Codex sessions):"
+    echo "$CODEX_BLOCK"
+    printf "Append them now? (y/N) "; read -r codexok
+    if [ "${codexok:-n}" = "y" ] || [ "${codexok:-n}" = "Y" ]; then
+      printf '%s\n' "$CODEX_BLOCK" >> "$HOME/.codex/config.toml"
+      echo "✓ Codex: appended docusearch block to ~/.codex/config.toml"
+    else
+      echo "  Skipped — add the block yourself before using docusearch from Codex."
+    fi
+  else
+    echo "✓ Codex: ~/.codex/config.toml already references docusearch (or does not exist — add the block after installing Codex)"
+  fi
+fi
+
+echo "✓ MCP endpoint for this workspace: ${URL}"
 
 # --- 5b. Preferred report output format (written into CLAUDE.md) -----------------------
 echo
@@ -138,10 +220,60 @@ if [ -n "$DEFAULT_FMT" ] && [ -f docusearch.yaml ]; then
   fi
 fi
 
+# --- 5b2. Response & report style ---------------------------------------------------------
+echo
+echo "Preferred response/report verbosity for this workspace?"
+echo "  1) concise  — lead with the answer; tables over prose; minimal background"
+echo "  2) standard — balanced (default)"
+echo "  3) detailed — full explanations, background, and caveats spelled out"
+printf "Select 1-3 [2]: "; read -r vsel
+case "${vsel:-2}" in
+  1) STYLE_LINE="Verbosity: CONCISE. Lead with the answer; prefer tables to prose; omit background the reader did not ask for." ;;
+  3) STYLE_LINE="Verbosity: DETAILED. Spell out reasoning, background, and caveats in full prose." ;;
+  *) STYLE_LINE="Verbosity: STANDARD. Balance brevity with completeness." ;;
+esac
+STYLE_LINE="$STYLE_LINE
+Style is personal: if the user asks about style or formatting options, present the menu —
+report themes (midnight / paper / slate / contrast), verbosity (concise / standard /
+detailed), and output formats (md / html / html-slide / pdf / docx / pptx / xlsx) — and
+apply their choice for that report or, if they say so, from then on."
+
+# --- 5c. Report tooling choice (policy: html always docusearch; Copilot always docusearch) ---
+# For pptx/docx/xlsx/pdf the operator may prefer the harness's own document tooling.
+TOOLING="docusearch"
+case "$DEFAULT_FMT" in
+  docx|xlsx|pptx|pdf)
+    if [ "$H_COPILOT" -eq 1 ] && [ "$H_CLAUDE" -eq 0 ] && [ "$H_CODEX" -eq 0 ]; then
+      echo "Report tooling: docusearch build_report (Copilot CLI has no native renderer — policy)"
+    else
+      echo
+      echo "Who should render $DEFAULT_FMT reports by default?"
+      echo "  1) docusearch build_report — citations machine-verified, file hosted on the server (default)"
+      echo "  2) harness-native tooling  — the AI renders the document itself; it must then pass"
+      echo "     verify_citations before delivering (Copilot CLI always uses docusearch regardless)"
+      printf "Select 1/2 [1]: "; read -r tsel
+      [ "${tsel:-1}" = "2" ] && TOOLING="native"
+    fi
+    ;;
+  *) : ;;  # html/html-slide/md: always docusearch build_report (policy)
+esac
+
 if [ "$INLINE" -eq 1 ]; then
   FMT_BLOCK='**Answer inline.** Reply in the conversation as well-structured Markdown, with
 every citation resolved to a real document. This mode writes **no** report file — only call
 `build_report` if the user explicitly asks for a file.'
+elif [ "$TOOLING" = "native" ]; then
+  FMT_BLOCK="**Reports in ${DEFAULT_FMT} are rendered by YOUR OWN document tooling** (operator's
+choice) — but grounding rules do not relax:
+
+1. Research through search_docs / get_document as usual; cite every catalog fact
+   [D:doc#chunk], general knowledge [GK].
+2. Render the ${DEFAULT_FMT} with your native tooling.
+3. **Before delivering, call verify_citations(text, evidence=[[doc_id, chunk_id], ...])**
+   with the full body text and the pairs you actually retrieved. Do not ship while ok=false.
+   Use its 'resolved' href+label pairs for the references section.
+4. html / html-slide / md deliverables are the exception: those ALWAYS go through
+   build_report. On the Copilot CLI harness, ALL formats go through build_report."
 else
   FMT_BLOCK='**Reports are files, and the server writes them — you deliver the link.**
 
@@ -175,6 +307,10 @@ case "${fmt:-1}" in
     fi ;;
 esac
 
+FMT_BLOCK="$FMT_BLOCK
+
+$STYLE_LINE"
+
 if [ -f CLAUDE.md ] && grep -q 'docusearch:output-format:start' CLAUDE.md; then
   FMT_BLOCK="$FMT_BLOCK" perl -0777 -i -pe '
     my $b = $ENV{FMT_BLOCK};
@@ -184,6 +320,15 @@ if [ -f CLAUDE.md ] && grep -q 'docusearch:output-format:start' CLAUDE.md; then
   echo "✓ Report output format written into CLAUDE.md"
 else
   echo "! Could not find the output-format markers in CLAUDE.md — left unchanged." >&2
+fi
+
+# Codex and the Copilot CLI read AGENTS.md, not CLAUDE.md — keep them identical so no
+# harness gets different instructions (they must not diverge).
+if [ "$H_CODEX" -eq 1 ] || [ "$H_COPILOT" -eq 1 ]; then
+  if [ -f CLAUDE.md ]; then
+    cp CLAUDE.md AGENTS.md
+    echo "✓ AGENTS.md written (identical copy of CLAUDE.md for Codex / Copilot CLI)"
+  fi
 fi
 
 # --- 6. What to do next ----------------------------------------------------------------
